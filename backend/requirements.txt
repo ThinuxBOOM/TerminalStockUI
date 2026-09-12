@@ -6,6 +6,9 @@ httpx>=0.27
 yfinance>=0.2.40
 tenacity>=8.2
 cryptography>=42.0
+numpy>=1.26
+pandas>=2.0
+scikit-learn>=1.3
 pytest>=8.0
 
 # --- Serverless (Vercel) vs Docker profiles ---
