@@ -1,0 +1,93 @@
+"""Market-data routers: quote + bars. Every response carries provenance."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from backend.market_data.health import market_state as _calendar_market_state
+from backend.market_data.providers.base import ProviderError
+from backend.market_data.service import MarketDataService
+from backend.api.deps import get_market_service, get_registry
+from backend.api.schemas import BarsResponse, QuoteResponse
+
+router = APIRouter(prefix="/api/market_data", tags=["market_data"])
+
+#: Contract alias router: /api/securities/{instrument_id}/quote|bars
+securities_router = APIRouter(prefix="/api/securities", tags=["securities"])
+
+
+def _enrich_market_state(out: dict) -> dict:
+    """M6/M7: layer exchange calendar (open/closed) over service freshness.
+
+    Service owns freshness (open/delayed/stale); here we upgrade to a
+    calendar-aware state via health.market_state(mic=...) so closed markets
+    (weekend/holiday/off-hours, XSHG lunch -> closed) are correctly
+    identified. Never breaks the contract: falls back to the service value
+    on any failure. Currency + exchange are already surfaced via
+    out["currency"] and out["instrument"].
+    """
+    try:
+        inst = out.get("instrument") or {}
+        mic = inst.get("exchange_mic") if isinstance(inst, dict) else None
+        prov = out.get("provenance") or {}
+        as_of_raw = prov.get("as_of") if isinstance(prov, dict) else None
+        if not mic or not as_of_raw:
+            return out
+        from datetime import datetime as _dt
+        as_of = _dt.fromisoformat(as_of_raw) if isinstance(as_of_raw, str) else as_of_raw
+        delay = prov.get("delay_minutes", 15) if isinstance(prov, dict) else 15
+        out["market_state"] = _calendar_market_state(as_of, delay_minutes=int(delay), mic=mic)
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/quote", response_model=QuoteResponse)
+def quote(
+    symbol: str = Query(..., min_length=1, description="e.g. AAPL, 600519.SS, MC.PA"),
+    market: str | None = Query(default=None, description="Optional MIC scope"),
+    svc: MarketDataService = Depends(get_market_service),
+):
+    """GET /api/market_data/quote?symbol=AAPL"""
+    try:
+        return _enrich_market_state(svc.get_quote(symbol, market))
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/bars", response_model=BarsResponse)
+def bars(
+    symbol: str = Query(..., min_length=1),
+    timeframe: str = Query(default="1d"),
+    limit: int = Query(default=30, ge=1, le=250),
+    svc: MarketDataService = Depends(get_market_service),
+):
+    return svc.get_bars(symbol, timeframe, limit)
+
+
+@securities_router.get("/{instrument_id}/quote", response_model=QuoteResponse)
+def security_quote(
+    instrument_id: str,
+    svc: MarketDataService = Depends(get_market_service),
+    registry=Depends(get_registry),
+):
+    inst = registry.get_by_id(instrument_id)
+    if inst is None:
+        raise HTTPException(status_code=404, detail="unknown instrument_id")
+    return _enrich_market_state(svc.get_quote(inst.provider_symbol or inst.exchange_symbol, inst.exchange_mic))
+
+
+@securities_router.get("/{instrument_id}/bars", response_model=BarsResponse)
+def security_bars(
+    instrument_id: str,
+    timeframe: str = Query(default="1d"),
+    limit: int = Query(default=30, ge=1, le=250),
+    svc: MarketDataService = Depends(get_market_service),
+    registry=Depends(get_registry),
+):
+    inst = registry.get_by_id(instrument_id)
+    if inst is None:
+        raise HTTPException(status_code=404, detail="unknown instrument_id")
+    out = svc.get_bars(inst.provider_symbol or inst.exchange_symbol, timeframe, limit)
+    out["instrument_id"] = instrument_id
+    return out

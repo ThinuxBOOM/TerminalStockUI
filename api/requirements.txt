@@ -1,0 +1,14 @@
+# Vercel serverless profile — minimal subset of backend/requirements.txt.
+# Deploy root: onemarket-analyzer/ ; entry: api/index.py -> backend.api.main:app via Mangum.
+# NOTE: no Redis hard dep. Cache defaults to in-memory on Vercel; set
+# UPSTASH_REDIS_URL (or REDIS_URL) optionally to enable Redis (lazy import).
+fastapi>=0.110,<1
+uvicorn>=0.29
+pydantic>=2.5
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
+mangum>=0.17
+httpx>=0.27
+yfinance>=0.2.40
+tenacity>=8.2
+cryptography>=42.0

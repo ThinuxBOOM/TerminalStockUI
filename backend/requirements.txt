@@ -1,0 +1,17 @@
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29
+pydantic>=2.5
+SQLAlchemy>=2.0
+httpx>=0.27
+yfinance>=0.2.40
+tenacity>=8.2
+cryptography>=42.0
+pytest>=8.0
+
+# --- Serverless (Vercel) vs Docker profiles ---
+# Docker Compose (default): QueuePool + local redis via REDIS_URL; psycopg optional.
+# Vercel serverless (see api/requirements.txt + api/index.py): NullPool when
+# DATABASE_URL targets Supabase/pgbouncer (:6543) or APP_ENV=production; memory
+# cache default, UPSTASH_REDIS_URL/REDIS_URL optional (lazy import, no hard dep).
+mangum>=0.17  # Vercel ASGI adapter (api/index.py: handler = Mangum(app, lifespan='off'))
+psycopg[binary]>=3.1  # Supabase Postgres driver (required on Vercel when DATABASE_URL is set)

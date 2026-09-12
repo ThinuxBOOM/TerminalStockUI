@@ -1,0 +1,188 @@
+"""GET /api/analytics/{symbol} — deterministic analytics bundle (Milestone 2 modules).
+
+Technical indicators run on offline deterministic bars; statement-based
+families (fundamentals/quality/valuation) go through the existing
+backend/analytics/ modules with an empty statement mapping, so they return
+the modules' own "unavailable" results (formula + source_fields +
+quality_flag + reason) instead of fabricated numbers. No network, no AI.
+Every response carries the provenance envelope + timestamp.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pandas as pd
+from fastapi import APIRouter, Depends
+
+from backend.analytics.common import MetricResult
+from backend.analytics.fundamentals import (
+    debt_to_assets,
+    debt_to_equity,
+    earnings_growth,
+    gross_margin,
+    interest_coverage,
+    net_margin,
+    operating_margin,
+    revenue_growth,
+    roe,
+    roic,
+)
+from backend.analytics.quality import altman_z, beneish_m, dupont, piotroski_score
+from backend.analytics.technical import (
+    atr,
+    bollinger,
+    ema,
+    is_volume_anomaly,
+    macd,
+    rsi,
+    sma,
+    volatility,
+)
+from backend.analytics.valuation import dcf_sensitivity, peer_compare, wacc
+from backend.api.deps import get_market_service
+from backend.market_data.service import MarketDataService
+
+router = APIRouter(prefix="/api/analytics", tags=["analytics"])
+
+BAR_LIMIT = 120
+EMPTY_STATEMENTS: dict = {}
+NOTE = (
+    "Statement feed not wired in M3: fundamentals/quality/valuation report "
+    "the analytics modules' own 'unavailable' results (no fabricated inputs)."
+)
+
+
+def _safe_number(value) -> float | bool | None:
+    if isinstance(value, bool):
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(number, float) and (math.isnan(number) or math.isinf(number)):
+        return None
+    return number
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, (int, float)):
+        return _safe_number(value)
+    if isinstance(value, pd.Series):
+        valid = value.dropna()
+        last_idx = str(valid.index[-1]) if len(valid) else None
+        return {
+            "kind": "series",
+            "latest": _safe_number(valid.iloc[-1]) if len(valid) else None,
+            "last_index": last_idx,
+            "n_points": int(len(valid)),
+        }
+    if isinstance(value, pd.DataFrame):
+        latest: dict = {}
+        if len(value):
+            row = value.iloc[-1]
+            for col in value.columns:
+                latest[str(col)] = _json_safe(row[col])
+        return {
+            "kind": "frame",
+            "columns": [str(c) for c in value.columns],
+            "latest": latest,
+            "n_rows": int(len(value)),
+        }
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def _serialize(result: MetricResult) -> dict:
+    return {
+        "value": _json_safe(result.value),
+        "formula": result.formula,
+        "source_fields": list(result.source_fields),
+        "quality_flag": result.quality_flag,
+        "reason": result.reason,
+    }
+
+
+def _technical_bundle(frame: pd.DataFrame) -> dict:
+    close, high, low, volume = frame["close"], frame["high"], frame["low"], frame["volume"]
+    return {
+        "sma_20": _serialize(sma(close, window=20)),
+        "ema_20": _serialize(ema(close, window=20)),
+        "rsi_14": _serialize(rsi(close, window=14)),
+        "macd": _serialize(macd(close)),
+        "bollinger_20": _serialize(bollinger(close, window=20)),
+        "atr_14": _serialize(atr(high, low, close, window=14)),
+        "volatility_21": _serialize(volatility(close, window=21)),
+        "volume_anomaly": _serialize(is_volume_anomaly(volume, window=20)),
+    }
+
+
+def _fundamentals_bundle() -> dict:
+    fin = EMPTY_STATEMENTS
+    return {
+        "revenue_growth": _serialize(revenue_growth(fin)),
+        "earnings_growth": _serialize(earnings_growth(fin)),
+        "gross_margin": _serialize(gross_margin(fin)),
+        "operating_margin": _serialize(operating_margin(fin)),
+        "net_margin": _serialize(net_margin(fin)),
+        "debt_to_equity": _serialize(debt_to_equity(fin)),
+        "debt_to_assets": _serialize(debt_to_assets(fin)),
+        "interest_coverage": _serialize(interest_coverage(fin)),
+        "roe": _serialize(roe(fin)),
+        "roic": _serialize(roic(fin)),
+    }
+
+
+def _quality_bundle() -> dict:
+    fin = EMPTY_STATEMENTS
+    return {
+        "piotroski": _serialize(piotroski_score(fin)),
+        "altman_z": _serialize(altman_z(fin)),
+        "beneish_m": _serialize(beneish_m(fin)),
+        "dupont": _serialize(dupont(fin)),
+    }
+
+
+def _valuation_bundle() -> dict:
+    return {
+        "wacc": _serialize(wacc(EMPTY_STATEMENTS)),
+        "dcf_sensitivity": _serialize(dcf_sensitivity(0, 0.05, [], [])),
+        "peer_compare": _serialize(peer_compare({}, [])),
+    }
+
+
+@router.get("/{symbol}")
+def get_analytics(
+    symbol: str,
+    svc: MarketDataService = Depends(get_market_service),
+) -> dict:
+    """Deterministic analytics for one symbol (technical live, statements unavailable)."""
+    sym = symbol.strip().upper()
+    bars = svc.get_bars(sym, timeframe="1d", limit=BAR_LIMIT)
+    rows = bars.get("bars", [])
+    frame = pd.DataFrame(
+        {
+            "open": [r["open"] for r in rows],
+            "high": [r["high"] for r in rows],
+            "low": [r["low"] for r in rows],
+            "close": [r["close"] for r in rows],
+            "volume": [float(r["volume"] or 0) for r in rows],
+        },
+        index=pd.to_datetime([r["ts"] for r in rows]),
+    )
+    provenance = dict(bars.get("provenance", {}))
+    return {
+        "symbol": sym,
+        "as_of": str(provenance.get("as_of")),
+        "provenance": provenance,
+        "technical": _technical_bundle(frame),
+        "fundamentals": _fundamentals_bundle(),
+        "quality": _quality_bundle(),
+        "valuation": _valuation_bundle(),
+        "note": NOTE,
+    }

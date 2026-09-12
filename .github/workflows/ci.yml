@@ -1,0 +1,76 @@
+# OneMarket Analyzer — CI (GitHub Actions)
+#
+# Spec: markdown.md §6 (testing & reliability) + §7 (v1 DoD).
+#   Backend gate:  python -m pytest backend/tests -q   (must stay green; stub data, no network)
+#   Frontend gate: npm run typecheck --prefix frontend (continue-on-error until node_modules
+#                  stabilizes — see note on the typecheck step).
+# Machine preflight: python scripts/deploy_check.py (stdlib-only, also runs here as a job).
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    name: backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Run backend tests
+        run: python -m pytest backend/tests -q
+
+  frontend:
+    name: frontend (typecheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          # TODO: switch to frontend/package-lock.json once a lockfile lands
+          # (until then install with `npm install`, not `npm ci`).
+          cache-dependency-path: frontend/package.json
+
+      - name: Install frontend deps
+        run: npm install --prefix frontend
+
+      # continue-on-error is TEMPORARY: typecheck stays advisory until
+      # node_modules/lockfile stabilizes in this repo (cf. NVM4306 note in
+      # README/docs/OPERATIONS.md). Remove it once `npm run typecheck` is
+      # green on a clean `npm ci` install.
+      - name: Typecheck frontend
+        run: npm run typecheck --prefix frontend
+        continue-on-error: true
+
+  deploy-check:
+    name: deploy preflight (stdlib-only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run deploy preflight
+        run: python scripts/deploy_check.py

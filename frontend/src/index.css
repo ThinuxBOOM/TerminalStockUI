@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-term-bg text-term-text font-mono antialiased;
+}
+
+.term-panel {
+  @apply bg-term-panel border border-term-border rounded-md;
+}
+
+.term-input {
+  @apply bg-term-bg border border-term-border rounded px-3 py-2 text-sm text-term-text placeholder-term-muted outline-none focus:border-term-green;
+}
+
+.term-btn {
+  @apply px-3 py-2 rounded text-sm font-semibold bg-term-green text-black hover:opacity-90 disabled:opacity-40;
+}
+
+.term-btn-ghost {
+  @apply px-3 py-2 rounded text-sm border border-term-border text-term-text hover:border-term-green;
+}
+
+.term-label {
+  @apply text-[11px] uppercase tracking-widest text-term-muted;
+}
+
+/* M8: visible keyboard focus everywhere (a11y). */
+:focus-visible {
+  outline: 2px solid #3ddc84;
+  outline-offset: 2px;
+}
+
+/* M8: loading shimmer for <Skeleton/> (pure CSS, no new deps). */
+.skeleton-shimmer {
+  background: linear-gradient(90deg, #1c2433 25%, #2a3448 50%, #1c2433 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* M8: responsive guard — long provenance strings / tables must wrap or
+ * scroll inside their panel, never push the page into horizontal overflow. */
+.term-panel {
+  overflow-wrap: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer {
+    animation: none;
+  }
+}

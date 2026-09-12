@@ -1,0 +1,8 @@
+# M7 FX requirements note — do NOT merge into backend/requirements.txt
+# (that file is owned by the base build; FX adds no new hard dependency).
+#
+# backend/market_data/fx/provider.py imports httpx LAZILY inside _fetch_raw,
+# so FX works fully offline on the deterministic ECB reference stub when
+# httpx is missing or the network fails. Any httpx 0.27+ satisfies the live
+# Frankfurter/ECB path (already covered by backend/requirements.txt):
+httpx>=0.27,<0.29  # pin note: optional at import time; stub covers offline

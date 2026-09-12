@@ -1,0 +1,12 @@
+# Optional SSE provider SDK (M6 SSE expansion).
+#
+# Install ONLY when live (non-stub) AKShare quotes are needed:
+#     pip install -r backend/market_data/providers/requirements-sse.txt
+#
+# The SSE chain works WITHOUT this package: AKShareProvider uses lazy import
+# and degrades to a clearly marked stub fallback (fallback_used=True) when
+# akshare is missing or the network fails. Do NOT add this to
+# backend/requirements.txt — SSE extras must stay opt-in so the deterministic
+# core has zero new hard deps.
+akshare>=1.12
+pandas>=2.0

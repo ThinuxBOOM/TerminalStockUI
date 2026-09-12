@@ -1,0 +1,288 @@
+"""Walk-forward backtest API: POST /api/backtest/run + GET /api/backtest/{symbol}.
+
+Each run fits drift/momentum/logistic baselines on train folds only
+(point-in-time labels, WalkForwardSplitter + assert_no_leakage guard) and
+scores the mean-ensemble with Brier/ECE + a reliability table. No AI, no
+network (deterministic stub bars). Runs are kept in an in-memory history;
+GET returns lightweight summaries without the full reliability tables.
+"""
+
+from __future__ import annotations
+
+import hashlib
+
+import numpy as np
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+from backend.api.deps import get_market_service
+from backend.forecasting.backtesting import WalkForwardSplitter, assert_no_leakage
+from backend.forecasting.calibration import (
+    brier_score,
+    calibration_error,
+    reliability_table,
+)
+from backend.forecasting.common import FORECAST_HORIZONS
+from backend.forecasting.features.features import (
+    FEATURE_VERSION,
+    build_features,
+    direction_label,
+    log_returns,
+)
+from backend.forecasting.models.historical_drift import HistoricalDriftBaseline
+from backend.forecasting.models.logistic import LogisticDirectionModel
+from backend.forecasting.models.momentum import MomentumBaseline
+from backend.forecasting.registry import ENSEMBLE_VERSION
+from backend.market_data.service import MarketDataService
+
+router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+
+_HISTORY: dict[str, list[dict]] = {}
+
+
+def reset_backtest_history() -> None:  # test hook
+    _HISTORY.clear()
+
+
+class BacktestRunRequest(BaseModel):
+    symbol: str = Field(min_length=1, description="e.g. AAPL")
+    horizons: list[int] = Field(default_factory=lambda: [5, 21, 63])
+    train_size: int = Field(default=100, ge=20, le=1000)
+    test_size: int = Field(default=21, ge=1, le=500)
+    gap: int = Field(default=5, ge=0, le=500)
+    n_bins: int = Field(default=10, ge=2, le=20)
+    limit: int = Field(default=250, ge=100, le=250)
+
+    @field_validator("horizons")
+    @classmethod
+    def _check_horizons(cls, value: list[int]) -> list[int]:
+        if not value:
+            raise ValueError("horizons must be non-empty")
+        bad = [h for h in value if int(h) not in FORECAST_HORIZONS]
+        if bad:
+            raise ValueError(
+                f"horizons must be a subset of {list(FORECAST_HORIZONS)}, got {value}"
+            )
+        return [int(h) for h in value]
+
+    @field_validator("symbol")
+    @classmethod
+    def _strip_symbol(cls, value: str) -> str:
+        text = value.strip().upper()
+        if not text:
+            raise ValueError("symbol must be non-empty")
+        return text
+
+
+def _reliability_records(table: pd.DataFrame) -> list[dict]:
+    out: list[dict] = []
+    for row in table.to_dict(orient="records"):
+        out.append(
+            {
+                "bin_low": float(row["bin_low"]),
+                "bin_high": float(row["bin_high"]),
+                "count": int(row["count"]),
+                "mean_predicted": None
+                if pd.isna(row["mean_predicted"])
+                else float(row["mean_predicted"]),
+                "fraction_positive": None
+                if pd.isna(row["fraction_positive"])
+                else float(row["fraction_positive"]),
+            }
+        )
+    return out
+
+
+def _evaluate_horizon(
+    features: pd.DataFrame,
+    closes_feat: pd.Series,
+    horizon: int,
+    train_size: int,
+    test_size: int,
+    gap: int,
+    n_bins: int,
+) -> dict:
+    labels_full = direction_label(closes_feat, int(horizon))
+    splitter = WalkForwardSplitter(
+        train_size=train_size, test_size=test_size, gap=gap
+    )
+    try:
+        folds = list(splitter.splits(len(features)))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    y_true: list[float] = []
+    y_prob: list[float] = []
+    n_folds_used = 0
+    for train_idx, test_idx in folds:
+        assert_no_leakage(train_idx, test_idx, gap)
+        train_feat = features.iloc[train_idx]
+        train_close = closes_feat.iloc[train_idx]
+        try:
+            drift_p = float(
+                HistoricalDriftBaseline()
+                .fit(log_returns(train_close).dropna())
+                .direction_probability(int(horizon))
+                .value
+            )
+        except ValueError:
+            drift_p = None  # type: ignore[assignment]
+        try:
+            mom_p = float(
+                MomentumBaseline()
+                .fit(train_close)
+                .direction_probability(int(horizon))
+                .value
+            )
+        except ValueError:
+            mom_p = None  # type: ignore[assignment]
+        try:
+            logreg = LogisticDirectionModel(horizons=[int(horizon)]).fit(
+                train_feat, train_close
+            )
+        except ValueError:
+            logreg = None
+        if drift_p is None and mom_p is None and logreg is None:
+            continue
+        n_folds_used += 1
+        for pos in test_idx:
+            label = labels_full.iloc[int(pos)]
+            if pd.isna(label):
+                continue  # horizon unobservable at the tail: skip, never impute
+            parts: list[float] = []
+            if drift_p is not None:
+                parts.append(float(drift_p))
+            if mom_p is not None:
+                parts.append(float(mom_p))
+            if logreg is not None:
+                try:
+                    parts.append(
+                        float(
+                            logreg.predict_direction_proba(
+                                features.iloc[[int(pos)]]
+                            )[int(horizon)].value
+                        )
+                    )
+                except (ValueError, IndexError):
+                    pass
+            if not parts:
+                continue
+            y_true.append(float(label))
+            y_prob.append(float(sum(parts) / len(parts)))
+    if not y_true:
+        raise HTTPException(
+            status_code=422,
+            detail=f"horizon {horizon}: no observable labels for these splits "
+            "(increase limit / shrink horizon / gap)",
+        )
+    table = reliability_table(y_true, y_prob, n_bins=n_bins)
+    return {
+        "n_folds": int(n_folds_used),
+        "n_points": int(len(y_true)),
+        "brier": float(brier_score(y_true, y_prob)),
+        "brier_formula": "Brier = mean((p_i - y_i)^2); 0 = perfect, 0.25 = coin-flip baseline",
+        "ece": float(calibration_error(y_true, y_prob, n_bins=n_bins)),
+        "ece_formula": "ECE = sum_b (|bin_b|/n * |mean_p_b - frac_pos_b|) over equal-width bins",
+        "reliability": _reliability_records(table),
+    }
+
+
+def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
+    bars = market.get_bars(req.symbol, timeframe="1d", limit=req.limit)
+    rows = bars.get("bars", [])
+    frame = pd.DataFrame(
+        {
+            "open": [r["open"] for r in rows],
+            "high": [r["high"] for r in rows],
+            "low": [r["low"] for r in rows],
+            "close": [r["close"] for r in rows],
+            "volume": [float(r["volume"] or 0) for r in rows],
+        },
+        index=pd.to_datetime([r["ts"] for r in rows]),
+    )
+    features = build_features(frame)
+    closes_feat = frame["close"].loc[features.index]
+    provenance = dict(bars.get("provenance", {}))
+    stamp = str(provenance.get("as_of"))
+    day = stamp[:10] if len(stamp) >= 10 else stamp
+    data_version = f"{provenance.get('source', 'unknown')}-bars-{day}"
+    horizons = sorted(set(req.horizons))
+    results = {
+        str(h): _evaluate_horizon(
+            features, closes_feat, h, req.train_size, req.test_size, req.gap, req.n_bins
+        )
+        for h in horizons
+    }
+    material = "|".join(
+        [req.symbol, ",".join(map(str, horizons)),
+         str(req.train_size), str(req.test_size), str(req.gap), stamp]
+    )
+    run_id = hashlib.sha256(material.encode()).hexdigest()[:16]
+    run = {
+        "run_id": run_id,
+        "symbol": req.symbol,
+        "horizons": horizons,
+        "params": {
+            "train_size": req.train_size,
+            "test_size": req.test_size,
+            "gap": req.gap,
+            "n_bins": req.n_bins,
+            "limit": req.limit,
+        },
+        "results": results,
+        "model_version": ENSEMBLE_VERSION,
+        "feature_version": FEATURE_VERSION,
+        "data_version": data_version,
+        "as_of": stamp,
+        "provenance": provenance,
+    }
+    _HISTORY.setdefault(req.symbol, []).append(run)
+    return run
+
+
+@router.post("/run")
+def run_backtest(
+    req: BacktestRunRequest,
+    market: MarketDataService = Depends(get_market_service),
+) -> dict:
+    """Run a walk-forward calibration backtest (no leakage by construction)."""
+    return _run_backtest(req, market)
+
+
+@router.get("/{symbol}")
+def backtest_history(
+    symbol: str,
+    market: MarketDataService = Depends(get_market_service),
+) -> dict:
+    """Lightweight calibration history for one symbol (summaries only)."""
+    sym = symbol.strip().upper()
+    bars = market.get_bars(sym, timeframe="1d", limit=5)
+    provenance = dict(bars.get("provenance", {}))
+    runs = _HISTORY.get(sym, [])
+    summaries = [
+        {
+            "run_id": r["run_id"],
+            "as_of": r["as_of"],
+            "horizons": r["horizons"],
+            "params": r["params"],
+            "metrics": {
+                h: {
+                    "n_folds": m["n_folds"],
+                    "n_points": m["n_points"],
+                    "brier": m["brier"],
+                    "ece": m["ece"],
+                }
+                for h, m in r["results"].items()
+            },
+            "model_version": r["model_version"],
+            "feature_version": r["feature_version"],
+            "data_version": r["data_version"],
+        }
+        for r in runs
+    ]
+    return {
+        "symbol": sym,
+        "as_of": str(provenance.get("as_of")),
+        "provenance": provenance,
+        "runs": summaries,
+    }

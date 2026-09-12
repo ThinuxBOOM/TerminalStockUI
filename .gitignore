@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# Env / secrets — never commit real keys
+.env
+infra/docker/.env
+*.pem
+*.key
+
+# Docker volumes / local data
+pgdata/
+redisdata/
+data/
+
+# Alembic
+*.pyc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Vercel / deploy (CI docs agent) — never commit local deploy state or data
+.vercel/
+*.db

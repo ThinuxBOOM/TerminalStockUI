@@ -1,0 +1,13 @@
+# Optional AI provider SDKs (M4 AI Provider Framework).
+#
+# Install ONLY when live (non-stub) model calls are needed:
+#     pip install -r backend/ai/requirements-ai.txt
+#
+# The framework works WITHOUT these packages: providers use httpx (already in
+# backend/requirements.txt) and degrade to clearly marked stub opinions when
+# no API key is configured. Do NOT add these to backend/requirements.txt —
+# AI extras must stay opt-in so the deterministic core has zero new deps.
+httpx>=0.27
+google-generativeai>=0.7
+openai>=1.30
+anthropic>=0.30
