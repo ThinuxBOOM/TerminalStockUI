@@ -41,6 +41,8 @@ function mockForecast(symbol: string): Forecast {
     why: ['trend + momentum intact', 'quality: high ROE, low leverage', 'supportive sector breadth'],
     risks: ['valuation above 5y median', 'earnings event in 12d', 'elevated sector volatility'],
     evidence_ids: [],
+    calibration: [],
+    limitations: ['placeholder — live forecast unreachable'],
     provenance,
   };
 }

@@ -1031,7 +1031,7 @@ function normalizeRank(
   const fxRaw =
     (r.fx_provenance as unknown) ??
     (r.fxProvenance as unknown) ??
-    (r.fx?.provenance as unknown) ??
+    ((r.fx as Record<string, unknown> | undefined)?.provenance as unknown) ??
     (r.provenance as unknown) ??
     null;
   let fx_provenance: Provenance | null = null;
