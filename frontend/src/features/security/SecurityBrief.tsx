@@ -110,6 +110,13 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
   }
 
   const q = quote.data;
+  if (!q)
+    return (
+      <div className="max-w-full">
+        <Skeleton label={`loading ${symbol}…`} lines={6} />
+        <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
+      </div>
+    );
   const stale = q.provenance.fallback_used || q.provenance.delay_minutes > 30;
 
   return (
