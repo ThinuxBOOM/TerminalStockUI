@@ -232,8 +232,8 @@ class ForecastService:
                 )[horizon].value
             )
             probas["logistic-direction"] = logistic_p
-        except ValueError:
-            pass  # single-class / too-few-rows: fall back to drift+momentum
+        except (ValueError, ImportError):
+            pass  # single-class / too-few-rows / sklearn missing: drift+momentum
         members = sorted(probas)
         us_direction = float(sum(probas.values()) / len(probas))
         us_spread = float(max(probas.values()) - min(probas.values())) if probas else 0.0

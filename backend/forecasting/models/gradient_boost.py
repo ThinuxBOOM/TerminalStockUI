@@ -8,11 +8,24 @@ fit/predict interface and label discipline as the logistic baseline.
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier
+
+try:
+    from sklearn.ensemble import GradientBoostingClassifier
+except ImportError:  # pragma: no cover - optional dep; degraded at fit time
+    GradientBoostingClassifier = None  # type: ignore[assignment]
+
+
+def _require_sklearn() -> None:
+    if GradientBoostingClassifier is None:
+        raise ImportError(
+            "scikit-learn is not installed; GradientBoostDirectionModel.fit() "
+            "is unavailable. Install scikit-learn or rely on the "
+            "drift+momentum ensemble fallback."
+        )
 
 from ..common import FORECAST_HORIZONS, TARGET_DIRECTION, ForecastResult
 from ..features.features import FEATURE_VERSION, direction_label
@@ -34,11 +47,12 @@ class GradientBoostDirectionModel:
         self.horizons = tuple(int(h) for h in horizons)
         if any(h < 1 for h in self.horizons):
             raise ValueError("horizons must be >= 1")
-        self.models_: dict[int, GradientBoostingClassifier] = {}
+        self.models_: dict[int, Any] = {}
         self.n_train_: dict[int, int] = {}
 
     def fit(self, features: pd.DataFrame, close: pd.Series) -> "GradientBoostDirectionModel":
         """Fit one classifier per horizon on label-observable rows."""
+        _require_sklearn()
         frame = pd.DataFrame(features)
         if len(frame) == 0:
             raise ValueError("feature frame is empty")
@@ -48,7 +62,7 @@ class GradientBoostDirectionModel:
         X = both[frame.columns].to_numpy(dtype=float)
         if not np.isfinite(X).all():
             raise ValueError("feature frame contains NaN/inf; run build_features first")
-        fitted: dict[int, GradientBoostingClassifier] = {}
+        fitted: dict[int, Any] = {}
         counts: dict[int, int] = {}
         for horizon in self.horizons:
             labels = direction_label(both["__close__"], horizon)
