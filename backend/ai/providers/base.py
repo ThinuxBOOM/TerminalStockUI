@@ -90,23 +90,37 @@ class BaseProvider(ABC):
         """Decrypt the provider key at call time. Returns None when absent.
 
         The plaintext key is never cached on self and never logged.
+        Serverless fallback: when the encrypted store has no key (fresh
+        Vercel invocation), read ``<PROVIDER>_API_KEY`` from the environment
+        (e.g. ``GEMINI_API_KEY``). Vercel env vars are the persistent key
+        path on serverless; the UI save flow needs a DB-backed endpoint
+        before it can work there.
         """
         try:
             store = self._store()
             key = store.get(self.name, self.api_key_label)
         except KeyError:
-            return None
+            key = None
         except Exception:
             return None
-        if not isinstance(key, str) or not key.strip():
-            return None
-        return key
+        if isinstance(key, str) and key.strip():
+            return key
+        import os
+
+        env_key = os.getenv(f"{self.name.upper()}_API_KEY", "")
+        if isinstance(env_key, str) and env_key.strip():
+            return env_key.strip()
+        return None
 
     def is_configured(self) -> bool:
         try:
-            return bool(self._store().has(self.name, self.api_key_label))
+            if bool(self._store().has(self.name, self.api_key_label)):
+                return True
         except Exception:
-            return False
+            pass
+        import os
+
+        return bool(os.getenv(f"{self.name.upper()}_API_KEY", "").strip())
 
     # -- interface ------------------------------------------------------
     @abstractmethod
