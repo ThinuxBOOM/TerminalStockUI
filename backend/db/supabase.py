@@ -70,6 +70,12 @@ def create_supabase_engine(url: str | None = None, **kwargs):
     statement_timeout); poolclass/pool_pre_ping defaults can be overridden.
     """
     resolved = url if url is not None else supabase_url()
+    # Strip detection-only ?pgbouncer=true: psycopg3 passes query args to
+    # libpq which rejects unknown option "pgbouncer".
+    if "?" in resolved:
+        base, _, qs = resolved.partition("?")
+        kept = [p for p in qs.split("&") if p and not p.lower().startswith("pgbouncer")]
+        resolved = base + ("?" + "&".join(kept) if kept else "")
     kwargs.setdefault("poolclass", NullPool)
     kwargs.setdefault("pool_pre_ping", True)
     kwargs.setdefault("future", True)

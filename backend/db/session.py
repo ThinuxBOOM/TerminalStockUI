@@ -59,9 +59,16 @@ def _create_engine(url: str):
         return create_engine(
             url, future=True, connect_args={"check_same_thread": False}
         )
+    pooled = _is_serverless_postgres(url)
     url = _normalize_postgres_url(url)
+    # psycopg3 rejects ?pgbouncer=true as a libpq option — it is a
+    # detection-only flag (see is_supabase_pooled). Strip it before connect.
+    if "?" in url:
+        base, _, qs = url.partition("?")
+        kept = [p for p in qs.split("&") if p and not p.lower().startswith("pgbouncer")]
+        url = base + ("?" + "&".join(kept) if kept else "")
     kwargs: dict = {"future": True, "pool_pre_ping": True}
-    if _is_serverless_postgres(url):
+    if pooled:
         kwargs["poolclass"] = NullPool
     else:
         kwargs.update(
