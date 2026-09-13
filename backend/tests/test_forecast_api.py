@@ -110,3 +110,179 @@ def test_forecast_leakage_guard():
     short = build_features(ohlcv.iloc[:100])
     long_ = build_features(ohlcv.iloc[:150])
     pd.testing.assert_frame_equal(short, long_.loc[short.index])
+
+
+# --- Phase 2 reconciliation: high-regime taxonomy + wire hygiene ---------
+
+def test_high_volatility_regime_penalizes_confidence():
+    """quantile_bands emits high (not elevated): it must still cost a notch."""
+    from backend.forecasting.service import _confidence
+
+    assert _confidence(0.0, 3, "B", regime="high") == "moderate"
+    assert _confidence(0.0, 3, "B", regime="normal") == "high"
+    assert _confidence(0.0, 3, "B") == "high"  # no regime -> no-op
+
+
+def test_member_accuracy_never_reaches_wire():
+    """Accuracy reorders drivers server-side; the map itself stays internal."""
+    client = _client()
+    body = client.get("/api/forecast/AAPL", params={"horizon": 21}).json()
+    assert "member_accuracy" not in body
+    assert isinstance(body["why"], list) and isinstance(body["risks"], list)
+
+
+# --- Phase 2c: drivers ordering by member accuracy -------------------------
+
+def _sample_driver_result() -> dict:
+    """Three up-members + mid + low-dd (why-heavy, deterministic)."""
+    return {
+        "horizon_days": 21,
+        "components": {
+            "historical-drift": 0.60,
+            "logistic-direction": 0.65,
+            "momentum": 0.70,
+        },
+        "expected_return_range": {"mid": 0.02},
+        "volatility_regime": "normal",
+        "drawdown_probability": 0.05,
+    }
+
+
+def _sample_risk_result() -> dict:
+    """Two down-members + extreme regime + high dd (risks-heavy)."""
+    return {
+        "horizon_days": 21,
+        "components": {
+            "historical-drift": 0.40,
+            "logistic-direction": 0.60,
+            "momentum": 0.30,
+        },
+        "expected_return_range": {"mid": -0.01},
+        "volatility_regime": "extreme",
+        "drawdown_probability": 0.30,
+    }
+
+
+def test_drivers_none_map_equals_current_order_byte_for_byte():
+    """None/empty map preserves EXACT historical ordering (and 4-cap)."""
+    from backend.api.forecast import forecast_drivers
+
+    for result in (_sample_driver_result(), _sample_risk_result()):
+        base_why, base_risks = forecast_drivers(result)
+        none_why, none_risks = forecast_drivers(result, None)
+        empty_why, empty_risks = forecast_drivers(result, {})
+        assert none_why == base_why
+        assert none_risks == base_risks
+        assert empty_why == base_why
+        assert empty_risks == base_risks
+        # Byte-for-byte: joined strings identical, not just set-equal.
+        assert "\n".join(none_why) == "\n".join(base_why)
+        assert "\n".join(none_risks) == "\n".join(base_risks)
+        assert len(base_why) <= 4 and len(base_risks) <= 4
+
+
+def test_drivers_ordering_by_member_accuracy_why():
+    """Higher hit_rate first; unknown-rate member last; non-members after."""
+    from backend.api.forecast import forecast_drivers
+
+    result = _sample_driver_result()
+    base_why, _ = forecast_drivers(result)
+    # Alphabetical base: historical-drift, logistic-direction, momentum, mid.
+    assert base_why[0].startswith("historical-drift")
+    assert base_why[1].startswith("logistic-direction")
+    assert base_why[2].startswith("momentum")
+
+    accuracy = {
+        "momentum": {"hit_rate": 0.80, "n": 50},
+        "historical-drift": {"hit_rate": 0.60, "n": 50},
+        "logistic-direction": {"hit_rate": None, "n": 0},
+    }
+    why, risks = forecast_drivers(result, accuracy)
+    assert len(why) <= 4 and len(risks) <= 4
+    # Known members sorted desc, unknown member + non-members keep order last.
+    assert why[0].startswith("momentum")
+    assert why[1].startswith("historical-drift")
+    assert why[2].startswith("logistic-direction")
+    # Non-member entries (mid/low-dd) stay after member entries.
+    assert "expected 21d return mid" in why[3]
+    # Every string still quotes a computed number (no invented narrative).
+    assert "(p=0.70)" in why[0] and "(p=0.60)" in why[1]
+    assert "+2.0%" in why[3]
+
+
+def test_drivers_ordering_by_member_accuracy_risks():
+    """Risks side: member entries lead by rate; regime/dd keep order last."""
+    from backend.api.forecast import forecast_drivers
+
+    result = _sample_risk_result()
+    base_why, base_risks = forecast_drivers(result)
+    # Base risks: alphabetical members, then mid, regime, dd.
+    assert base_risks[0].startswith("historical-drift")
+    assert base_risks[1].startswith("momentum")
+
+    accuracy = {
+        "momentum": {"hit_rate": 0.75, "n": 40},
+        "historical-drift": {"hit_rate": 0.50, "n": 40},
+    }
+    why, risks = forecast_drivers(result, accuracy)
+    assert risks[0].startswith("momentum")
+    assert risks[1].startswith("historical-drift")
+    # Non-member entries keep relative order after member entries.
+    assert risks[2].startswith("expected 21d return mid")
+    assert risks[3].startswith("volatility regime: extreme")
+    # Cap holds even when full list exceeds 4 (dd entry capped out here).
+    assert len(risks) == 4
+    # Missing member in map counts as unknown -> last among members.
+    accuracy_partial = {"momentum": {"hit_rate": 0.75, "n": 40}}
+    _, risks_partial = forecast_drivers(result, accuracy_partial)
+    assert risks_partial[0].startswith("momentum")
+    assert risks_partial[1].startswith("historical-drift")
+
+
+def test_drivers_accuracy_tie_and_empty_side_semantics():
+    """Ties keep original relative order; empty side stays empty."""
+    from backend.api.forecast import forecast_drivers
+
+    result = _sample_driver_result()
+    tied = {
+        "historical-drift": {"hit_rate": 0.70, "n": 10},
+        "momentum": {"hit_rate": 0.70, "n": 10},
+        "logistic-direction": {"hit_rate": 0.70, "n": 10},
+    }
+    why, risks = forecast_drivers(result, tied)
+    base_why, base_risks = forecast_drivers(result)
+    # All rates equal -> stable original (alphabetical) order preserved.
+    assert [w.split(" ")[0] for w in why[:3]] == [
+        w.split(" ")[0] for w in base_why[:3]
+    ]
+    # Empty-side semantics: no down-members + normal regime + low dd.
+    single_up = {
+        "horizon_days": 21,
+        "components": {"momentum": 0.70},
+        "expected_return_range": {"mid": 0.01},
+        "volatility_regime": "normal",
+        "drawdown_probability": 0.05,
+    }
+    why2, risks2 = forecast_drivers(
+        single_up, {"momentum": {"hit_rate": 0.9, "n": 5}}
+    )
+    assert why2 and risks2 == []  # UI renders empty side as unavailable
+
+
+def test_get_forecast_reads_member_accuracy_from_result():
+    """API passes result['member_accuracy'] through to driver ordering."""
+    from backend.api.forecast import forecast_drivers
+
+    result = _sample_driver_result()
+    result["member_accuracy"] = {
+        "momentum": {"hit_rate": 0.80, "n": 50},
+        "historical-drift": {"hit_rate": 0.60, "n": 50},
+        "logistic-direction": {"hit_rate": None, "n": 0},
+    }
+    via_key = forecast_drivers(result, result.get("member_accuracy"))
+    direct = forecast_drivers(
+        {k: v for k, v in result.items() if k != "member_accuracy"},
+        result["member_accuracy"],
+    )
+    assert via_key == direct
+    assert via_key[0][0].startswith("momentum")

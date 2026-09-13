@@ -1,8 +1,8 @@
-"""SQLAlchemy models mirroring infra/migrations/0001_initial.sql.
+"""SQLAlchemy models mirroring infra/migrations/0001_initial.sql + 0002_calibration.sql.
 
-Tables: instruments, price_bars, forecasts, audit_logs (append-only,
-hash-chained). Portable types (Uuid/String/JSON) so unit tests run on
-SQLite while Postgres stays the deployment target.
+Tables: instruments, price_bars, forecasts, calibration_snapshots, audit_logs
+(append-only, hash-chained). Portable types (Uuid/String/JSON) so unit tests
+run on SQLite while Postgres stays the deployment target.
 """
 
 from __future__ import annotations
@@ -96,6 +96,36 @@ class Forecast(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class CalibrationSnapshot(Base):
+    """Walk-forward calibration snapshot (Phase 2b).
+
+    One row per (symbol, horizon_days, model_version, feature_version,
+    data_version): Brier/ECE over the trailing ensemble direction
+    probabilities, a JSON reliability table, and per-member hit rates.
+    Mirrors infra/migrations/0002_calibration.sql (Postgres JSONB/NUMERIC
+    map to portable JSON/Numeric here so SQLite tests stay green).
+    """
+
+    __tablename__ = "calibration_snapshots"
+    __table_args__ = (UniqueConstraint(
+        "symbol", "horizon_days", "model_version", "feature_version",
+        "data_version", name="uq_calibration_snapshot"),)
+
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_version: Mapped[str] = mapped_column(Text, nullable=False)
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange_mic: Mapped[str] = mapped_column(String(8), nullable=False)
+    brier: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    ece: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    n_windows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reliability: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    members: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    data_version: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class AuditLog(Base):
     """Append-only audit log. hash = sha256(prev_hash||created_at||actor||action||entity||payload)."""
 
@@ -128,5 +158,8 @@ class AuditLog(Base):
 
 Index("ix_audit_logs_entity", AuditLog.entity_type, AuditLog.entity_id, AuditLog.id.desc())
 Index("ix_price_bars_ts", PriceBar.ts.desc())
+Index("ix_calibration_snapshots_symbol_horizon",
+      CalibrationSnapshot.symbol, CalibrationSnapshot.horizon_days,
+      CalibrationSnapshot.created_at.desc())
 
 _ = PG_UUID  # keep linter honest: Postgres UUID is the deploy target

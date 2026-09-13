@@ -73,6 +73,18 @@ Spec §§5 (M3), §6 testing, §7 definition of done.
 - Backtests account for liquidity, transaction costs, slippage, delistings,
   restatements, survivorship bias, and market-regime shifts (M3 requirements).
 
+### Calibration snapshots (Phase 2b)
+
+- The nightly `GET /api/cron/calibrate` job replays the live ensemble
+  walk-forward over trailing bars and upserts one row per
+  `(symbol, horizon_days, model_version, feature_version, data_version)`
+  into `calibration_snapshots` (Brier, ECE, 10-bin reliability table,
+  per-member `{hit_rate, n}`); `GET /api/forecast/{symbol}` serves the
+  latest snapshot's reliability rows as `calibration` (`[]` when none).
+- Retention is indefinite, like forecasts: snapshots are keyed to the
+  model/feature/data version triple so calibration dashboards and leakage
+  tests can always reproduce what a past version claimed.
+
 ### Versioning (forecasts are reproducible)
 
 - Every forecast row stores `model_version + feature_version + data_version +

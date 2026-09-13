@@ -40,12 +40,86 @@ def direction_label(probability: float) -> str:
     return "neutral"
 
 
-def forecast_drivers(result: dict) -> tuple[list[str], list[str]]:
+def _member_hit_rate(
+    member_accuracy: dict | None, member: str | None
+) -> float | None:
+    """Trailing hit_rate for a member, or None when unknown.
+
+    Accepts the calibration-snapshot shape
+    ``{member_name: {"hit_rate": float | None, "n": int}}`` (plain dict;
+    never imports the calibration module). Tolerant: a plain numeric
+    value is also accepted as the rate.
+    """
+    if member is None or not isinstance(member_accuracy, dict):
+        return None
+    try:
+        entry = member_accuracy.get(member)
+    except AttributeError:
+        return None
+    if entry is None:
+        return None
+    if isinstance(entry, bool):
+        return None
+    if isinstance(entry, (int, float)):
+        try:
+            rate = float(entry)
+        except (TypeError, ValueError):
+            return None
+        return rate if 0.0 <= rate <= 1.0 else None
+    if isinstance(entry, dict):
+        raw = entry.get("hit_rate")
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, (int, float)):
+            try:
+                rate = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return rate if 0.0 <= rate <= 1.0 else None
+    return None
+
+
+def _order_side_by_accuracy(
+    entries: list[str],
+    components: dict,
+    member_accuracy: dict,
+) -> list[str]:
+    """Order one side by member trailing hit_rate descending (deterministic).
+
+    Entries quoting a member (``"<name> implies ..."`` where ``<name>``
+    is a components key) use that member's rate; non-member entries
+    (regime/drawdown/mid) and member entries with unknown rate keep
+    their relative order after the known-rate member entries.
+    """
+    scored: list[tuple[float | None, int, str]] = []
+    for idx, entry in enumerate(entries):
+        member: str | None = None
+        if " implies " in entry:
+            candidate = entry.split(" implies ", 1)[0]
+            if candidate in components:
+                member = candidate
+        scored.append((_member_hit_rate(member_accuracy, member), idx, entry))
+    known = [(r, i, e) for r, i, e in scored if r is not None]
+    unknown = [(i, e) for r, i, e in scored if r is None]
+    known.sort(key=lambda t: (-t[0], t[1]))
+    unknown.sort(key=lambda t: t[0])
+    return [e for _, _, e in known] + [e for _, e in unknown]
+
+
+def forecast_drivers(
+    result: dict, member_accuracy: dict | None = None
+) -> tuple[list[str], list[str]]:
     """Derive bull/bear driver strings from computed ensemble values only.
 
     Every string quotes a number already present in the response — no
     narrative is invented. Cap 4 items per side; empty side renders as
     "unavailable" in the UI (honest, never zero-filled).
+
+    When ``member_accuracy`` (``{member: {"hit_rate": float|None, ...}}``)
+    is provided and non-empty, each side is ordered by trailing hit_rate
+    descending (member entries use their member's rate; non-member and
+    unknown-rate entries keep relative order last). When None/empty, the
+    historical ordering is returned byte-for-byte.
     """
     why: list[str] = []
     risks: list[str] = []
@@ -69,7 +143,7 @@ def forecast_drivers(result: dict) -> tuple[list[str], list[str]]:
             f"expected {horizon}d return mid {mid:+.1%}"
         )
     regime = result.get("volatility_regime")
-    if regime in ("elevated", "extreme"):
+    if regime in ("high", "elevated", "extreme"):
         risks.append(f"volatility regime: {regime}")
     drawdown = result.get("drawdown_probability")
     if isinstance(drawdown, bool):
@@ -79,6 +153,10 @@ def forecast_drivers(result: dict) -> tuple[list[str], list[str]]:
             risks.append(f"large-drawdown probability {drawdown:.0%} over {horizon}d")
         elif drawdown <= 0.10:
             why.append(f"large-drawdown probability low ({drawdown:.0%})")
+    if not member_accuracy:
+        return why[:4], risks[:4]
+    why = _order_side_by_accuracy(why, components, member_accuracy)
+    risks = _order_side_by_accuracy(risks, components, member_accuracy)
     return why[:4], risks[:4]
 
 
@@ -103,7 +181,16 @@ def get_forecast(
     # Display fields the terminal UI renders (derived, never invented):
     # label bands, data-quality passthrough, engine identity, bull/bear
     # drivers quoted from computed components, evidence = model members.
-    why, risks = forecast_drivers(result)
+    # Calibration snapshot (reliability rows + member accuracy for driver
+    # ordering) is best-effort; []/None when none. member_accuracy never
+    # reaches the wire — ordering input only.
+    cal_rows, member_acc = _latest_calibration(
+        symbol,
+        int(horizon),
+        str(result.get("model_version", "")),
+        market_service=getattr(svc, "market", None),
+    )
+    why, risks = forecast_drivers(result, member_acc)
     provenance = result.get("provenance") or {}
     payload["label"] = direction_label(result.get("direction_probability", 0.5))
     payload["quality_grade"] = str(provenance.get("quality_grade", "U")).upper() or "U"
@@ -111,4 +198,44 @@ def get_forecast(
     payload["why"] = why
     payload["risks"] = risks
     payload["evidence_ids"] = list(result.get("model_members", []))
+    # Calibration rows from the latest snapshot for
+    # (symbol, horizon, model_version); [] when none (offline/tests/DB
+    # issues must never break the forecast path).
+    payload["calibration"] = cal_rows
     return payload
+
+
+def _latest_calibration(
+    symbol: str, horizon: int, model_version: str, market_service=None
+) -> tuple[list, dict | None]:
+    """Best-effort (reliability rows, member accuracy) for the payload."""
+    try:
+        from backend.db.session import get_session_factory, init_db
+        from backend.forecasting.calibration.snapshots import (
+            canonical_symbol,
+            get_latest_snapshot,
+        )
+
+        try:
+            init_db()
+        except Exception:
+            pass
+        Session = get_session_factory()
+        db = Session()
+        try:
+            canonical = canonical_symbol(symbol, market_service)
+            row = get_latest_snapshot(db, canonical, int(horizon), model_version)
+            if row is None:
+                return [], None
+            reliability = getattr(row, "reliability", None)
+            rows = list(reliability) if isinstance(reliability, list) else []
+            members = getattr(row, "members", None)
+            acc = dict(members) if isinstance(members, dict) and members else None
+            return rows, acc
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return [], None

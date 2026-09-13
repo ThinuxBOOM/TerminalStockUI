@@ -1,9 +1,12 @@
-"""Cron router (Phase 1a): Vercel Cron entry for daily bar ingestion.
+"""Cron router (Phase 1a + Phase 2b): daily bar ingestion + calibration.
 
-Vercel Cron invokes via HTTP GET only -> ``GET /api/cron/ingest``.
-``POST /api/cron/ingest`` with JSON ``{symbols: [...]}`` covers manual runs.
-Both share :func:`backend.market_data.ingest.ingest_symbols` with
-``scripts/backfill_bars.py`` (no HTTP in the shared path).
+Vercel Cron invokes via HTTP GET only -> ``GET /api/cron/ingest`` and
+``GET /api/cron/calibrate``.
+``POST`` variants with JSON ``{symbols: [...]}`` cover manual runs.
+Ingest shares :func:`backend.market_data.ingest.ingest_symbols` with
+``scripts/backfill_bars.py`` (no HTTP in the shared path); calibrate builds
+one walk-forward :mod:`backend.forecasting.calibration` snapshot row per
+(symbol, horizon) via upsert on the UNIQUE key.
 
 Auth: when the ``CRON_SECRET`` env var is set, callers must send
 ``Authorization: Bearer <secret>`` (constant-time compare); a wrong or
@@ -25,11 +28,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from backend.api.deps import get_registry
+from backend.api.deps import get_market_service, get_registry
 from backend.instruments.registry import InstrumentRegistry
 from backend.market_data import ingest as ingest_module
 from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
+from backend.market_data.service import MarketDataService
 
 logger = logging.getLogger(__name__)
 
@@ -152,5 +156,136 @@ def cron_ingest_post(
             "ok": False,
             "ingested": {},
             "errors": {"_batch": "ingest failed"},
+            "provenance": _cron_provenance(True),
+        }
+
+
+def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
+    """Build + upsert one snapshot row per (symbol, horizon).
+
+    Per-pair failures are reported in ``errors`` (keyed ``"SYM:horizon"``);
+    the batch itself never 500s. ``snapshots`` maps the same key to the
+    scored window count; ``calibrated`` is the written-row count.
+    """
+    from backend.db.session import get_session_factory, init_db
+    from backend.forecasting.calibration.snapshots import (
+        build_snapshot,
+        upsert_snapshot,
+    )
+    from backend.forecasting.common import FORECAST_HORIZONS
+
+    wanted: list[str] = []
+    for raw in symbols or []:
+        text = (raw or "").strip()
+        if text:
+            wanted.append(text)
+    if not wanted:
+        return {
+            "ok": True,
+            "calibrated": 0,
+            "snapshots": {},
+            "errors": {},
+            "provenance": _cron_provenance(False),
+        }
+    try:
+        init_db()
+        Session = get_session_factory()
+        db = Session()
+    except Exception:
+        # DB unreachable: report per symbol, never 500 the batch. The
+        # exception text is deliberately reduced so connection strings can
+        # never leak into responses or logs.
+        logger.warning("calibrate db unavailable symbols=%d", len(wanted))
+        return {
+            "ok": False,
+            "calibrated": 0,
+            "snapshots": {},
+            "errors": {raw: "db unavailable" for raw in wanted},
+            "provenance": _cron_provenance(True),
+        }
+    snapshots: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    calibrated = 0
+    try:
+        for raw in wanted:
+            for horizon in FORECAST_HORIZONS:
+                key = f"{raw.strip().upper()}:{int(horizon)}"
+                try:
+                    snap = build_snapshot(raw, int(horizon), market_service=market)
+                    upsert_snapshot(db, snap)
+                    snapshots[key] = int(snap.get("n_windows") or 0)
+                    calibrated += 1
+                except Exception as exc:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    errors[key] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                    logger.warning("calibrate snapshot failed")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+    logger.info(
+        "calibrate done calibrated=%d errors=%d", calibrated, len(errors)
+    )
+    return {
+        "ok": not errors,
+        "calibrated": calibrated,
+        "snapshots": snapshots,
+        "errors": errors,
+        "provenance": _cron_provenance(bool(errors)),
+    }
+
+
+@router.get("/calibrate")
+def cron_calibrate_get(
+    request: Request,
+    symbol: str | None = Query(
+        default=None, description="Single symbol; default is the ingest universe"
+    ),
+    market: MarketDataService = Depends(get_market_service),
+) -> dict:
+    """Vercel Cron entry: ``GET /api/cron/calibrate[?symbol=AAPL]``."""
+    _check_cron_auth(request)
+    symbols = (
+        [symbol] if (symbol or "").strip() else ingest_module.default_universe()
+    )
+    try:
+        return _run_calibrate(symbols, market)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron calibrate batch failed")
+        return {
+            "ok": False,
+            "calibrated": 0,
+            "snapshots": {},
+            "errors": {"_batch": "calibrate failed"},
+            "provenance": _cron_provenance(True),
+        }
+
+
+@router.post("/calibrate")
+def cron_calibrate_post(
+    request: Request,
+    body: IngestRequest,
+    market: MarketDataService = Depends(get_market_service),
+) -> dict:
+    """Manual run: ``POST /api/cron/calibrate`` with JSON ``{symbols: [...]}``."""
+    _check_cron_auth(request)
+    symbols = body.symbols if body.symbols else ingest_module.default_universe()
+    try:
+        return _run_calibrate(symbols, market)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron calibrate batch failed")
+        return {
+            "ok": False,
+            "calibrated": 0,
+            "snapshots": {},
+            "errors": {"_batch": "calibrate failed"},
             "provenance": _cron_provenance(True),
         }

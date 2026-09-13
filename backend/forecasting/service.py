@@ -113,12 +113,25 @@ def _penalize_confidence(level: str) -> str:
 _service: ForecastService | None = None  # module singleton (see getter below)
 
 
-def _confidence(spread: float, n_models: int, quality_grade: str) -> str:
+def _confidence(
+    spread: float,
+    n_models: int,
+    quality_grade: str,
+    regime: str | None = None,
+    drawdown_prob: float | None = None,
+) -> str:
     """Deterministic confidence from member agreement.
 
     spread = max(p) - min(p) over ensemble members. Full agreement + 3
     members -> high; moderate agreement -> moderate; else low. Thin
     ensembles (fallback) cap at moderate; poor data quality caps at low.
+
+    Regime-aware penalties (applied AFTER the spread/size/quality logic
+    via :func:`_penalize_confidence`, never raising, flooring at "low"):
+      * volatility regime "high" (top-tercile trailing vol, the strongest
+        bucket quantile_bands emits), "elevated" or "extreme" -> one notch.
+      * drawdown probability >= 0.25 -> one notch down.
+    ``regime=None`` / ``drawdown_prob=None`` are no-ops (backward compat).
     """
     if n_models <= 1:
         level = "low"
@@ -132,6 +145,22 @@ def _confidence(spread: float, n_models: int, quality_grade: str) -> str:
         level = "moderate"
     if str(quality_grade).upper() in ("D", "F") and level != "low":
         level = "low"
+    if regime is not None:
+        try:
+            _r = str(regime).strip().lower()
+        except Exception:
+            _r = ""
+        if _r in ("high", "elevated", "extreme"):
+            level = _penalize_confidence(level)
+    _dd = drawdown_prob
+    if isinstance(_dd, bool):
+        _dd = None
+    if isinstance(_dd, (int, float)):
+        try:
+            if float(_dd) >= 0.25:
+                level = _penalize_confidence(level)
+        except (TypeError, ValueError):
+            pass
     return level
 
 
@@ -289,7 +318,11 @@ class ForecastService:
             except ValueError:
                 proximity_fired = False
             base_confidence = _confidence(
-                spread, len(probas), str(provenance.get("quality_grade", "B"))
+                spread,
+                len(probas),
+                str(provenance.get("quality_grade", "B")),
+                regime,
+                dd_prob,
             )
             confidence = (
                 _penalize_confidence(base_confidence)
@@ -333,7 +366,11 @@ class ForecastService:
             except ValueError:
                 pass
             confidence = _confidence(
-                spread, len(probas), str(provenance.get("quality_grade", "B"))
+                spread,
+                len(probas),
+                str(provenance.get("quality_grade", "B")),
+                regime,
+                dd_prob,
             )
             model_version = EUX_BLEND_VERSION
             feature_version = EUX_FEATURE_VERSION
@@ -342,7 +379,13 @@ class ForecastService:
             direction = us_direction
             spread = us_spread
             expected_range = us_range
-            confidence = _confidence(spread, len(probas), str(provenance.get("quality_grade", "B")))
+            confidence = _confidence(
+                spread,
+                len(probas),
+                str(provenance.get("quality_grade", "B")),
+                regime,
+                dd_prob,
+            )
             model_version = ENSEMBLE_VERSION
             feature_version = FEATURE_VERSION
             model_members = list(ENSEMBLE_MEMBERS)
