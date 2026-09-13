@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Trigger evaluation
         run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
           code=$(curl -s -o /tmp/eval.json -w "%{http_code}" \
             -H "Authorization: Bearer $CRON_SECRET" \
             "$APP_URL/api/cron/evaluate")
