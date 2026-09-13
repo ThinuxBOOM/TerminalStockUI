@@ -129,6 +129,7 @@ def test_network_failure_falls_back_flagged_never_raises():
         raise ProviderError("fx", "network down")
 
     prov._fetch_raw = _boom  # type: ignore[method-assign]
+    prov._fetch_yahoo = _boom  # type: ignore[method-assign]  # full outage -> stub
     out = prov.get_rate("EUR", "USD")
     assert out["fallback_used"] is True
     assert out["rate"] == pytest.approx(1.08)
@@ -140,11 +141,64 @@ def test_missing_httpx_package_falls_back_flagged(monkeypatch):
 
     prov = FXProvider(stub_mode=False)
     monkeypatch.setitem(sys.modules, "httpx", None)
+
+    def _boom(base: str, quote: str) -> dict:
+        raise ProviderError("fx", "yahoo down")
+
+    prov._fetch_yahoo = _boom  # type: ignore[method-assign]  # isolate httpx path
     with pytest.raises(ProviderError):  # raw fetch names the missing dep
         prov._fetch_raw("EUR", "USD")
     out = prov.get_rate("EUR", "USD")  # public path never crashes
     assert out["fallback_used"] is True
     assert out["rate"] == pytest.approx(1.08)
+
+
+def test_yahoo_secondary_serves_live_when_frankfurter_down():
+    """Frankfurter outage + yahoo reachable -> live (gate passes, no stub)."""
+    prov = FXProvider(stub_mode=False)
+
+    def _boom(base: str, quote: str) -> dict:
+        raise ProviderError("fx", "frankfurter down")
+
+    def _live_yahoo(base: str, quote: str) -> dict:
+        return {
+            "base": base, "quote": quote, "rate": 1.10,
+            "as_of": _utcnow(), "source": "yfinance",
+        }
+
+    prov._fetch_raw = _boom  # type: ignore[method-assign]
+    prov._fetch_yahoo = _live_yahoo  # type: ignore[method-assign]
+    out = prov.get_rate("EUR", "USD")
+    assert out["fallback_used"] is False
+    assert out["source"] == "yfinance"
+    assert out["rate"] == pytest.approx(1.10)
+
+
+def test_yahoo_inverse_pair_inverts_rate(monkeypatch):
+    """CNY->USD resolves via USDCNY=X inverted; offline (fake yfinance)."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    fake_yf = types.SimpleNamespace()
+
+    class _FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self._symbol = symbol
+
+        def history(self, period: str = "2d", auto_adjust: bool = True):
+            if self._symbol == "USDCNY=X":
+                idx = pd.date_range("2026-09-11", periods=2, freq="D")
+                return pd.DataFrame({"Close": [7.24, 7.25]}, index=idx)
+            return pd.DataFrame()  # direct CNYUSD=X missing -> inverse branch
+
+    fake_yf.Ticker = _FakeTicker
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+    prov = FXProvider(stub_mode=False)
+    out = prov._fetch_yahoo("CNY", "USD")
+    assert out["source"] == "yfinance"
+    assert out["rate"] == pytest.approx(1.0 / 7.25)
 
 
 def test_breaker_open_returns_flagged_stub():

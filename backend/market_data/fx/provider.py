@@ -1,10 +1,14 @@
-"""FX provider (M7 cross-market gate): Frankfurter/ECB free source with provenance.
+"""FX provider (M7 cross-market gate): free live sources with provenance.
 
 Free-first design mirroring the equity providers:
 
-- live path: ``https://api.frankfurter.app/latest?from=BASE&to=QUOTE``
+- live path 1: ``https://api.frankfurter.app/latest?from=BASE&to=QUOTE``
   (ECB reference rates), ``httpx`` imported lazily inside the fetch so the
   module stays import-safe offline and ``httpx`` is strictly optional;
+- live path 2 (secondary): yfinance FX tickers (``EURUSD=X`` …,
+  inverse ``USDCNY=X`` inverted when the direct pair is missing) — the same
+  network path as the equity quotes, so environments that can fetch quotes
+  can fetch FX. ``yfinance`` imported lazily; missing/unusable -> stub;
 - 15-minute in-memory cache of live rates (``CACHE_TTL_S``);
 - fallback: deterministic ECB reference stub table (triangle-consistent
   ``EURUSD 1.08 / USDCNY 7.25 / EURCNY 7.83``), always flagged
@@ -33,6 +37,7 @@ from backend.market_data.quality import grade_quality
 
 NAME = "fx"
 LIVE_SOURCE = "frankfurter"
+YF_SOURCE = "yfinance"
 STUB_SOURCE = "fx"  # local ECB reference table served by this provider
 BASE_URL = "https://api.frankfurter.app"
 DEFAULT_DELAY_MINUTES = 15
@@ -64,7 +69,51 @@ def stub_rate(base: str, quote: str) -> float:
 
 
 class FXProvider:
-    """Live Frankfurter/ECB provider with stub fallback (never crashes offline)."""
+    """Live Frankfurter/ECB provider with yfinance secondary + stub fallback.
+
+    Chain per pair: frankfurter -> yfinance FX ticker -> flagged stub.
+    Never crashes offline."""
+
+    def _fetch_yahoo(self, base: str, quote: str) -> dict:
+        """Secondary live fetch via yfinance FX tickers (``EURUSD=X`` …).
+
+        Tries the direct pair first, then the inverse pair (inverted).
+        Raises :class:`ProviderError` when yfinance is unavailable or both
+        tickers yield no usable close — the caller then serves the stub.
+        """
+        try:  # lazy: never imported at module load; offline envs stay safe
+            import yfinance as yf
+        except Exception as exc:
+            raise ProviderError(NAME, "yfinance package unavailable") from exc
+        last_exc: Exception | None = None
+        for symbol, invert in (
+            (f"{base}{quote}=X", False),
+            (f"{quote}{base}=X", True),
+        ):
+            try:
+                hist = yf.Ticker(symbol).history(period="2d", auto_adjust=True)
+                if hist is None or len(hist) == 0:
+                    raise ProviderError(NAME, f"no data for {symbol}")
+                close = float(hist["Close"].iloc[-1])
+                if not (close == close and close > 0):
+                    raise ProviderError(NAME, f"bad close for {symbol}")
+            except ProviderError as exc:
+                last_exc = exc
+                continue
+            except Exception as exc:  # network / parse failure
+                last_exc = exc
+                continue
+            rate = close if not invert else 1.0 / close
+            return {
+                "base": base,
+                "quote": quote,
+                "rate": rate,
+                "as_of": _utcnow(),
+                "source": YF_SOURCE,
+            }
+        raise ProviderError(
+            NAME, f"yahoo FX unavailable for {base}/{quote}: {last_exc}"
+        ) from last_exc
 
     name = NAME
 
@@ -203,11 +252,14 @@ class FXProvider:
         try:
             raw = self._fetch_raw(b, q)
         except ProviderError:
-            self.breaker.record_failure()
-            self._emit((time.perf_counter() - started) * 1000, False)
-            payload = self._stub_payload(b, q)
-            payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
-            return payload
+            try:
+                raw = self._fetch_yahoo(b, q)
+            except ProviderError:
+                self.breaker.record_failure()
+                self._emit((time.perf_counter() - started) * 1000, False)
+                payload = self._stub_payload(b, q)
+                payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
+                return payload
         self.breaker.record_success()
         self._emit((time.perf_counter() - started) * 1000, True)
         rate = float(raw["rate"])
@@ -218,7 +270,7 @@ class FXProvider:
             "rate": rate,
             "inverse": 1.0 / rate,
             "as_of": raw.get("as_of") or _utcnow(),
-            "source": LIVE_SOURCE,
+            "source": raw.get("source", LIVE_SOURCE),
             "delay_minutes": self.delay_minutes,
             "missing_fields": [],
             "fallback_used": False,
