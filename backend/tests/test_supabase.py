@@ -75,3 +75,60 @@ def test_seed_has_three_smoke_instruments():
     assert "XSHG" in text and "600519" in text
     assert "XPAR" in text and "'MC'" in text
     assert "on conflict" in text.lower()  # idempotent re-seed
+
+
+def test_uuid_type_is_postgres_native():
+    """IDs must survive a Postgres round-trip as uuid.UUID objects.
+
+    Regression: Uuid(native_uuid=False) result-processing assumed strings
+    and crashed on psycopg3-native UUIDs (AttributeError on every
+    instruments/price_bars read against Supabase; sqlite masked it).
+    """
+    from backend.db.models import ID_TYPE
+
+    assert type(ID_TYPE).__name__ == "Uuid"
+    assert getattr(ID_TYPE, "native_uuid", False) is True
+
+
+def test_pooled_engine_disables_prepared_statements(monkeypatch):
+    """Transaction-mode poolers (:6543) cannot keep named prepared
+    statements across checkouts (DuplicatePreparedStatement)."""
+    from sqlalchemy.pool import NullPool
+
+    import backend.db.session as sess
+
+    captured: dict = {}
+    real_create = sess.create_engine
+
+    def _fake(url, **kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return real_create(url, **kwargs)
+
+    monkeypatch.setattr(sess, "create_engine", _fake)
+    engine = sess.get_engine(POOLED)
+    try:
+        assert captured.get("poolclass") is NullPool
+        assert captured.get("connect_args") == {"prepare_threshold": None}
+    finally:
+        engine.dispose()
+
+
+def test_direct_engine_keeps_default_prepares(monkeypatch):
+    import backend.db.session as sess
+
+    captured: dict = {}
+    real_create = sess.create_engine
+
+    def _fake(url, **kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return real_create(url, **kwargs)
+
+    monkeypatch.setattr(sess, "create_engine", _fake)
+    engine = sess.get_engine(DIRECT)
+    try:
+        assert "poolclass" not in captured
+        assert "connect_args" not in captured
+    finally:
+        engine.dispose()

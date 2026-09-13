@@ -70,6 +70,10 @@ def _create_engine(url: str):
     kwargs: dict = {"future": True, "pool_pre_ping": True}
     if pooled:
         kwargs["poolclass"] = NullPool
+        # Supabase :6543 is a transaction-mode pooler: named server-side
+        # prepared statements do not survive across checkouts
+        # (DuplicatePreparedStatement). Disable them; plain queries only.
+        kwargs["connect_args"] = {"prepare_threshold": None}
     else:
         kwargs.update(
             pool_size=5, max_overflow=5, pool_timeout=10, pool_recycle=300

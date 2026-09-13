@@ -278,8 +278,127 @@ class MarketDataService:
     def provenance_for(self, payload: dict) -> Provenance:
         return Provenance(**payload["provenance"])
 
-    # -- bars (deterministic offline-capable stub) ----------------------
+    # -- bars (DB-first, deterministic offline-capable stub fallback) ---
     def get_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
+        """Serve daily bars from ``price_bars`` when coverage is sufficient.
+
+        DB path: resolve via the registry, read the latest ``limit`` rows
+        for ``(instrument_id, timeframe)`` ascending; trusted when at least
+        ``min(limit, 100)`` rows come back (quality gate so thin histories
+        never masquerade as full coverage). Provenance then carries the
+        stored source, ``fallback_used=False`` and a ``grade_quality`` grade.
+        ANY exception, unknown instrument, thin/empty coverage, or an
+        unreachable DB falls back to the deterministic stub below, so
+        offline/test environments never break.
+        """
+        try:
+            db_out = self._get_bars_from_db(symbol, timeframe, limit)
+            if db_out is not None:
+                return db_out
+        except Exception:
+            pass
+        return self._stub_bars(symbol, timeframe, limit)
+
+    def _get_bars_from_db(
+        self, symbol: str, timeframe: str = "1d", limit: int = 30
+    ) -> dict | None:
+        """Read bars from price_bars; None when the DB path must not serve."""
+        from backend.db.models import Instrument as DBInstrument, PriceBar
+        from backend.db.session import get_session_factory
+
+        instrument, _, _ = self.registry.resolve(symbol)
+        if instrument is None:
+            return None
+        n = max(1, min(int(limit), 250))
+        Session = get_session_factory()  # lazy per call; cached engine
+        db = Session()
+        try:
+            db_inst = (
+                db.query(DBInstrument)
+                .filter(
+                    DBInstrument.exchange_mic == instrument.exchange_mic,
+                    DBInstrument.exchange_symbol == instrument.exchange_symbol,
+                )
+                .first()
+            )
+            if db_inst is None:
+                return None
+            desc = (
+                db.query(PriceBar)
+                .filter(
+                    PriceBar.instrument_id == db_inst.instrument_id,
+                    PriceBar.timeframe == timeframe,
+                )
+                .order_by(PriceBar.ts.desc())
+                .limit(n)
+                .all()
+            )
+            if len(desc) < min(n, 100):
+                return None
+            rows = list(reversed(desc))
+            bars: list[dict] = []
+            sources: list[str] = []
+            latest_as_of = None
+            for row in rows:
+                ts = row.ts
+                if isinstance(ts, datetime):
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    ts_iso = ts.isoformat()
+                else:
+                    ts_iso = str(ts)
+                as_of = row.as_of
+                if isinstance(as_of, datetime):
+                    if as_of.tzinfo is None:
+                        as_of = as_of.replace(tzinfo=timezone.utc)
+                    if latest_as_of is None or as_of > latest_as_of:
+                        latest_as_of = as_of
+                if row.source:
+                    sources.append(str(row.source))
+                bars.append({
+                    "ts": ts_iso,
+                    "open": float(row.open) if row.open is not None else None,
+                    "high": float(row.high) if row.high is not None else None,
+                    "low": float(row.low) if row.low is not None else None,
+                    "close": float(row.close) if row.close is not None else None,
+                    "volume": int(row.volume) if row.volume is not None else None,
+                    "missing_fields": [],
+                })
+            if not bars:
+                return None
+            source = max(set(sources), key=sources.count) if sources else "yfinance"
+            mic = instrument.exchange_mic if instrument else "XNAS"
+            try:
+                expected = expected_delay_minutes(mic)
+            except ValueError:
+                expected = 15
+            as_of_stamp = latest_as_of or _utcnow()
+            age_min = max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
+            grade, _reasons = grade_quality(
+                delay_minutes=expected,
+                age_minutes=age_min,
+                missing_fields=[],
+                fallback_used=False,
+                reconciled=False,  # single source in v1
+            )
+            provenance = build_provenance(
+                source, as_of=as_of_stamp, delay_minutes=expected,
+                quality_grade=grade, fallback_used=False, missing_fields=[],
+            )
+            return {
+                "symbol": instrument.provider_symbol,
+                "instrument_id": instrument.instrument_id,
+                "timeframe": timeframe,
+                "bars": bars,
+                "provenance": provenance.model_dump(mode="json"),
+            }
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    def _stub_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
         instrument, _, _ = self.registry.resolve(symbol)
         provider_symbol = instrument.provider_symbol if instrument else symbol.strip().upper()
         seed = int(hashlib.sha256(provider_symbol.encode()).hexdigest(), 16) % (2**32)

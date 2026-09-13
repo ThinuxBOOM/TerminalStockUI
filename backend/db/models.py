@@ -16,10 +16,14 @@ from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, In
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-try:  # SQLAlchemy 2.0 portable UUID (CHAR(32) on SQLite, UUID on Postgres)
+try:  # SQLAlchemy 2.0 portable UUID: native UUID on Postgres (psycopg
+    # returns uuid.UUID objects; native mode passes them through), CHAR(32)
+    # fallback on SQLite. native_uuid=False MUST NOT be used here: its result
+    # processor assumes string values and crashes on Postgres-native UUIDs
+    # (AttributeError: 'UUID' object has no attribute 'replace').
     from sqlalchemy import Uuid as _Uuid
 
-    ID_TYPE = _Uuid(native_uuid=False)
+    ID_TYPE = _Uuid()
 except Exception:  # pragma: no cover
     ID_TYPE = String(36)
 

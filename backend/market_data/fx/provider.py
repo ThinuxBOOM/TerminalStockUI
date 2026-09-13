@@ -10,6 +10,13 @@ Free-first design mirroring the equity providers:
   network path as the equity quotes, so environments that can fetch quotes
   can fetch FX. ``yfinance`` imported lazily; missing/unusable -> stub;
 - 15-minute in-memory cache of live rates (``CACHE_TTL_S``);
+- reconciler (Phase 1c): live frankfurter/yahoo rates are cross-checked
+  against the ECB eurofxref daily reference (``ECB_URL``, parsed per-EUR
+  ``Cube`` rates, 1h in-memory table cache). Agreement within
+  ``RECONCILE_TOLERANCE`` (0.5%) stamps ``reconciled=True`` (grade A);
+  disagreement keeps ``reconciled=False`` (grade B) with ``ecb_rate`` +
+  ``divergence_pct`` transparency fields; any ECB failure abstains silently
+  (``reconciled=False``, no ecb fields) and never blocks the live rate;
 - fallback: deterministic ECB reference stub table (triangle-consistent
   ``EURUSD 1.08 / USDCNY 7.25 / EURCNY 7.83``), always flagged
   ``fallback_used=True``;
@@ -40,6 +47,15 @@ LIVE_SOURCE = "frankfurter"
 YF_SOURCE = "yfinance"
 STUB_SOURCE = "fx"  # local ECB reference table served by this provider
 BASE_URL = "https://api.frankfurter.app"
+#: ECB eurofxref daily reference file (independent reconciler, Phase 1c).
+ECB_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
+#: How long a parsed ECB table is reused before refetching. The cached entry
+#: carries the ECB TIME date with it, so an ECB date rollover is picked up on
+#: the first live fetch after expiry (worst-case reconciler staleness: 1h).
+ECB_TTL_S = 3600
+#: Reconciliation tolerance: live and ECB cross rates agree when
+#: ``abs(live / ecb - 1) <= RECONCILE_TOLERANCE`` (0.5%).
+RECONCILE_TOLERANCE = 0.005
 DEFAULT_DELAY_MINUTES = 15
 CACHE_TTL_S = 15 * 60
 
@@ -66,6 +82,61 @@ def _check_ccy(code: str) -> str:
 def stub_rate(base: str, quote: str) -> float:
     """Deterministic ECB reference stub rate for ``base`` -> ``quote``."""
     return PER_EUR_STUB[quote] / PER_EUR_STUB[base]
+
+
+def _parse_ecb_xml(text: str) -> tuple[dict[str, float], str | None]:
+    """Parse an ECB eurofxref XML document.
+
+    Returns ``(per_eur_table, time_str)`` where the table maps currency codes
+    to units-per-EUR (always including ``EUR: 1.0``) and ``time_str`` is the
+    ECB ``TIME`` date (``YYYY-MM-DD``) or ``None`` when absent. Namespace
+    agnostic: matches any ``Cube`` element by local name. Raises
+    :class:`ValueError` when no usable rates are found.
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(text)
+    table: dict[str, float] = {"EUR": 1.0}
+    day: str | None = None
+    for elem in root.iter():
+        tag = elem.tag
+        if not (isinstance(tag, str) and tag.rsplit("}", 1)[-1] == "Cube"):
+            continue
+        stamp = elem.attrib.get("time")
+        if stamp is not None and day is None:
+            day = stamp
+        ccy = elem.attrib.get("currency")
+        raw_rate = elem.attrib.get("rate")
+        if ccy and raw_rate:
+            try:
+                value = float(raw_rate)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                table[str(ccy).strip().upper()] = value
+    if len(table) < 2:  # EUR alone means the feed carried no rates
+        raise ValueError("ECB feed contained no currency rates")
+    return table, day
+
+
+def _fetch_ecb_table() -> tuple[dict[str, float], str | None] | None:
+    """Best-effort fetch of the ECB daily reference table (Phase 1c reconciler).
+
+    Lazy ``httpx`` import, 5s timeout, no retry. Returns ``None`` on ANY
+    failure (missing dep, network/HTTP error, unparseable body) — the caller
+    treats ``None`` as abstention and serves the live rate unreconciled.
+    Never raises.
+    """
+    try:  # lazy: never imported at module load; offline envs stay import-safe
+        import httpx  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    try:
+        resp = httpx.get(ECB_URL, timeout=5.0)
+        resp.raise_for_status()
+        return _parse_ecb_xml(resp.text)
+    except Exception:
+        return None
 
 
 class FXProvider:
@@ -134,6 +205,11 @@ class FXProvider:
         self.stub_mode = stub_mode
         self._on_call = on_call  # health hook: fn(provider, latency_ms, ok)
         self._cache: dict[str, tuple[float, dict]] = {}
+        # ECB reconciler table: (expires_at_monotonic, ecb_time_date, per_eur).
+        # Only successful fetches are cached (failures abstain and retry on the
+        # next live fetch); the entry is date-stamped so a date rollover is
+        # picked up once the 1h TTL expires.
+        self._ecb_entry: tuple[float, str | None, dict[str, float]] | None = None
 
     # -- internals ------------------------------------------------------
     def _emit(self, latency_ms: float, ok: bool) -> None:
@@ -170,6 +246,65 @@ class FXProvider:
             "missing_fields": [],
             "fallback_used": True,
         }
+
+    def _get_ecb_table(self) -> dict[str, float] | None:
+        """Return cached ECB per-EUR table, refetching when the 1h TTL lapses.
+
+        ``None`` means the reconciler abstains (unavailable/unparseable/pair
+        uncovered is decided by the caller). Never raises.
+        """
+        try:
+            now = time.monotonic()
+            entry = self._ecb_entry
+            if entry is not None:
+                expires_at, _day, table = entry
+                if now < expires_at:
+                    return dict(table)
+            fetched = _fetch_ecb_table()
+            if fetched is None:
+                return None
+            table, day = fetched
+            self._ecb_entry = (now + ECB_TTL_S, day, dict(table))
+            return dict(table)
+        except Exception:
+            return None
+
+    def _reconcile_live_rate(self, base: str, quote: str, live_rate: float) -> dict:
+        """Cross-check a live rate against the ECB daily reference (Phase 1c).
+
+        Agree (``abs(live/ecb - 1) <= RECONCILE_TOLERANCE``) ->
+        ``{"reconciled": True, "ecb_rate": ...}`` (fresh rates grade A).
+        Disagree -> ``{"reconciled": False, "ecb_rate": ...,
+        "divergence_pct": ...}`` with ``divergence_pct`` in percent points
+        (``abs(live/ecb - 1) * 100``); grade stays B, divergence is
+        transparency-only here (persistent audit-logging is out of scope).
+        Abstain (ECB down/unparseable/pair uncovered) ->
+        ``{"reconciled": False}`` with NO ``ecb_rate``/``divergence_pct`` keys,
+        so abstention is distinguishable from disagreement and the payload
+        grades B exactly as before reconciliation existed. Never raises.
+        """
+        try:
+            if not (live_rate > 0):
+                return {"reconciled": False}
+            table = self._get_ecb_table()
+            if not table:
+                return {"reconciled": False}
+            base_rate = table.get(base)
+            quote_rate = table.get(quote)
+            if base_rate is None or quote_rate is None or base_rate <= 0:
+                return {"reconciled": False}
+            ecb_rate = quote_rate / base_rate
+            if not (ecb_rate > 0):
+                return {"reconciled": False}
+            if abs(live_rate / ecb_rate - 1.0) <= RECONCILE_TOLERANCE:
+                return {"reconciled": True, "ecb_rate": ecb_rate}
+            return {
+                "reconciled": False,
+                "ecb_rate": ecb_rate,
+                "divergence_pct": abs(live_rate / ecb_rate - 1.0) * 100.0,
+            }
+        except Exception:
+            return {"reconciled": False}
 
     @retry(
         stop=stop_after_attempt(2),
@@ -227,6 +362,8 @@ class FXProvider:
                 "delay_minutes": self.delay_minutes,
                 "missing_fields": [],
                 "fallback_used": False,
+                # Trivially reconciled: no ECB fetch is attempted.
+                "reconciled": True,
             }
 
         cache_key = f"{b}/{q}"
@@ -275,11 +412,22 @@ class FXProvider:
             "missing_fields": [],
             "fallback_used": False,
         }
+        # Phase 1c: cross-check frankfurter/yahoo success against the cached
+        # ECB daily reference. Abstains silently (reconciled False, no ecb
+        # fields) when ECB is unreachable — never blocks the live rate.
+        payload.update(self._reconcile_live_rate(b, q, rate))
         self._cache_put(cache_key, payload)
         return payload
 
-    def provenance_for(self, payload: dict) -> Provenance:
-        """Build the standard provenance envelope for a ``get_rate`` payload."""
+    def provenance_for(self, payload: dict, reconciled: bool = False) -> Provenance:
+        """Build the standard provenance envelope for a ``get_rate`` payload.
+
+        ``reconciled`` defaults to ``False`` so existing callers keep grading
+        fresh single-source rates B; :meth:`get_rate` stamps live payloads
+        with its own ``"reconciled"`` flag, which is honored when the caller
+        does not pass the keyword (so the unchanged ``/api/fx`` router flows
+        agree->A through). An explicit keyword ORs with the payload flag.
+        """
         as_of = payload.get("as_of") or _utcnow()
         if isinstance(as_of, str):
             try:
@@ -292,12 +440,13 @@ class FXProvider:
             as_of = as_of.replace(tzinfo=timezone.utc)
         age_min = max(0.0, (_utcnow() - as_of).total_seconds() / 60)
         fallback = bool(payload.get("fallback_used", False))
+        flag = bool(reconciled or payload.get("reconciled", False))
         grade, _reasons = grade_quality(
             delay_minutes=self.delay_minutes,
             age_minutes=age_min,
             missing_fields=payload.get("missing_fields", []),
             fallback_used=fallback,
-            reconciled=False,  # single FX source in v1
+            reconciled=flag,
         )
         return build_provenance(
             payload.get("source", self.name),

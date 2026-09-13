@@ -104,6 +104,99 @@ XSHG_HOLIDAY_STUB: frozenset[date] = frozenset({
     date(2026, 9, 25),
 })
 
+#: Phase 1b: exchange-calendars integration (local data, no network).
+#: MIC -> exchange_calendars calendar name. XNYS/XNAS use NYSE/NASDAQ
+#: calendars; XPAR/XAMS/XBRU use their venue-specific Euronext calendars.
+#: XSHG is intentionally EXCLUDED from primary library use — stub wins
+#: for XSHG per project decision (lunar edges stay approximate).
+_LIB_MIC_TO_CALENDAR: dict[str, str] = {
+    "XNYS": "XNYS",
+    "XNAS": "XNAS",
+    "XPAR": "XPAR",
+    "XAMS": "XAMS",
+    "XBRU": "XBRU",
+}
+
+#: Lazy cache of loaded exchange_calendars objects (MIC -> calendar).
+_LIB_CAL_CACHE: dict[str, object] = {}
+
+
+def _lib_calendar(mic: str) -> object | None:
+    """Return cached exchange_calendars calendar for ``mic`` or None.
+
+    Never raises and never networks: missing library, unknown calendar,
+    or any load error -> None (caller falls back to stub). Deterministic
+    for a given date once loaded (local precomputed rules).
+    """
+    key = mic.upper()
+    if key in _LIB_CAL_CACHE:
+        return _LIB_CAL_CACHE[key]
+    name = _LIB_MIC_TO_CALENDAR.get(key)
+    if name is None:
+        return None
+    try:
+        import exchange_calendars as _ec  # local import: no hard dep at import time
+
+        cal = _ec.get_calendar(name)
+    except Exception:
+        return None
+    _LIB_CAL_CACHE[key] = cal
+    return cal
+
+
+def _lib_is_session(day: date, mic: str) -> bool | None:
+    """Library session check for ``day``/``mic`` or None on any failure.
+
+    True == trading session, False == weekend/holiday non-session.
+    None == library missing/raises/lacks calendar -> caller uses stub.
+    Offline-safe (local data only), deterministic for a given date.
+    """
+    try:
+        cal = _lib_calendar(mic)
+        if cal is None:
+            return None
+        # is_session accepts YYYY-MM-DD strings without network.
+        result = cal.is_session(day.isoformat())  # type: ignore[attr-defined]
+        return bool(result)
+    except Exception:
+        return None
+
+
+def _lib_is_open_on_minute(local_dt: datetime, mic: str) -> bool | None:
+    """Intraday library check (incl. early closes) or None on any failure.
+
+    ``local_dt`` must already be exchange-local aware (see _exchange_now).
+    Uses is_open_on_minute (local data, no network). Returns None when the
+    library is missing, raises, or cannot answer (fallback to TRADING_SESSIONS).
+    """
+    try:
+        cal = _lib_calendar(mic)
+        if cal is None:
+            return None
+        import pandas as _pd  # local import: exchange-calendars already needs it
+
+        ts = _pd.Timestamp(local_dt)
+        result = cal.is_open_on_minute(ts)  # type: ignore[attr-defined]
+        return bool(result)
+    except Exception:
+        return None
+
+
+def _stub_is_holiday(day: date, mic: str) -> bool:
+    """Original stub holiday logic (fallback + XSHG primary)."""
+    key = mic.upper()
+    if key == "XSHG":
+        if day.month == 1 and day.day == 1:  # New Year
+            return True
+        if day.month == 5 and day.day == 1:  # Labour Day (stub: full week varies)
+            return True
+        if day.month == 10 and 1 <= day.day <= 7:  # National Day golden week
+            return True
+        return day in XSHG_HOLIDAY_STUB
+    if key in ("XPAR", "XAMS", "XBRU"):
+        return _is_euronext_holiday(day)
+    return False
+
 
 def suffix_for_mic(mic: str) -> str:
     try:
@@ -172,40 +265,76 @@ def _is_euronext_holiday(day: date) -> bool:
 
 
 def is_holiday(day: date | datetime, mic: str = "XSHG") -> bool:
-    """STUB holiday check (XSHG + Euronext; other MICs always False).
+    """Holiday check: library-backed for US/Euronext, stub-primary for XSHG.
 
-    XSHG: New Year (Jan 1), Labour Day (May 1), National Day golden week
-    (Oct 1-7) by fixed rule plus lunar-festival approximations in
-    XSHG_HOLIDAY_STUB (Spring Festival / Qingming / Dragon Boat /
-    Mid-Autumn). Documented stub: lunar dates drift and makeup-workday
-    rules are NOT modelled — replace with a licensed calendar in prod.
+    XNYS/XNAS/XPAR/XAMS/XBRU: exchange_calendars.is_session determines
+    holidays on weekdays (weekday non-session == holiday; session == not
+    holiday). Weekends defer to the stub to preserve the pre-Phase-1b
+    weekend-holiday semantics (e.g. 2026-12-26 Saturday Boxing Day stub
+    True). Any library miss/raise/lack -> fallback to the pre-Phase-1b
+    stub (Euronext six-feast stub; US False).
 
-    Euronext (XPAR/XAMS/XBRU, shared stub): New Year (Jan 1), Good Friday
-    (Easter-2d), Easter Monday (Easter+1d), Labour Day (May 1), Christmas
-    (Dec 25), Boxing Day (Dec 26). Documented stub: covers only these six
-    fixed-rule/movable feasts; bridge days, exceptional closures, and any
-    venue-specific differences are NOT modelled — replace with a licensed
-    Euronext calendar in prod.
+    XSHG: existing stub logic is primary (lunar edges stay approximate
+    per project decision). The library is consulted as a secondary check
+    only when it clearly agrees; when in doubt stub wins (i.e. return
+    value is always the stub).
+
+    Unknown MICs: False (existing default, unchanged).
     """
     d = day.date() if isinstance(day, datetime) else day
     key = mic.upper()
     if key == "XSHG":
-        if d.month == 1 and d.day == 1:  # New Year
-            return True
-        if d.month == 5 and d.day == 1:  # Labour Day (stub: full week varies)
-            return True
-        if d.month == 10 and 1 <= d.day <= 7:  # National Day golden week
-            return True
-        return d in XSHG_HOLIDAY_STUB
-    if key in ("XPAR", "XAMS", "XBRU"):
-        return _is_euronext_holiday(d)
+        stub = _stub_is_holiday(d, key)
+        try:
+            lib_sess = _lib_is_session(d, "XSHG")
+            # Secondary check only: agree or not, stub wins. No behavior change.
+            _ = lib_sess
+        except Exception:
+            pass
+        return stub
+    if key in ("XNYS", "XNAS", "XPAR", "XAMS", "XBRU"):
+        # Preserve stub True for weekend feasts (e.g. Boxing Day Saturday).
+        if d.weekday() >= 5:
+            lib_sess = _lib_is_session(d, key)
+            if lib_sess is None:
+                return _stub_is_holiday(d, key)
+            # Weekend: stub wins for True (feast-on-weekend), else False.
+            # Normal Saturday (stub False) stays False; feast Saturday stays True.
+            return _stub_is_holiday(d, key)
+        lib_sess = _lib_is_session(d, key)
+        if lib_sess is not None:
+            return not lib_sess
+        return _stub_is_holiday(d, key)
     return False
 
 
 def is_trading_day(day: date | datetime, mic: str = "XSHG") -> bool:
-    """True when ``day`` is Mon-Fri and not a stub holiday for ``mic``."""
+    """True when ``day`` is a trading session for ``mic``.
+
+    XNYS/XNAS/XPAR/XAMS/XBRU: exchange_calendars.is_session when available
+    (deterministic, offline local data); fallback to Mon-Fri + stub holiday.
+    XSHG: stub primary (Mon-Fri + stub holiday); library consulted only as
+    secondary agreement check, stub wins on any disagreement.
+    Unknown MICs: existing default (Mon-Fri, is_holiday False) unchanged.
+    """
     d = day.date() if isinstance(day, datetime) else day
-    if d.weekday() >= 5:  # Saturday / Sunday
+    key = mic.upper()
+    if key in ("XNYS", "XNAS", "XPAR", "XAMS", "XBRU"):
+        lib_sess = _lib_is_session(d, key)
+        if lib_sess is not None:
+            return lib_sess
+        if d.weekday() >= 5:  # Saturday / Sunday
+            return False
+        return not _stub_is_holiday(d, key)
+    if key == "XSHG":
+        # Stub primary; secondary library check never overrides.
+        stub_trading = d.weekday() < 5 and not _stub_is_holiday(d, key)
+        try:
+            _ = _lib_is_session(d, "XSHG")
+        except Exception:
+            pass
+        return stub_trading
+    if d.weekday() >= 5:  # Saturday / Sunday (unknown MIC default)
         return False
     return not is_holiday(d, mic)
 
@@ -240,10 +369,12 @@ def market_state_at(
     ``delayed``. Full return domain: open|closed|lunch|delayed|stale.
 
     XSHG sessions (Asia/Shanghai): 09:30-11:30 + 13:00-15:00; lunch
-    11:30-13:00. US (09:30-16:00 ET) and Euronext (09:00-17:30 local,
-    Paris/Amsterdam/Brussels, no lunch break) are continuous. Weekends +
-    is_holiday() stub (XSHG lunar approximations; Euronext six-feast stub)
-    -> closed.
+    11:30-13:00 (stub primary, preserved). US (09:30-16:00 ET) and Euronext
+    (09:00-17:30 local, Paris/Amsterdam/Brussels, no lunch break) are
+    continuous. Phase 1b: XNYS/XNAS/XPAR/XAMS/XBRU sessions/holidays via
+    exchange_calendars (local data, incl. early closes) with fallback to the
+    pre-existing stub windows/rules whenever the library is missing, raises,
+    or lacks the calendar. XSHG stays stub-primary (stub wins).
     """
     key = mic.upper()
     if key not in EXCHANGE_META:
@@ -283,6 +414,10 @@ def market_state_at(
         if afternoon_open <= t < afternoon_close:
             return "open"
         return "closed"
+    # Library intraday (handles early closes) with stub-window fallback.
+    lib_open = _lib_is_open_on_minute(local, key) if key in _LIB_MIC_TO_CALENDAR else None
+    if lib_open is not None:
+        return "open" if lib_open else "closed"
     sessions = TRADING_SESSIONS.get(key, [])
     for start, end in sessions:
         if start <= t < end:

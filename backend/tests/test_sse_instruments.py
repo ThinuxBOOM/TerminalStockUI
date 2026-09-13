@@ -200,3 +200,36 @@ def test_http_quote_sse_currency_and_state():
     assert body["currency"] == "CNY"
     assert (body.get("instrument") or {}).get("exchange_mic") == "XSHG"
     assert body["market_state"] in ("open", "closed", "delayed", "stale")
+
+
+# -- Phase 1b pinned dates (XSHG stub-primary, lunch preserved) ---------------
+
+def test_phase1b_xshg_lunch_preserved_wednesday():
+    """2025-09-03 Wednesday: XSHG open/lunch/open preserved (stub wins)."""
+    assert is_trading_day(date(2025, 9, 3), "XSHG")
+    assert not is_holiday(date(2025, 9, 3), "XSHG")
+    assert market_state_at("XSHG", datetime(2025, 9, 3, 10, 0, tzinfo=SH)) == "open"
+    assert market_state_at("XSHG", datetime(2025, 9, 3, 12, 0, tzinfo=SH)) == "lunch"
+    assert market_state_at("XSHG", datetime(2025, 9, 3, 14, 0, tzinfo=SH)) == "open"
+    assert market_state_at("XSHG", datetime(2025, 9, 3, 16, 0, tzinfo=SH)) == "closed"
+
+
+def test_phase1b_xshg_new_year_holiday():
+    """2026-01-01 Thursday New Year: XSHG holiday/closed (stub)."""
+    assert is_holiday(date(2026, 1, 1), "XSHG")
+    assert not is_trading_day(date(2026, 1, 1), "XSHG")
+    assert market_state_at("XSHG", datetime(2026, 1, 1, 10, 0, tzinfo=SH)) == "closed"
+
+
+def test_phase1b_xshg_stub_wins_over_library():
+    """2025-05-02 Fri: stub says trading, library says holiday -> stub wins.
+
+    Project decision: XSHG lunar edges stay approximate; when in doubt stub
+    wins. 2025-05-02 is a Friday bridge day where the library reports a
+    non-session but the stub reports a trading day.
+    """
+    # Stub primary: not a stub holiday, so trading day True.
+    assert not is_holiday(date(2025, 5, 2), "XSHG")
+    assert is_trading_day(date(2025, 5, 2), "XSHG")
+    # Lunch mapping still applies on this stub-trading day.
+    assert market_state_at("XSHG", datetime(2025, 5, 2, 12, 0, tzinfo=SH)) == "lunch"

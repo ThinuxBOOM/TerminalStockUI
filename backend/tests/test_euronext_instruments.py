@@ -277,3 +277,49 @@ def test_http_quote_euronext_currency_and_state():
     assert body["currency"] == "EUR"
     assert (body.get("instrument") or {}).get("exchange_mic") == "XPAR"
     assert body["market_state"] in ("open", "closed", "delayed", "stale")
+
+
+# -- Phase 1b pinned dates (library-verified, deterministic, offline) ---------
+
+def test_phase1b_euronext_boxing_day_2025_closed():
+    """2025-12-26 Friday Boxing Day: XPAR/XAMS/XBRU closed.
+
+    Verified against exchange_calendars (not memory): library reports a
+    non-session for all three Euronext venues; our is_holiday agrees.
+    """
+    import exchange_calendars as ec
+
+    for mic in ("XPAR", "XAMS", "XBRU"):
+        cal = ec.get_calendar(mic)
+        assert not cal.is_session("2025-12-26"), f"library should say non-session {mic}"
+        assert is_holiday(date(2025, 12, 26), mic), f"{mic} Boxing Day holiday"
+        assert not is_trading_day(date(2025, 12, 26), mic)
+    assert market_state_at("XPAR", datetime(2025, 12, 26, 10, 0, tzinfo=PAR)) == "closed"
+    assert market_state_at("XAMS", datetime(2025, 12, 26, 10, 0, tzinfo=AMS)) == "closed"
+    assert market_state_at("XBRU", datetime(2025, 12, 26, 10, 0, tzinfo=BRU)) == "closed"
+
+
+def test_phase1b_euronext_normal_wednesday_open():
+    """2025-09-03 Wednesday: normal session open for all Euronext venues."""
+    for mic, tz in (("XPAR", PAR), ("XAMS", AMS), ("XBRU", BRU)):
+        assert not is_holiday(date(2025, 9, 3), mic)
+        assert is_trading_day(date(2025, 9, 3), mic)
+        assert market_state_at(mic, datetime(2025, 9, 3, 10, 0, tzinfo=tz)) == "open"
+        # No lunch break (unlike XSHG).
+        assert market_state_at(mic, datetime(2025, 9, 3, 12, 30, tzinfo=tz)) == "open"
+
+
+def test_phase1b_euronext_christmas_2025_and_new_year_2026():
+    """2025-12-25 Christmas + 2026-01-01 New Year: Euronext closed."""
+    for mic, tz in (("XPAR", PAR), ("XAMS", AMS), ("XBRU", BRU)):
+        assert is_holiday(date(2025, 12, 25), mic)
+        assert is_holiday(date(2026, 1, 1), mic)
+        assert market_state_at(mic, datetime(2025, 12, 25, 10, 0, tzinfo=tz)) == "closed"
+        assert market_state_at(mic, datetime(2026, 1, 1, 10, 0, tzinfo=tz)) == "closed"
+
+
+def test_phase1b_euronext_library_determinism():
+    """Repeat calls give identical answers (offline local data)."""
+    d = date(2025, 12, 26)
+    assert is_holiday(d, "XPAR") == is_holiday(d, "XPAR") is True
+    assert is_trading_day(d, "XPAR") == is_trading_day(d, "XPAR") is False

@@ -9,6 +9,9 @@ from backend.api.main import create_app
 from backend.instruments.calendars import (
     SUPPORTED_MICS,
     expected_delay_minutes,
+    is_holiday,
+    is_trading_day,
+    market_state_at,
     provider_symbol_for,
     split_provider_symbol,
     suffix_for_mic,
@@ -104,3 +107,77 @@ def test_search_market_filter_and_empty():
     body = client.get("/api/instruments/search", params={"q": "A", "market": "XSHG"}).json()
     assert body["results"] and all(r["exchange_mic"] == "XSHG" for r in body["results"])
     assert client.get("/api/instruments/search", params={"q": "A", "market": "NOPE"}).status_code == 422
+
+
+# -- Phase 1b pinned dates (exchange-calendars backed, deterministic) --------
+
+def test_phase1b_us_christmas_2025_closed():
+    """2025-12-25 Thursday Christmas: XNYS/XNAS closed (library)."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    NY = ZoneInfo("America/New_York")
+    assert is_holiday(date(2025, 12, 25), "XNYS")
+    assert is_holiday(date(2025, 12, 25), "XNAS")
+    assert not is_trading_day(date(2025, 12, 25), "XNYS")
+    assert not is_trading_day(date(2025, 12, 25), "XNAS")
+    assert market_state_at("XNYS", datetime(2025, 12, 25, 10, 0, tzinfo=NY)) == "closed"
+    assert market_state_at("XNAS", datetime(2025, 12, 25, 10, 0, tzinfo=NY)) == "closed"
+
+
+def test_phase1b_us_normal_wednesday_open():
+    """2025-09-03 Wednesday: normal session open for XNYS/XNAS."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    NY = ZoneInfo("America/New_York")
+    assert not is_holiday(date(2025, 9, 3), "XNYS")
+    assert is_trading_day(date(2025, 9, 3), "XNYS")
+    assert is_trading_day(date(2025, 9, 3), "XNAS")
+    assert market_state_at("XNYS", datetime(2025, 9, 3, 10, 0, tzinfo=NY)) == "open"
+    assert market_state_at("XNAS", datetime(2025, 9, 3, 10, 0, tzinfo=NY)) == "open"
+
+
+def test_phase1b_new_year_2026_holiday_all_venues():
+    """2026-01-01 Thursday New Year: holiday everywhere (library + stub)."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    for mic in ("XNYS", "XNAS", "XPAR", "XAMS", "XBRU", "XSHG"):
+        assert is_holiday(date(2026, 1, 1), mic), f"{mic} Jan1 should be holiday"
+        assert not is_trading_day(date(2026, 1, 1), mic), f"{mic} Jan1 not trading"
+    NY = ZoneInfo("America/New_York")
+    PAR = ZoneInfo("Europe/Paris")
+    assert market_state_at("XNYS", datetime(2026, 1, 1, 10, 0, tzinfo=NY)) == "closed"
+    assert market_state_at("XPAR", datetime(2026, 1, 1, 10, 0, tzinfo=PAR)) == "closed"
+
+
+def test_phase1b_delay_metadata_unchanged():
+    """Per-MIC delay_minutes stays 15 (contractual, byte-identical META)."""
+    for mic in ("XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"):
+        assert expected_delay_minutes(mic) == 15
+
+
+def test_phase1b_unknown_mic_behavior_unchanged():
+    """Unknown MICs: market_state_at ValueError, is_holiday False default."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        market_state_at("XXXX", datetime(2025, 9, 3, 10, 0, tzinfo=ZoneInfo("America/New_York")))
+    assert is_holiday(date(2025, 9, 3), "XXXX") is False
+
+
+def test_phase1b_deterministic_repeat_calls():
+    """Same date -> same answer on repeat (deterministic, offline local data)."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    NY = ZoneInfo("America/New_York")
+    d = date(2025, 12, 25)
+    assert is_holiday(d, "XNYS") == is_holiday(d, "XNYS")
+    assert is_trading_day(d, "XNAS") == is_trading_day(d, "XNAS")
+    dt = datetime(2025, 9, 3, 10, 0, tzinfo=NY)
+    assert market_state_at("XNYS", dt) == market_state_at("XNYS", dt) == "open"

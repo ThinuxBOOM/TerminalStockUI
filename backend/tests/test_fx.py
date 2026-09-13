@@ -516,3 +516,229 @@ def test_router_prefix_and_package_exports():
 
     assert _P is FXProvider and _E is FXProvenanceMissing
     assert callable(_c) and callable(_g)
+
+
+# -- Phase 1c ECB reconciliation (offline: all network monkeypatched) -------
+
+
+#: Fake ECB per-EUR table (units per EUR); EUR/USD cross == 1.08 exactly.
+ECB_TABLE = {"EUR": 1.0, "USD": 1.08, "CNY": 7.83}
+
+ECB_SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">
+  <gesmes:subject>Reference rates</gesmes:subject>
+  <gesmes:Sender><gesmes:name>European Central Bank</gesmes:name></gesmes:Sender>
+  <Cube>
+    <Cube time="2026-09-11">
+      <Cube currency="USD" rate="1.0821"/>
+      <Cube currency="JPY" rate="162.34"/>
+      <Cube currency="CNY" rate="7.8422"/>
+    </Cube>
+  </Cube>
+</gesmes:Envelope>"""
+
+
+def _live_reconciled_provider(monkeypatch, *, live_rate, ecb_table=ECB_TABLE):
+    """Live frankfurter stub + fake ECB table (no real network either way)."""
+    prov = FXProvider(stub_mode=False)
+
+    def _live(base: str, quote: str) -> dict:
+        return {
+            "base": base, "quote": quote, "rate": live_rate,
+            "as_of": _utcnow(), "source": "frankfurter",
+        }
+
+    def _ecb() -> dict | None:
+        return dict(ecb_table) if ecb_table is not None else None
+
+    monkeypatch.setattr(prov, "_fetch_raw", _live)
+    monkeypatch.setattr(prov, "_get_ecb_table", _ecb)
+    return prov
+
+
+def test_reconcile_agree_grades_A(monkeypatch):
+    prov = _live_reconciled_provider(monkeypatch, live_rate=1.081)  # ~0.09% off
+    out = prov.get_rate("EUR", "USD")
+    assert out["fallback_used"] is False
+    assert out["reconciled"] is True
+    assert out["ecb_rate"] == pytest.approx(1.08)
+    assert "divergence_pct" not in out  # agree carries no divergence field
+    assert prov.provenance_for(out).quality_grade == "A"
+    # Explicit keyword also reaches A from a bare (unstamped) payload.
+    bare = {
+        "pair": "EUR/USD", "rate": 1.081, "as_of": _utcnow(),
+        "source": "frankfurter", "missing_fields": [], "fallback_used": False,
+    }
+    assert prov.provenance_for(bare, reconciled=True).quality_grade == "A"
+
+
+def test_reconcile_disagree_grades_B_with_divergence(monkeypatch):
+    prov = _live_reconciled_provider(monkeypatch, live_rate=1.10)  # ~1.85% off
+    out = prov.get_rate("EUR", "USD")
+    assert out["fallback_used"] is False
+    assert out["rate"] == pytest.approx(1.10)
+    assert out["reconciled"] is False
+    assert out["ecb_rate"] == pytest.approx(1.08)
+    assert out["divergence_pct"] == pytest.approx(abs(1.10 / 1.08 - 1) * 100.0)
+    assert prov.provenance_for(out).quality_grade == "B"
+
+
+def test_reconciler_abstains_when_ecb_down(monkeypatch):
+    """ECB outage -> live rate served unreconciled, grade B exactly as before.
+
+    Abstain choice: ``reconciled: False`` with NO ``ecb_rate``/
+    ``divergence_pct`` keys, so abstention is distinguishable from a voted
+    disagreement (which always carries both fields).
+    """
+    prov = _live_reconciled_provider(monkeypatch, live_rate=1.08, ecb_table=None)
+    out = prov.get_rate("EUR", "USD")
+    assert out["fallback_used"] is False
+    assert out["rate"] == pytest.approx(1.08)
+    assert out["reconciled"] is False
+    assert "ecb_rate" not in out and "divergence_pct" not in out
+    assert prov.provenance_for(out).quality_grade == "B"
+
+
+def test_yahoo_live_path_also_reconciles(monkeypatch):
+    """Frankfurter down + yahoo live + ECB agree -> reconciled True, grade A."""
+    prov = FXProvider(stub_mode=False)
+
+    def _boom(base: str, quote: str) -> dict:
+        raise ProviderError("fx", "frankfurter down")
+
+    def _live_yahoo(base: str, quote: str) -> dict:
+        return {
+            "base": base, "quote": quote, "rate": 1.081,
+            "as_of": _utcnow(), "source": "yfinance",
+        }
+
+    monkeypatch.setattr(prov, "_fetch_raw", _boom)
+    monkeypatch.setattr(prov, "_fetch_yahoo", _live_yahoo)
+    monkeypatch.setattr(prov, "_get_ecb_table", lambda: dict(ECB_TABLE))
+    out = prov.get_rate("EUR", "USD")
+    assert out["source"] == "yfinance"
+    assert out["fallback_used"] is False
+    assert out["reconciled"] is True
+    assert prov.provenance_for(out).quality_grade == "A"
+
+
+def test_identity_skips_ecb_fetch(monkeypatch):
+    """base==quote is trivially reconciled without any ECB/live fetch."""
+    import backend.market_data.fx.provider as fxprov  # noqa: PLC0415
+
+    calls = {"ecb": 0, "live": 0}
+
+    def _no_ecb():
+        calls["ecb"] += 1
+        raise AssertionError("ECB must not be fetched for identity pairs")
+
+    def _no_live(base: str, quote: str) -> dict:
+        calls["live"] += 1
+        raise AssertionError("upstream must not be fetched for identity pairs")
+
+    monkeypatch.setattr(fxprov, "_fetch_ecb_table", _no_ecb)
+    prov = FXProvider(stub_mode=False)
+    monkeypatch.setattr(prov, "_fetch_raw", _no_live)
+    out = prov.get_rate("USD", "USD")
+    assert out["rate"] == 1.0 and out["reconciled"] is True
+    assert calls == {"ecb": 0, "live": 0}
+    assert prov.provenance_for(out).quality_grade == "A"
+
+
+def test_reconcile_tolerance_boundary(monkeypatch):
+    """Tolerance is |live/ecb - 1| <= 0.005 (0.5%), agree side inclusive."""
+    from backend.market_data.fx.provider import RECONCILE_TOLERANCE  # noqa: PLC0415
+
+    assert RECONCILE_TOLERANCE == pytest.approx(0.005)
+    # Exact-binary ECB cross (USD 2.00/EUR) keeps the edge deterministic.
+    table = {"EUR": 1.0, "USD": 2.0, "CNY": 14.5}
+    agree = _live_reconciled_provider(
+        monkeypatch, live_rate=2.0 * 1.005, ecb_table=table
+    ).get_rate("EUR", "USD")
+    assert agree["reconciled"] is True  # nominally exactly 0.5% still agrees
+    inside = _live_reconciled_provider(
+        monkeypatch, live_rate=2.0 * 1.004, ecb_table=table
+    ).get_rate("EUR", "USD")
+    assert inside["reconciled"] is True
+    outside = _live_reconciled_provider(
+        monkeypatch, live_rate=2.0 * 1.0051, ecb_table=table
+    ).get_rate("EUR", "USD")
+    assert outside["reconciled"] is False
+    assert outside["divergence_pct"] == pytest.approx(0.51, abs=0.01)
+    assert outside["ecb_rate"] == pytest.approx(2.0)
+
+
+def test_ecb_xml_parsing_per_eur_and_time():
+    """eurofxref Cube parsing: per-EUR rates + TIME date, namespace-agnostic."""
+    from backend.market_data.fx import provider as fxprov  # noqa: PLC0415
+
+    table, day = fxprov._parse_ecb_xml(ECB_SAMPLE_XML)
+    assert table["EUR"] == 1.0
+    assert table["USD"] == pytest.approx(1.0821)
+    assert table["CNY"] == pytest.approx(7.8422)
+    assert day == "2026-09-11"  # as_of comes from the ECB TIME date
+    with pytest.raises(ValueError):
+        fxprov._parse_ecb_xml(
+            "<gesmes:Envelope xmlns:gesmes='http://x'><Cube/></gesmes:Envelope>"
+        )
+
+
+def test_ecb_fetch_never_raises(monkeypatch):
+    """Transport failure AND garbage body both abstain (return None)."""
+    import sys  # noqa: PLC0415
+    import types  # noqa: PLC0415
+
+    from backend.market_data.fx import provider as fxprov  # noqa: PLC0415
+
+    fake_httpx = types.SimpleNamespace()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("ecb down")
+
+    def _garbage(*args, **kwargs):
+        return types.SimpleNamespace(
+            text="<not xml", raise_for_status=lambda: None
+        )
+
+    fake_httpx.get = _boom
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    assert fxprov._fetch_ecb_table() is None
+    fake_httpx.get = _garbage
+    assert fxprov._fetch_ecb_table() is None
+
+
+def test_ecb_table_fetched_once_per_hour(monkeypatch):
+    """One cached ECB fetch serves reconciliations across pairs (hot path)."""
+    import backend.market_data.fx.provider as fxprov  # noqa: PLC0415
+
+    calls = {"n": 0}
+
+    def _fake_fetch():
+        calls["n"] += 1
+        return (dict(ECB_TABLE), "2026-09-11")
+
+    def _live(base: str, quote: str) -> dict:
+        return {
+            "base": base, "quote": quote,
+            "rate": ECB_TABLE[quote] / ECB_TABLE[base],
+            "as_of": _utcnow(), "source": "frankfurter",
+        }
+
+    monkeypatch.setattr(fxprov, "_fetch_ecb_table", _fake_fetch)
+    prov = FXProvider(stub_mode=False)
+    monkeypatch.setattr(prov, "_fetch_raw", _live)
+    first = prov.get_rate("EUR", "USD")
+    second = prov.get_rate("USD", "CNY")
+    assert calls["n"] == 1
+    assert first["reconciled"] is True and second["reconciled"] is True
+    assert first["ecb_rate"] == pytest.approx(1.08)
+    assert second["ecb_rate"] == pytest.approx(7.25)
+
+
+def test_stub_path_never_reconciled():
+    """Flagged stub is unchanged: no reconciled flag, grade C regardless."""
+    prov = FXProvider(stub_mode=True)
+    out = prov.get_rate("EUR", "USD")
+    assert "reconciled" not in out
+    assert prov.provenance_for(out).quality_grade == "C"
+    assert prov.provenance_for(out, reconciled=True).quality_grade == "C"

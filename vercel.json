@@ -4,6 +4,12 @@
   "buildCommand": "npm run build --prefix frontend",
   "outputDirectory": "frontend/dist",
   "installCommand": "npm install --prefix frontend",
+  "crons": [
+    {
+      "path": "/api/cron/ingest",
+      "schedule": "0 1 * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",

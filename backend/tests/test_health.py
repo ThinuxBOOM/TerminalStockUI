@@ -88,3 +88,27 @@ def test_reconcile_quotes_agree_and_diverge():
     assert bad["compared"] and not bad["agree"]
     missing = reconcile_quotes({"price": None}, {"price": 100.0})
     assert not missing["compared"]
+
+
+# -- Phase 1b calendar-aware health (library-backed, deterministic) -----------
+
+def test_phase1b_health_us_christmas_closed():
+    """2025-12-25 Christmas: health market_state closed for XNYS/XNAS."""
+    from zoneinfo import ZoneInfo
+
+    NY = ZoneInfo("America/New_York")
+    xmas = datetime(2025, 12, 25, 10, 0, tzinfo=NY)
+    assert market_state(xmas, delay_minutes=15, now=xmas, mic="XNYS", at=xmas) == "closed"
+    assert market_state(xmas, delay_minutes=15, now=xmas, mic="XNAS", at=xmas) == "closed"
+    # Fresh Wednesday session stays open.
+    wed = datetime(2025, 9, 3, 10, 0, tzinfo=NY)
+    assert market_state(wed, delay_minutes=15, now=wed, mic="XNYS", at=wed) == "open"
+
+
+def test_phase1b_health_euronext_boxing_day_closed():
+    """2025-12-26 Boxing Day: health market_state closed for XPAR."""
+    from zoneinfo import ZoneInfo
+
+    PAR = ZoneInfo("Europe/Paris")
+    boxing = datetime(2025, 12, 26, 10, 0, tzinfo=PAR)
+    assert market_state(boxing, delay_minutes=15, now=boxing, mic="XPAR", at=boxing) == "closed"
