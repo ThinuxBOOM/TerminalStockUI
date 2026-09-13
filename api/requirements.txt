@@ -9,7 +9,8 @@ SQLAlchemy>=2.0
 psycopg[binary]>=3.1
 mangum>=0.17
 redis>=5.0
-httpx>=0.27yfinance>=0.2.40
+httpx>=0.27
+yfinance>=0.2.40
 tenacity>=8.2
 cryptography>=42.0
 numpy>=1.26
