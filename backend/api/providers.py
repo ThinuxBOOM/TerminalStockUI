@@ -9,6 +9,9 @@ from .deps import get_health_tracker, get_market_service
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
+#: Reference symbol for the health probe (must exist in the seed registry).
+PROBE_SYMBOL = "AAPL"
+
 
 @router.get("/health")
 def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker)):
@@ -26,7 +29,7 @@ def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker
 @router.post("/health/test")
 def test_provider(provider: str = "yfinance", svc=Depends(get_market_service)):
     """Health probe: fetch a reference quote and return the fresh stats."""
-    svc.get_quote("AAPL")
+    svc.get_quote(PROBE_SYMBOL)
     tracker = get_health_tracker()
     stats = tracker.stats(provider)
     if stats["total_calls"] == 0:

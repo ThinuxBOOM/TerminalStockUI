@@ -23,6 +23,10 @@ from typing import Mapping
 CODE = "FX_PROVENANCE_MISSING"
 MAX_AGE_HOURS = 24.0
 
+#: Disclosure carried on cross-market decision outputs (rank/compare), which
+#: convert raw FX math into a market comparison the UI renders as advice-adjacent.
+DISCLOSURE = "Not investment advice. For informational purposes only."
+
 
 class FXProvenanceMissing(RuntimeError):
     """Raised when cross-market use is attempted without fresh FX provenance."""
@@ -238,6 +242,7 @@ def rank_cross_market(
         "count": len(ranked),
         "ranked": ranked,
         "provenance": {**gate, "as_of": gate["as_of"]},
+        "disclosure": DISCLOSURE,
     }
 
 
@@ -263,4 +268,5 @@ def compare_cross_market(
         "b": ordered[1] if len(ordered) > 1 else None,
         "winner": winner,
         "provenance": result["provenance"],
+        "disclosure": DISCLOSURE,
     }

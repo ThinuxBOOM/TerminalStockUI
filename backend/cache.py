@@ -98,8 +98,3 @@ def get_cache() -> CacheBackend:
             log.warning("REDIS_URL set but redis unavailable (%s); using memory cache", exc)
     _cache = InMemoryCache()
     return _cache
-
-
-def reset_cache() -> None:
-    global _cache
-    _cache = None

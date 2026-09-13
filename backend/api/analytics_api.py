@@ -51,6 +51,7 @@ NOTE = (
     "Statement feed not wired in M3: fundamentals/quality/valuation report "
     "the analytics modules' own 'unavailable' results (no fabricated inputs)."
 )
+DISCLOSURE = "Not investment advice. For informational purposes only."
 
 
 def _safe_number(value) -> float | bool | None:
@@ -185,4 +186,5 @@ def get_analytics(
         "quality": _quality_bundle(),
         "valuation": _valuation_bundle(),
         "note": NOTE,
+        "disclosure": DISCLOSURE,
     }

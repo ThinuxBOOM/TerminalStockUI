@@ -66,6 +66,14 @@ export default function AIOpinionCard({
         >
           CAPPED 20%
         </span>
+        {(opinion as { stub?: unknown }).stub === true && (
+          <span
+            className="rounded border border-term-red px-2 py-0.5 text-[10px] font-bold tracking-widest text-term-red"
+            title={opinion.limitations[0] ?? 'No live model call was made'}
+          >
+            STUB — NO LIVE CALL
+          </span>
+        )}
         {opinion.provider && (
           <span className="text-[11px] text-term-muted">
             {opinion.provider}

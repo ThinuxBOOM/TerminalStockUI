@@ -302,10 +302,15 @@ export default function WatchlistPage() {
                   </b>
                 </td>
                 <td className="p-2">
-                  <MarketStateBadge state={r.market_state} provenance={r.provenance} />
+                  <span
+                    className="text-term-muted"
+                    title="Per-row market state is not served on ranked rows — see the native quote on the Security Brief"
+                  >
+                    —
+                  </span>
                 </td>
                 <td className="p-2">
-                  <ProvenanceBadge p={r.provenance} />
+                  <ProvenanceBadge p={data.fx_provenance ?? r.provenance} />
                 </td>
                 <td className="p-2">
                   <button
@@ -326,7 +331,7 @@ export default function WatchlistPage() {
           {data.fx_provenance
             ? `${data.fx_provenance.source} as_of ${data.fx_provenance.as_of}`
             : 'provenance unavailable'}{' '}
-          · every figure carries its quote provenance; FX provenance above.
+          · provenance badge is the conversion FX envelope; native quotes per symbol.
         </p>
       </div>
     );

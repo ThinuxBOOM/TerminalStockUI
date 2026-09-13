@@ -22,6 +22,8 @@ passed through untouched from the underlying services (UTC ISO).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.analytics.quality import piotroski_score
@@ -29,6 +31,8 @@ from backend.api.deps import get_market_service, get_registry
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.service import ForecastService
 from backend.instruments.registry import InstrumentRegistry
+from backend.market_data.provenance import build_provenance
+from backend.market_data.quality import grade_quality
 from backend.market_data.service import MarketDataService
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
@@ -51,6 +55,50 @@ def _quality_signal() -> dict:
         "quality_flag": result.quality_flag,
         "reason": result.reason,
     }
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _combine_provenance(entries: list[dict]) -> dict:
+    """Merge per-row quote provenance dicts into one scan-level envelope.
+
+    Oldest as_of wins, sources are joined, fallback is sticky (any row on
+    fallback flags the scan), missing fields are unioned, and the grade is
+    recomputed via grade_quality. Empty scan: honest non-fallback envelope
+    (nothing served, nothing fallback). Additive only; per-row envelopes
+    are untouched.
+    """
+    if not entries:
+        return build_provenance(
+            "screener", as_of=_utcnow(), delay_minutes=15,
+            quality_grade="B", fallback_used=False, missing_fields=[],
+        ).model_dump(mode="json")
+    stamps: list[datetime] = []
+    for entry in entries:
+        try:
+            stamps.append(datetime.fromisoformat(str(entry["as_of"]).replace("Z", "+00:00")))
+        except (KeyError, ValueError):
+            stamps.append(_utcnow())
+    oldest = min(stamps)
+    if oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=timezone.utc)
+    sources = sorted({str(e.get("source", "unknown")) for e in entries})
+    fallback = any(bool(e.get("fallback_used")) for e in entries)
+    missing = sorted({m for e in entries for m in (e.get("missing_fields") or [])})
+    grade, _ = grade_quality(
+        delay_minutes=max(int(e.get("delay_minutes", 15) or 0) for e in entries),
+        age_minutes=max(0.0, (_utcnow() - oldest).total_seconds() / 60),
+        missing_fields=missing,
+        fallback_used=fallback,
+        reconciled=False,
+    )
+    return build_provenance(
+        "+".join(sources), as_of=oldest,
+        delay_minutes=max(int(e.get("delay_minutes", 15) or 0) for e in entries),
+        quality_grade=grade, fallback_used=fallback, missing_fields=missing,
+    ).model_dump(mode="json")
 
 
 def _normalize_market(market: str | None) -> str | None:
@@ -138,5 +186,8 @@ def screen(
         "universe_size": universe_size,
         "skipped": skipped,
         "horizon": horizon,
+        "provenance": _combine_provenance(
+            [r["provenance"] for r in page if isinstance(r.get("provenance"), dict)]
+        ),
         "disclosure": DISCLOSURE,
     }

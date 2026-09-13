@@ -9,9 +9,6 @@ from pydantic import BaseModel, Field
 
 from ..market_data.provenance import Provenance
 
-QualityGrade = Literal["A", "B", "C", "D", "F"]
-MarketState = Literal["open", "closed", "delayed", "stale"]
-
 
 class InstrumentOut(BaseModel):
     instrument_id: str

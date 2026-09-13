@@ -62,8 +62,18 @@ from backend.forecasting.registry import ENSEMBLE_MEMBERS, ENSEMBLE_VERSION
 from backend.market_data.service import MarketDataService
 
 DISCLOSURE = "Not investment advice"
-CONFIDENCE_LEVELS = ("low", "moderate", "high")
 BAR_LIMIT = 250
+#: Member-agreement spread (max(p) - min(p)) for full 3-member "high"
+#: confidence. Values unchanged; named so the band lives in one place.
+CONFIDENCE_HIGH_MAX_SPREAD = 0.08
+#: Spread ceiling for "moderate" confidence (above this -> "low").
+CONFIDENCE_MODERATE_MAX_SPREAD = 0.15
+#: Drawdown probability at/above which confidence drops one notch.
+DRAWDOWN_PENALTY_THRESHOLD = 0.25
+#: Volatility regimes that cost one confidence notch (strongest bucket first).
+VOLATILITY_PENALTY_REGIMES = frozenset({"high", "elevated", "extreme"})
+#: Members needed for "high" confidence (thin ensembles cap at moderate).
+FULL_ENSEMBLE_MIN_MODELS = 3
 SSE_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{SSE_DRIFT_VERSION}"
 EUX_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{EUX_DRIFT_VERSION}"
 EURONEXT_SUFFIXES = (".PA", ".AS", ".BR")
@@ -135,13 +145,13 @@ def _confidence(
     """
     if n_models <= 1:
         level = "low"
-    elif spread <= 0.08 and n_models >= 3:
+    elif spread <= CONFIDENCE_HIGH_MAX_SPREAD and n_models >= FULL_ENSEMBLE_MIN_MODELS:
         level = "high"
-    elif spread <= 0.15:
+    elif spread <= CONFIDENCE_MODERATE_MAX_SPREAD:
         level = "moderate"
     else:
         level = "low"
-    if n_models < 3 and level == "high":
+    if n_models < FULL_ENSEMBLE_MIN_MODELS and level == "high":
         level = "moderate"
     if str(quality_grade).upper() in ("D", "F") and level != "low":
         level = "low"
@@ -150,14 +160,14 @@ def _confidence(
             _r = str(regime).strip().lower()
         except Exception:
             _r = ""
-        if _r in ("high", "elevated", "extreme"):
+        if _r in VOLATILITY_PENALTY_REGIMES:
             level = _penalize_confidence(level)
     _dd = drawdown_prob
     if isinstance(_dd, bool):
         _dd = None
     if isinstance(_dd, (int, float)):
         try:
-            if float(_dd) >= 0.25:
+            if float(_dd) >= DRAWDOWN_PENALTY_THRESHOLD:
                 level = _penalize_confidence(level)
         except (TypeError, ValueError):
             pass

@@ -81,6 +81,10 @@ TRADING_SESSIONS: dict[str, list[tuple[time, time]]] = {
 #: Lunch-break window for XSHG (exchange-local). Returned as "lunch".
 XSHG_LUNCH: tuple[time, time] = (time(11, 30), time(13, 0))
 
+#: Staleness rule (shared with grade_quality in market_data.quality):
+#: data older than STALE_MULTIPLE x the expected feed delay is "stale".
+STALE_MULTIPLE = 2
+
 #: STUB holiday set for XSHG (Gregorian approximations of lunar festivals).
 #: Covers New Year, Spring Festival, Qingming, Labour, Dragon Boat,
 #: Mid-Autumn, National Day at date granularity only. Lunar-holiday dates
@@ -390,7 +394,7 @@ def market_state_at(
                            else int(EXCHANGE_META[key]["delay_minutes"]), 1)
         except (TypeError, ValueError):
             expected = 15
-        stale_after = max(2 * expected, 24 * 60 if session_bars >= 1 else 2 * expected)
+        stale_after = max(STALE_MULTIPLE * expected, 24 * 60 if session_bars >= 1 else STALE_MULTIPLE * expected)
         if age_min > stale_after:
             return "stale"
         wall = market_state_at(key, dt)

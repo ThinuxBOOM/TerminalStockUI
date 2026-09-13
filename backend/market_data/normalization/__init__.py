@@ -8,7 +8,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 QUOTE_FIELDS = ("price", "open", "high", "low", "prev_close", "volume", "currency")
-MATERIAL_FIELDS = ("price",)
 
 
 def _utcnow() -> datetime:
@@ -49,21 +48,3 @@ def normalize_quote(raw: dict, *, source: str, delay_minutes: int = 15) -> dict:
         quote["change"] = None
         quote["change_pct"] = None
     return quote
-
-
-def normalize_bars(rows: list[dict], *, source: str) -> list[dict]:
-    """Normalize raw OHLCV rows; sparse bars keep per-bar missing_fields."""
-    out = []
-    for row in rows or []:
-        bar = {
-            "ts": row.get("ts"),
-            "open": row.get("open"),
-            "high": row.get("high"),
-            "low": row.get("low"),
-            "close": row.get("close"),
-            "volume": row.get("volume"),
-            "source": source,
-        }
-        bar["missing_fields"] = [k for k in ("open", "high", "low", "close", "volume") if bar.get(k) is None]
-        out.append(bar)
-    return out

@@ -1,15 +1,16 @@
 import { useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AI_PROFILES,
   api,
   getAIPerformance,
   getHealth,
+  getProviderBudgets,
+  getProviderKeysStatus,
   testProviderHealth,
   type AIProfile,
 } from '../../api/client';
 import Loading from '../../components/Loading';
-import ProvenanceBadge from '../../components/ProvenanceBadge';
 
 /** API value → display label. Backend uses anthropic/xai; UI shows claude/grok. */
 const PROVIDER_OPTIONS = [
@@ -41,6 +42,18 @@ export default function ProviderSettings() {
   const [profile, setProfile] = useState<AIProfile>('Quick Insight');
   const [budget, setBudget] = useState('25');
   const health = useQuery({ queryKey: ['health'], queryFn: getHealth, retry: false });
+  const keyStatus = useQuery({
+    queryKey: ['provider-keys-status'],
+    queryFn: getProviderKeysStatus,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const savedBudgets = useQuery({
+    queryKey: ['provider-budgets'],
+    queryFn: getProviderBudgets,
+    retry: false,
+    staleTime: 60_000,
+  });
   const perf = useQuery({
     queryKey: ['ai-performance'],
     queryFn: getAIPerformance,
@@ -48,16 +61,22 @@ export default function ProviderSettings() {
     staleTime: 60_000,
   });
 
+  const queryClient = useQueryClient();
+
   const save = useMutation({
     mutationFn: async () => {
       // Keys are stored encrypted server-side; never returned or logged.
       const { data } = await api.post('/api/providers/keys', { provider, model, api_key: apiKey });
       return data;
     },
+    onSuccess: () => {
+      setApiKey('');
+      void queryClient.invalidateQueries({ queryKey: ['provider-keys-status'] });
+    },
   });
   const test = useMutation({
-    // Wired to POST /api/providers/health/test (fallback: POST /api/ai/test).
-    mutationFn: () => testProviderHealth(provider, profile),
+    // AI key check: POST /api/ai/providers/health/test (configured vs stub).
+    mutationFn: () => testProviderHealth(provider),
   });
   const saveBudget = useMutation({
     mutationFn: async () => {
@@ -65,6 +84,9 @@ export default function ProviderSettings() {
       if (!Number.isFinite(monthly_usd) || monthly_usd < 0) throw new Error('invalid budget');
       const { data } = await api.post('/api/providers/budget', { provider, monthly_usd });
       return data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['provider-budgets'] });
     },
   });
 
@@ -126,6 +148,18 @@ export default function ProviderSettings() {
           </div>
           {save.isSuccess && <p className="mt-2 text-xs text-term-green">Key stored (server confirms receipt only).</p>}
           {save.isError && <p className="mt-2 text-xs text-term-red">Save failed — backend unreachable or rejected.</p>}
+          {keyStatus.data && keyStatus.data.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs" aria-label="Configured providers">
+              {keyStatus.data.map((k) => (
+                <li key={k.provider} className="flex justify-between border-b border-term-border pb-1">
+                  <span className="text-term-muted">{k.provider}</span>
+                  <span className={k.configured ? 'text-term-green' : 'text-term-muted'}>
+                    {k.configured ? `configured${k.model ? ` · ${k.model}` : ''}` : 'no key'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
           {test.data && (
             <p className={`mt-2 text-xs ${test.data.ok ? 'text-term-green' : 'text-term-red'}`}>
               Test: {test.data.ok ? 'OK' : 'FAIL'}{' '}
@@ -172,9 +206,15 @@ export default function ProviderSettings() {
             </button>
           </div>
           {saveBudget.isSuccess && <p className="mt-1 text-xs text-term-green">Budget saved.</p>}
+          {savedBudgets.data && savedBudgets.data[provider] !== undefined && (
+            <p className="mt-1 text-xs text-term-muted">
+              Saved cap for {provider}: ${savedBudgets.data[provider]} USD/mo.
+            </p>
+          )}
           {saveBudget.isError && (
             <p className="mt-1 text-xs text-term-amber">
-              Budget endpoint not confirmed by backend — value kept locally ({budget} USD).
+              Budget endpoint not confirmed by backend — not saved; value retained in
+              this field only ({budget} USD).
             </p>
           )}
           <p className="term-label mt-4">Provider health</p>
@@ -270,22 +310,15 @@ export default function ProviderSettings() {
             </table>
             <p className="mt-1 text-[10px] text-term-muted">
               Brier in red = worse than coin-flip (0.25). Scores are out-of-sample only.
+              Brier/ECE stay — until per-model scoring is served; hit rate + call counts are live.
             </p>
           </div>
         )}
         {perf.dataUpdatedAt > 0 && (
-          <div className="mt-2">
-            <ProvenanceBadge
-              p={{
-                source: 'ai-performance-api',
-                as_of: new Date(perf.dataUpdatedAt).toISOString(),
-                delay_minutes: 15,
-                quality_grade: 'B',
-                fallback_used: false,
-                missing_fields: [],
-              }}
-            />
-          </div>
+          <p className="mt-2 text-[10px] text-term-muted">
+            refreshed {new Date(perf.dataUpdatedAt).toLocaleString()} · the performance
+            endpoint ships no provenance envelope, so no source/grade badge is shown.
+          </p>
         )}
       </section>
     </div>

@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 
 from backend.instruments.calendars import market_state_at
 
+#: Staleness rule (shared with grade_quality in market_data.quality):
+#: data older than STALE_MULTIPLE x the expected feed delay is "stale".
+STALE_MULTIPLE = 2
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -92,7 +96,7 @@ def market_state(
         as_of = as_of.replace(tzinfo=timezone.utc)
     age_min = (now - as_of).total_seconds() / 60
     expected = max(int(delay_minutes), 1)
-    stale_after = max(2 * expected, 24 * 60 if session_bars >= 1 else 2 * expected)
+    stale_after = max(STALE_MULTIPLE * expected, 24 * 60 if session_bars >= 1 else STALE_MULTIPLE * expected)
     if age_min > stale_after:
         return "stale"
     if mic is not None:

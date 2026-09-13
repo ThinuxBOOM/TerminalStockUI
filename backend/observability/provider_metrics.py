@@ -17,6 +17,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Alert rule (README): error_rate above this over 5 minutes triggers an alert.
+ERROR_THRESHOLD_DEFAULT = 0.05
+#: Minimum calls before the error-rate alert can fire (burst rule excepted).
+MIN_CALLS_DEFAULT = 5
+
+
 def _as_timestamp(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -127,7 +133,7 @@ def aggregate_all(
     ]
 
 
-def check_error_alert(stats: Mapping[str, Any], *, threshold: float = 0.05, min_calls: int = 5) -> bool:
+def check_error_alert(stats: Mapping[str, Any], *, threshold: float = ERROR_THRESHOLD_DEFAULT, min_calls: int = MIN_CALLS_DEFAULT) -> bool:
     """True when the 5m (fallback 1h) error rate breaches threshold.
 
     README rule: alert (log + audit event) on error_rate > 5%/5min.

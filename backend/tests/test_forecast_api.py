@@ -72,6 +72,9 @@ def test_forecast_display_fields_for_terminal_ui():
     assert len(body["evidence_ids"]) >= 2
     assert all(isinstance(e, str) and e for e in body["evidence_ids"])
     assert any("momentum" in e for e in body["evidence_ids"])
+    assert len(body["limitations"]) >= 3  # never empty on live data
+    assert body["inputs"]["feature_version"] == body["feature_version"]
+    assert body["inputs"]["data_version"] == body["data_version"]
 
 
 def test_forecast_all_horizons_ok():

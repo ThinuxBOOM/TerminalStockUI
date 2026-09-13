@@ -2,11 +2,11 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
   getAnalytics,
+  getBars,
   getForecast,
   getQuote,
   type Analytics,
   type Forecast,
-  type Provenance,
 } from '../../api/client';
 import ProvenanceBadge from '../../components/ProvenanceBadge';
 import FreshnessBadge from '../../components/FreshnessBadge';
@@ -18,34 +18,6 @@ import ErrorState, { StaleBanner } from '../../components/ErrorState';
 import PriceChart from './PriceChart';
 
 const DISCLOSURE = 'Not investment advice. For informational purposes only.';
-
-/** Deterministic placeholder — used only when the live forecast endpoint fails. */
-function mockForecast(symbol: string): Forecast {
-  void symbol;
-  const provenance: Provenance = {
-    source: 'deterministic-engine/mock',
-    as_of: new Date().toISOString(),
-    delay_minutes: 15,
-    quality_grade: 'A',
-    fallback_used: true,
-    missing_fields: ['live_forecast'],
-  };
-  return {
-    symbol,
-    horizon_days: 21,
-    label: 'moderately positive',
-    probability: 0.64,
-    confidence: 'Moderate',
-    quality_grade: 'A',
-    provider: 'deterministic-engine/mock',
-    why: ['trend + momentum intact', 'quality: high ROE, low leverage', 'supportive sector breadth'],
-    risks: ['valuation above 5y median', 'earnings event in 12d', 'elevated sector volatility'],
-    evidence_ids: [],
-    calibration: [],
-    limitations: ['placeholder — live forecast unreachable'],
-    provenance,
-  };
-}
 
 type BriefEvent = { date: string; title: string };
 
@@ -85,9 +57,16 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
     retry: false,
     staleTime: 60_000,
   });
+  const barsQ = useQuery({
+    queryKey: ['bars', symbol],
+    queryFn: () => getBars(symbol, '1d', 90),
+    retry: false,
+    staleTime: 60_000,
+  });
 
-  const forecast: Forecast = forecastQ.data ?? mockForecast(symbol);
-  const forecastLive = forecastQ.data !== undefined;
+  // Honesty rule: no fabricated numbers. A missing/failed forecast renders an
+  // explicit unavailable state — never a seeded placeholder figure.
+  const forecast: Forecast | null = forecastQ.data ?? null;
   const analytics: Analytics | null = analyticsQ.data ?? null;
   const events = eventsFromAnalytics(analytics);
 
@@ -102,10 +81,13 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
     return (
       <div className="max-w-full">
         <StaleBanner detail={quote.error instanceof Error ? quote.error.message : 'quote endpoint unreachable'} />
-        {!forecastLive && (
-          <StaleBanner detail="forecast endpoint unreachable — showing deterministic placeholder" />
-        )}
-        <ForecastCard symbol={symbol} price={null} currency="USD" forecast={forecast} live={!forecastQ.isError} />
+        <ForecastUnavailable
+          detail="forecast not requested without a live quote — no placeholder numbers shown"
+          onRetry={() => {
+            void quote.refetch();
+            void forecastQ.refetch();
+          }}
+        />
         <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
       </div>
     );
@@ -125,10 +107,13 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
     <div className="max-w-full">
       {stale && <StaleBanner detail={`quote via ${q.provenance.source}, delay ${q.provenance.delay_minutes}m`} />}
       {forecastQ.isError && (
-        <StaleBanner detail="forecast endpoint unreachable — showing deterministic placeholder" />
+        <StaleBanner detail={`forecast endpoint unreachable (${forecastQ.error instanceof Error ? forecastQ.error.message : 'unknown error'}) — forecast unavailable, no placeholder numbers shown`} />
       )}
       {analyticsQ.isError && (
         <StaleBanner detail="analytics endpoint unreachable — snapshot shows unavailable, rest of the page unaffected" />
+      )}
+      {barsQ.isError && (
+        <StaleBanner detail={`price history unreachable (${barsQ.error instanceof Error ? barsQ.error.message : 'bars endpoint error'}) — chart shows unavailable, rest of the page unaffected`} />
       )}
       {/* Forecast header (spec §Milestone 8 example) */}
       <section className="term-panel min-w-0 p-4" aria-labelledby="brief-forecast">
@@ -170,7 +155,15 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
             <Skeleton label="loading live forecast…" lines={4} />
           </div>
         )}
-        <ForecastCard symbol={symbol} price={q.price} currency={q.currency ?? 'USD'} forecast={forecast} live={forecastLive} />
+        {!forecastQ.isLoading && forecast && (
+          <ForecastCard price={q.price} currency={q.currency ?? 'USD'} forecast={forecast} />
+        )}
+        {!forecastQ.isLoading && !forecast && (
+          <ForecastUnavailable
+            detail="live forecast unreachable — no placeholder numbers shown"
+            onRetry={() => void forecastQ.refetch()}
+          />
+        )}
       </section>
 
       <section className="mt-4 grid max-w-full gap-4 md:grid-cols-2">
@@ -178,10 +171,19 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
           <h3 id="brief-chart" className="term-label">
             Price chart
           </h3>
-          <PriceChart symbol={symbol} />
-          <div className="mt-2">
-            <ProvenanceBadge p={q.provenance} />
-          </div>
+          <PriceChart
+            symbol={symbol}
+            data={barsQ.data?.candles ?? null}
+            loading={barsQ.isLoading || barsQ.isFetching}
+            error={
+              barsQ.isError
+                ? barsQ.error instanceof Error
+                  ? barsQ.error.message
+                  : 'bars endpoint unreachable'
+                : null
+            }
+            provenance={barsQ.data?.provenance ?? null}
+          />
         </div>
         <div className="term-panel min-w-0 p-4" aria-labelledby="brief-events">
           <h3 id="brief-events" className="term-label">
@@ -210,9 +212,11 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
               Events unavailable — no event feed for this symbol yet.
             </p>
           )}
-          <div className="mt-2">
-            <ProvenanceBadge p={forecast.provenance} />
-          </div>
+          {analytics && (
+            <div className="mt-2">
+              <ProvenanceBadge p={analytics.provenance} />
+            </div>
+          )}
           <Link to={`/forecast/${encodeURIComponent(symbol)}`} className="term-btn-ghost mt-3 inline-block text-xs">
             FORECAST DETAILS →
           </Link>
@@ -228,27 +232,35 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
   );
 }
 
+function ForecastUnavailable({ detail, onRetry }: { detail: string; onRetry?: () => void }) {
+  return (
+    <div className="mt-3 rounded border border-term-border p-4" role="status">
+      <p className="term-label">Forecast · deterministic core (AI bounded, capped 20%)</p>
+      <p className="mt-2 text-sm text-term-muted">Forecast unavailable — {detail}.</p>
+      {onRetry && (
+        <button className="term-btn-ghost mt-3 text-xs" type="button" onClick={onRetry}>
+          RETRY FORECAST
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ForecastCard({
-  symbol,
   price,
   currency,
   forecast: f,
-  live,
 }: {
-  symbol: string;
   price: number | null;
   currency: string;
   forecast: Forecast;
-  live: boolean;
 }) {
-  void symbol;
   const whyText = f.why.length > 0 ? f.why.join(' + ') : 'unavailable';
   const riskText = f.risks.length > 0 ? f.risks.join(' + ') : 'unavailable';
   return (
     <div className="mt-3 border-t border-term-border pt-3">
       <p className="term-label">
         Forecast · deterministic core (AI bounded, capped 20%)
-        {!live && <span className="ml-2 text-term-amber">· placeholder</span>}
       </p>
       {/* Spec M8 example header — labels below match verbatim. */}
       <div className="mt-1 space-y-1 text-sm">
@@ -338,6 +350,11 @@ function AnalyticsSnapshot({
       <h3 id="brief-analytics" className="term-label">
         Analytics snapshot · deterministic
       </h3>
+      {analytics?.note && (
+        <p className="mt-1 text-[11px] text-term-amber" role="note">
+          {analytics.note}
+        </p>
+      )}
       {loading && (
         <div className="mt-2">
           <Skeleton label="loading analytics…" lines={4} />

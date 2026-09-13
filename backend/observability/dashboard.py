@@ -17,7 +17,12 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
-from backend.observability.provider_metrics import aggregate_provider_calls, check_error_alert
+from backend.observability.provider_metrics import (
+    ERROR_THRESHOLD_DEFAULT,
+    MIN_CALLS_DEFAULT,
+    aggregate_provider_calls,
+    check_error_alert,
+)
 
 # Market-data providers first, then FX, then bounded-AI-opinion providers.
 KNOWN_PROVIDERS: tuple[str, ...] = (
@@ -100,8 +105,8 @@ def _tracker_snapshot(tracker: Any) -> tuple[list[dict], dict[str, list[dict]]]:
 def build_dashboard(
     tracker: Any = None,
     *,
-    error_threshold: float = 0.05,
-    min_calls: int = 5,
+    error_threshold: float = ERROR_THRESHOLD_DEFAULT,
+    min_calls: int = MIN_CALLS_DEFAULT,
     known_providers: Optional[Iterable[str]] = None,
 ) -> dict:
     """Assemble dashboard data. Never raises on an empty/unknown tracker.

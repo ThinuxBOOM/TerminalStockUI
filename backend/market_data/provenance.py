@@ -41,10 +41,3 @@ def build_provenance(
         fallback_used=bool(fallback_used),
         missing_fields=list(missing_fields or []),
     )
-
-
-def with_provenance(payload: dict, provenance: Provenance) -> dict:
-    """Attach a provenance envelope to a response payload (never omit)."""
-    out = dict(payload)
-    out["provenance"] = provenance.model_dump(mode="json")
-    return out

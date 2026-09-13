@@ -68,11 +68,10 @@ from backend.forecasting.models.sse_drift import (
     MODEL_VERSION as SSE_DRIFT_VERSION,
     SseDriftBaseline,
 )
-from backend.forecasting.registry import ENSEMBLE_MEMBERS, ENSEMBLE_VERSION
+from backend.forecasting.registry import ENSEMBLE_VERSION
 from backend.forecasting.service import (
     EUX_BLEND_VERSION,
     SSE_BLEND_VERSION,
-    ForecastService,
     _data_version,
     _is_euronext,
     _is_sse,
@@ -480,8 +479,6 @@ __all__ = [
     "TEST_SIZE",
     "SNAPSHOT_BAR_LIMIT",
     "BASE_MEMBERS",
-    "ForecastService",
-    "ENSEMBLE_MEMBERS",
     "build_snapshot",
     "canonical_symbol",
     "get_latest_snapshot",

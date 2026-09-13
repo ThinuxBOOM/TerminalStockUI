@@ -198,11 +198,36 @@ def get_forecast(
     payload["why"] = why
     payload["risks"] = risks
     payload["evidence_ids"] = list(result.get("model_members", []))
+    payload["limitations"] = forecast_limitations(result)
+    payload["inputs"] = {
+        "model_version": result.get("model_version"),
+        "feature_version": result.get("feature_version"),
+        "data_version": result.get("data_version"),
+        "n_windows": (result.get("expected_return_range") or {}).get("n_windows"),
+    }
     # Calibration rows from the latest snapshot for
     # (symbol, horizon, model_version); [] when none (offline/tests/DB
     # issues must never break the forecast path).
     payload["calibration"] = cal_rows
     return payload
+
+
+def forecast_limitations(result: dict) -> list[str]:
+    """Honest caveats for the forecast payload (never empty on live data)."""
+    items = [
+        "Walk-forward validation only; no look-ahead.",
+        "Missing data renders unavailable, never silently imputed.",
+        "Disabling AI leaves forecasting intact.",
+    ]
+    band = result.get("expected_return_range") or {}
+    if band.get("n_windows") is not None:
+        try:
+            items.append(
+                f"Return range estimated from {int(band['n_windows'])} historical windows."
+            )
+        except (TypeError, ValueError):
+            pass
+    return items
 
 
 def _latest_calibration(

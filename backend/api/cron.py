@@ -40,20 +40,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cron", tags=["cron"])
 
-#: Test seam (singleton-override + reset hook, same pattern as
-#: backend/api/fx.py get_fx_provider/reset_fx_provider): when set, the cron
-#: endpoints ingest via this fetch callable instead of yfinance.
+#: Test seam: when set, the cron endpoints ingest via this fetch callable
+#: instead of yfinance (cleared by :func:`reset_cron`).
 _fetch_override = None
 
 
-def override_cron_fetch(fn) -> None:  # test hook
-    """Override the per-symbol fetch used by the cron endpoints (tests)."""
-    global _fetch_override
-    _fetch_override = fn
-
-
 def reset_cron() -> None:  # test hook
-    """Clear the fetch override set by :func:`override_cron_fetch`."""
+    """Clear the fetch override used by the cron endpoints."""
     global _fetch_override
     _fetch_override = None
 

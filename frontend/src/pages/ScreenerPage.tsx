@@ -29,6 +29,22 @@ function clampProb(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
+/** Backend `quality: {metric, quality_flag, reason}` — tolerant readers. */
+function qualityInfo(r: { quality?: unknown }): { flag: string; reason: string } {
+  const q = (r.quality ?? {}) as Record<string, unknown>;
+  const flag = typeof q.quality_flag === 'string' && q.quality_flag ? q.quality_flag : '—';
+  const reason = typeof q.reason === 'string' ? q.reason : '';
+  return { flag, reason };
+}
+
+function qualityFlag(r: { quality?: unknown }): string {
+  return qualityInfo(r).flag;
+}
+
+function qualityReason(r: { quality?: unknown }): string {
+  return qualityInfo(r).reason || 'Quality signal unavailable for this row';
+}
+
 /** Timeout-aware error copy: a full live scan takes ~30s cold. */
 function screenerErrorDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : 'Backend unreachable. Check VITE_API_BASE_URL.';
@@ -196,6 +212,7 @@ export default function ScreenerPage() {
                       <th className="p-2">Price</th>
                       <th className="p-2">Prob {horizon}d</th>
                       <th className="p-2">Confidence</th>
+                      <th className="p-2">Quality</th>
                       <th className="p-2">Market</th>
                       <th className="p-2">Provenance</th>
                     </tr>
@@ -223,6 +240,12 @@ export default function ScreenerPage() {
                           <b>{(r.direction_probability * 100).toFixed(1)}%</b>
                         </td>
                         <td className="p-2 text-xs">{r.confidence}</td>
+                        <td
+                          className="p-2 text-xs text-term-muted"
+                          title={qualityReason(r)}
+                        >
+                          {qualityFlag(r)}
+                        </td>
                         <td className="p-2">
                           <MarketStateBadge state={r.market_state} provenance={r.provenance} />
                         </td>

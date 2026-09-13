@@ -38,6 +38,8 @@ from backend.market_data.service import MarketDataService
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
+DISCLOSURE = "Not investment advice. For informational purposes only."
+
 _HISTORY: dict[str, list[dict]] = {}
 
 
@@ -235,6 +237,7 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
         "data_version": data_version,
         "as_of": stamp,
         "provenance": provenance,
+        "disclosure": DISCLOSURE,
     }
     _HISTORY.setdefault(req.symbol, []).append(run)
     return run
@@ -285,4 +288,5 @@ def backtest_history(
         "as_of": str(provenance.get("as_of")),
         "provenance": provenance,
         "runs": summaries,
+        "disclosure": DISCLOSURE,
     }

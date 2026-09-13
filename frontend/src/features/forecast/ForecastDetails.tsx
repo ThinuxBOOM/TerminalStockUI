@@ -9,7 +9,6 @@ import {
   postAIInsight,
   type AIProfile,
   type Forecast,
-  type Provenance,
 } from '../../api/client';
 import ProvenanceBadge from '../../components/ProvenanceBadge';
 import FreshnessBadge from '../../components/FreshnessBadge';
@@ -20,47 +19,6 @@ import { StaleBanner } from '../../components/ErrorState';
 
 const DISCLOSURE =
   'Not investment advice. Forecasts are measurable probabilities from the deterministic engine; AI opinions are bounded and capped at 20% influence.';
-
-/** Placeholder keeps the page usable when the forecast endpoint is unreachable. */
-function mockForecast(symbol: string, horizon: number): Forecast {
-  const prov: Provenance = {
-    source: 'deterministic-engine/mock',
-    as_of: new Date().toISOString(),
-    delay_minutes: 15,
-    quality_grade: 'B',
-    fallback_used: true,
-    missing_fields: ['calibration_history', 'live_forecast'],
-  };
-  return {
-    symbol,
-    horizon_days: horizon,
-    label: 'moderately positive',
-    probability: 0.64,
-    confidence: 'Moderate',
-    quality_grade: 'A',
-    provider: 'deterministic-engine/mock',
-    why: ['trend + momentum intact', 'quality: high ROE, low leverage', 'supportive sector breadth'],
-    risks: ['valuation above 5y median', 'earnings event approaching', 'elevated sector volatility'],
-    evidence_ids: ['feat:trend_v3', 'feat:quality_v2', 'evt:earnings_est'],
-    inputs: { feature_version: 'features-v1 (mock)', note: 'live feature vector lands M3' },
-    versions: {
-      model_name: 'logistic-direction (mock)',
-      model_version: 'logreg-v0-mock',
-      feature_version: 'features-v1-mock',
-      data_version: 'mock-snapshot',
-      as_of: prov.as_of,
-    },
-    calibration: [],
-    intervals: { low: -0.04, mid: 0.02, high: 0.09 },
-    limitations: [
-      'Walk-forward validation only; no look-ahead.',
-      'Missing data → “unavailable”, never silently imputed.',
-      'Disabling AI leaves forecasting intact.',
-    ],
-    disclosure: DISCLOSURE,
-    provenance: prov,
-  };
-}
 
 function fmtPct(p: number): string {
   return `${(p * 100).toFixed(1)}%`;
@@ -86,12 +44,13 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
     mutationFn: () => postAIInsight(symbol, aiProfile),
   });
 
-  const live = forecastQ.data ?? null;
-  const f: Forecast = live ?? mockForecast(symbol, horizon);
-  const forecastFallback = live === null;
+  // Honesty rule: no fabricated numbers. A missing/failed forecast renders an
+  // explicit unavailable state — never a seeded placeholder figure.
+  const live: Forecast | null = forecastQ.data ?? null;
+  const f: Forecast | null = live;
   const analytics = analyticsQ.data ?? null;
 
-  const dirWord = f.probability >= 0.5 ? 'bullish' : 'bearish';
+  const dirWord = f ? (f.probability >= 0.5 ? 'bullish' : 'bearish') : undefined;
 
   return (
     <div className="space-y-4">
@@ -113,19 +72,36 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
       {forecastQ.isLoading && <Loading label={`loading forecast ${symbol} ${horizon}d…`} />}
       {forecastQ.isError && (
         <StaleBanner
-          detail={`forecast endpoint unreachable (${forecastQ.error instanceof Error ? forecastQ.error.message : 'unknown error'}) — showing deterministic placeholder`}
+          detail={`forecast endpoint unreachable (${forecastQ.error instanceof Error ? forecastQ.error.message : 'unknown error'}) — forecast unavailable, no placeholder numbers shown`}
         />
       )}
-      {!forecastQ.isError && forecastFallback && !forecastQ.isLoading && (
-        <StaleBanner detail="live forecast not yet returned — showing deterministic placeholder" />
+      {!forecastQ.isError && !forecastQ.isLoading && !live && (
+        <StaleBanner detail="live forecast not yet returned — forecast unavailable, no placeholder numbers shown" />
       )}
-      {(f.provenance.fallback_used || f.provenance.delay_minutes > 30) && !forecastQ.isError && (
+      {f && (f.provenance.fallback_used || f.provenance.delay_minutes > 30) && !forecastQ.isError && (
         <StaleBanner
           detail={`forecast via ${f.provenance.source}, delay ${f.provenance.delay_minutes}m`}
         />
       )}
 
       {/* header */}
+      {!f && !forecastQ.isLoading && (
+        <section className="term-panel p-4" role="status">
+          <p className="term-label">Forecast · deterministic engine</p>
+          <p className="mt-2 text-sm text-term-muted">
+            Forecast unavailable for {symbol} at {horizon}d — the forecast endpoint is
+            unreachable or returned no data. No placeholder numbers are shown.
+          </p>
+          <button
+            className="term-btn-ghost mt-3 text-xs"
+            type="button"
+            onClick={() => void forecastQ.refetch()}
+          >
+            RETRY FORECAST
+          </button>
+        </section>
+      )}
+      {f && (
       <section className="term-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-bold">
@@ -178,8 +154,10 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
           </div>
         </div>
       </section>
+      )}
 
       {/* inputs / evidence / versions */}
+      {f && (
       <section className="term-panel p-4">
         <p className="term-label">Inputs · evidence · versions</p>
         <div className="mt-2 grid gap-2 text-xs md:grid-cols-3">
@@ -238,11 +216,12 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
           <ProvenanceBadge p={f.provenance} />
         </div>
       </section>
+      )}
 
       {/* calibration */}
       <section className="term-panel p-4">
-        <CalibrationChart rows={f.calibration} title={`Calibration history · ${f.horizon_days}d`} />
-        {f.calibration.length > 0 ? (
+        <CalibrationChart rows={f?.calibration ?? []} title={`Calibration history · ${f?.horizon_days ?? horizon}d`} />
+        {f && f.calibration.length > 0 ? (
           <div className="mt-2 overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
@@ -281,14 +260,21 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
             engine; the Backtest Lab shows failures as well as successes.
           </p>
         )}
-        <div className="mt-2">
-          <ProvenanceBadge p={f.provenance} />
-        </div>
+        {f && (
+          <div className="mt-2">
+            <ProvenanceBadge p={f.provenance} />
+          </div>
+        )}
       </section>
 
       {/* analytics snapshot */}
       <section className="term-panel p-4">
         <p className="term-label">Deterministic analytics snapshot</p>
+        {analytics?.note && (
+          <p className="mt-1 text-[11px] text-term-amber" role="note">
+            {analytics.note}
+          </p>
+        )}
         {analyticsQ.isLoading && <p className="mt-1 text-xs text-term-muted">loading analytics…</p>}
         {analyticsQ.isError && (
           <p className="mt-1 text-xs text-term-amber">
@@ -315,13 +301,17 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
       {/* limitations + disclosure */}
       <section className="term-panel p-4">
         <p className="term-label">Limitations</p>
-        <ul className="mt-1 list-disc pl-5 text-sm text-term-muted">
-          {f.limitations.map((l) => (
-            <li key={l}>{l}</li>
-          ))}
-        </ul>
+        {f && f.limitations.length > 0 ? (
+          <ul className="mt-1 list-disc pl-5 text-sm text-term-muted">
+            {f.limitations.map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1 text-sm text-term-muted">unavailable — live forecast not loaded.</p>
+        )}
         <div className="mt-3 rounded border border-term-amber bg-term-panel p-3 text-xs text-term-amber">
-          {f.disclosure ?? DISCLOSURE}
+          {f?.disclosure ?? DISCLOSURE}
         </div>
       </section>
 
@@ -358,9 +348,9 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
       </div>
       <AIOpinionCard
         opinion={aiM.data ?? null}
-        deterministicProbability={f.probability}
+        deterministicProbability={f?.probability}
         deterministicDirection={dirWord}
-        provenance={f.provenance}
+        provenance={f?.provenance}
         onRequest={aiM.data ? undefined : () => aiM.mutate()}
         requesting={aiM.isPending}
         requestError={aiM.isError ? friendlyAIError(aiM.error) : null}

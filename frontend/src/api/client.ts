@@ -211,8 +211,34 @@ function normalizeQuote(raw: unknown): Quote {
   });
 }
 
+/** Normalize `/health` provider rows to the HealthSchema shape.
+ * Backend tracker rows are {provider, latency_p50_ms, ..., circuit} with
+ * no name/status; without this mapping parsing succeeds only on the
+ * empty-tracker shape and throws once any call is recorded. */
+export function normalizeHealthProviders(raw: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as Record<string, unknown>[]).map((row) => {
+    const circuit = typeof row.circuit === 'string' ? row.circuit : undefined;
+    return {
+      ...row,
+      name: row.name ?? row.provider ?? 'unknown',
+      status:
+        typeof row.status === 'string'
+          ? row.status
+          : circuit === 'open'
+            ? 'open'
+            : 'ok',
+      latency_ms: row.latency_ms ?? row.latency_p50_ms,
+    };
+  });
+}
+
 export async function getHealth(): Promise<Health> {
   const { data } = await api.get('/health');
+  const raw = (data ?? {}) as Record<string, unknown>;
+  if (Array.isArray(raw.providers)) {
+    raw.providers = normalizeHealthProviders(raw.providers);
+  }
   return HealthSchema.passthrough().parse(data);
 }
 
@@ -258,15 +284,12 @@ export async function searchInstruments(
 export async function getQuote(
   symbol: string,
   market?: string | null,
-  targetCcy?: string | null,
 ): Promise<Quote> {
   const mic = (market ?? '').trim().toUpperCase();
-  const ccy = (targetCcy ?? '').trim().toUpperCase();
   const params: Record<string, string> = { symbol };
   if (mic && mic !== 'ALL') params.market = mic;
-  // M7: optional target-currency for server-side conversion preview.
-  // Backend may ignore it; conversion/ranking authority stays with /api/fx/*.
-  if (ccy) params.target_ccy = ccy;
+  // Conversion authority stays with /api/fx/* — no target_ccy is sent
+  // (the backend ignores it; sending it only pollutes logs).
   const { data } = await api.get('/api/market_data/quote', { params });
   return normalizeQuote(data);
 }
@@ -484,6 +507,7 @@ export const AnalyticsSchema = z
     fundamentals: z.record(z.unknown()).optional().default({}),
     quality: z.record(z.unknown()).optional().default({}),
     valuation: z.record(z.unknown()).optional().default({}),
+    note: z.string().optional(),
     provenance: ProvenanceSchema,
   })
   .passthrough();
@@ -496,12 +520,16 @@ function normalizeAnalytics(raw: unknown, symbol: string): Analytics {
     (r[key] as Record<string, unknown> | undefined) ??
     (nested[key] as Record<string, unknown> | undefined) ??
     {};
+  const noteRaw =
+    (typeof r.note === 'string' ? r.note : undefined) ??
+    (typeof nested.note === 'string' ? nested.note : undefined);
   const candidate = {
     symbol: (r.symbol as string | undefined) ?? (nested.symbol as string | undefined) ?? symbol,
     technical: pick('technical'),
     fundamentals: pick('fundamentals'),
     quality: pick('quality'),
     valuation: pick('valuation'),
+    ...(noteRaw ? { note: noteRaw } : {}),
     provenance: normalizeProvenance({ ...nested, ...r }, 'analytics-api'),
   };
   return AnalyticsSchema.parse(candidate);
@@ -573,15 +601,31 @@ function normalizeBacktest(raw: unknown, symbol: string, horizons: number[]): Ba
 /** POST /api/backtest/run { symbol, horizons } — walk-forward, lightweight only.
  *  Falls back to legacy POST /api/backtest. The /run shape is per-horizon
  *  ({results: {21: {brier, ece, reliability, ...}}}); it is flattened to the
- *  single-horizon Backtest view using the first requested horizon. */
+ *  single-horizon Backtest view using the first requested horizon.
+ *
+ * Own timeout (60s, not the shared 15s): walk-forward over up to 250 bars
+ * × 3 horizons exceeds 15s on cold serverless starts. */
+export const BACKTEST_TIMEOUT_MS = 60000;
+
+/** POST /api/fx/rank timeout (60s): fans out to N quotes + FX on cold starts. */
+export const RANK_TIMEOUT_MS = 60000;
+
 export async function runBacktest(symbol: string, horizons: number[]): Promise<Backtest> {
   const sym = String(symbol ?? '').trim();
   try {
-    const { data } = await api.post('/api/backtest/run', { symbol: sym, horizons });
+    const { data } = await api.post(
+      '/api/backtest/run',
+      { symbol: sym, horizons },
+      { timeout: BACKTEST_TIMEOUT_MS },
+    );
     return normalizeBacktest(flattenBacktestRun(data, sym, horizons), sym, horizons);
   } catch (runErr) {
     try {
-      const { data } = await api.post('/api/backtest', { symbol: sym, horizons });
+      const { data } = await api.post(
+        '/api/backtest',
+        { symbol: sym, horizons },
+        { timeout: BACKTEST_TIMEOUT_MS },
+      );
       return normalizeBacktest(flattenBacktestRun(data, sym, horizons), sym, horizons);
     } catch {
       throw runErr;
@@ -713,7 +757,8 @@ function normalizeAIPerformance(raw: unknown): AIPerformanceRow[] {
       ...(rr as Record<string, unknown>),
       provider: (rr.provider as string | undefined) ?? (rr.name as string | undefined),
       model: (rr.model as string | undefined) ?? '',
-      n_calls: rr.n_calls ?? rr.total_calls ?? rr.calls_1h ?? 0,
+      horizon_days: (rr.horizon_days as number | undefined) ?? (rr.horizon as number | undefined),
+      n_calls: rr.n_calls ?? rr.total_calls ?? rr.calls_1h ?? rr.calls ?? 0,
       brier: (rr.brier as number | undefined) ?? null,
       ece: (rr.ece as number | undefined) ?? (rr.calibration_error as number | undefined) ?? null,
       hit_rate: (rr.hit_rate as number | undefined) ?? (rr.accuracy as number | undefined) ?? null,
@@ -740,6 +785,40 @@ export async function getAIPerformance(): Promise<AIPerformanceRow[]> {
   }
 }
 
+/* ---------------------------- provider keys ------------------------ */
+
+export type ProviderKeyStatus = {
+  provider: string;
+  model: string;
+  configured: boolean;
+  updated_at: string | null;
+};
+
+/** GET /api/providers/keys/status — config flags only, never key material. */
+export async function getProviderKeysStatus(): Promise<ProviderKeyStatus[]> {
+  const { data } = await api.get('/api/providers/keys/status');
+  const list = (data as Record<string, unknown>)?.providers;
+  if (!Array.isArray(list)) return [];
+  return (list as Record<string, unknown>[]).map((p) => ({
+    provider: String(p.provider ?? ''),
+    model: typeof p.model === 'string' ? p.model : '',
+    configured: p.configured === true,
+    updated_at: typeof p.updated_at === 'string' ? p.updated_at : null,
+  }));
+}
+
+/** GET /api/providers/budget — saved monthly caps per provider. */
+export async function getProviderBudgets(): Promise<Record<string, number>> {
+  const { data } = await api.get('/api/providers/budget');
+  const budgets = (data as Record<string, unknown>)?.budgets;
+  if (!budgets || typeof budgets !== 'object') return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(budgets as Record<string, unknown>)) {
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+  }
+  return out;
+}
+
 /* ---------------------------- provider health ---------------------- */
 
 export type ProviderHealthTest = {
@@ -750,36 +829,75 @@ export type ProviderHealthTest = {
 };
 
 /**
- * Health probe. Primary: POST /api/providers/health/test (backend contract);
- * fallback: POST /api/ai/test. Never sends or returns API keys.
+ * Tolerant parse of the AI health-test shape.
+ * Contract (backend/api/ai.py): POST /api/ai/providers/health/test
+ * {provider?} -> {providers: [{provider, model, configured, stub_mode}]}
+ * (configuration only, never key material). `ok` mirrors `configured`:
+ * an unconfigured provider is a FAIL with an honest "key missing"
+ * message, never a silent pass.
+ * Returns null when the payload carries no recognizable shape.
+ */
+export function normalizeAIHealthTest(raw: unknown, provider: string): ProviderHealthTest | null {
+  const d = (raw ?? {}) as Record<string, unknown>;
+  if (typeof d.ok === 'boolean')
+    return {
+      ok: d.ok,
+      latency_ms: d.latency_ms as number | undefined,
+      message: d.message as string | undefined,
+      provider,
+    };
+  const list = Array.isArray(d.providers) ? (d.providers as Record<string, unknown>[]) : null;
+  if (!list || list.length === 0) return null;
+  const want = provider.trim().toLowerCase();
+  const match =
+    list.find((r) => String(r.provider ?? '').trim().toLowerCase() === want) ?? list[0];
+  if (!match || typeof match !== 'object') return null;
+  const name = typeof match.provider === 'string' && match.provider ? match.provider : provider;
+  const model = typeof match.model === 'string' ? match.model : '';
+  if (typeof match.configured === 'boolean') {
+    const configured = match.configured;
+    return {
+      ok: configured,
+      message: configured
+        ? `configured${model ? ` · model ${model}` : ''}`
+        : 'not configured (stub mode) — API key missing',
+      provider: name,
+    };
+  }
+  return null;
+}
+
+/**
+ * AI key health probe (Providers page). Primary: POST
+ * /api/ai/providers/health/test — answers whether THIS provider has a
+ * usable key. Fallback: the market-data probe (quote plumbing only; can
+ * never validate an AI key). Never sends or returns API keys.
  */
 export async function testProviderHealth(
   provider: string,
-  profile?: string,
 ): Promise<ProviderHealthTest> {
   try {
-    const { data } = await api.post(
-      '/api/providers/health/test',
-      { provider, profile },
-      { params: { provider } },
-    );
-    const d = (data ?? {}) as Record<string, unknown>;
-    if (typeof d.ok === 'boolean')
-      return { ok: d.ok as boolean, latency_ms: d.latency_ms as number | undefined, message: d.message as string | undefined, provider };
-    const total = Number(d.total_calls ?? 0);
-    return {
-      ok: (d.circuit as string | undefined) !== 'open',
-      latency_ms: d.latency_p50_ms !== undefined ? Number(d.latency_p50_ms) : undefined,
-      message: total > 0 ? `probe recorded (${total} total calls)` : 'probe recorded',
-      provider: (d.provider as string | undefined) ?? provider,
-    };
-  } catch (primaryErr) {
-    const { data } = await api.post('/api/ai/test', { provider, profile });
-    const d = (data ?? {}) as Record<string, unknown>;
-    if (typeof d.ok === 'boolean')
-      return { ok: d.ok as boolean, latency_ms: d.latency_ms as number | undefined, message: d.message as string | undefined, provider };
-    throw primaryErr;
+    const { data } = await api.post('/api/ai/providers/health/test', { provider });
+    const parsed = normalizeAIHealthTest(data, provider);
+    if (parsed) return parsed;
+  } catch {
+    /* fall through to the market-data probe below */
   }
+  const { data } = await api.post(
+    '/api/providers/health/test',
+    { provider },
+    { params: { provider } },
+  );
+  const d = (data ?? {}) as Record<string, unknown>;
+  if (typeof d.ok === 'boolean')
+    return { ok: d.ok as boolean, latency_ms: d.latency_ms as number | undefined, message: d.message as string | undefined, provider };
+  const total = Number(d.total_calls ?? 0);
+  return {
+    ok: (d.circuit as string | undefined) !== 'open',
+    latency_ms: d.latency_p50_ms !== undefined ? Number(d.latency_p50_ms) : undefined,
+    message: total > 0 ? `probe recorded (${total} total calls)` : 'probe recorded',
+    provider: (d.provider as string | undefined) ?? provider,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1090,10 +1208,14 @@ export async function rankCrossMarket(
 ): Promise<RankResponse> {
   const target = ccy(targetCcy, 'USD');
   const clean = symbols.map((s) => String(s ?? '').trim()).filter(Boolean);
-  const { data } = await api.post('/api/fx/rank', {
-    symbols: clean,
-    target_ccy: target,
-  });
+  const { data } = await api.post(
+    '/api/fx/rank',
+    {
+      symbols: clean,
+      target_ccy: target,
+    },
+    { timeout: RANK_TIMEOUT_MS },
+  );
   return normalizeRank(data, clean, target);
 }
 
@@ -1253,6 +1375,7 @@ export const ScreenerRowSchema = z
     direction_probability: z.number().min(0).max(1),
     confidence: z.string().optional().default('Unknown'),
     model_version: z.string().optional().default(''),
+    quality: z.record(z.unknown()).optional(),
     horizon: z.number().optional(),
     horizons: z.array(z.number()).optional().default([]),
     provenance: ProvenanceSchema,
@@ -1388,4 +1511,145 @@ export async function getScreener(params: ScreenerParams = {}): Promise<Screener
     timeout: SCREENER_TIMEOUT_MS,
   });
   return normalizeScreener(data, horizon);
+}
+
+/* ------------------------------------------------------------------ */
+/* Price history: GET /api/market_data/bars (additive).                 */
+/* Backend contract (backend/api/market_data.py + schemas.py):          */
+/*   GET /api/market_data/bars?symbol=AAPL&timeframe=1d&limit=30        */
+/*   -> { symbol, instrument_id?, timeframe,                            */
+/*        bars: [{ ts, open, high, low, close, volume?, missing_fields }],*/
+/*        provenance }                                                  */
+/* The parser is tolerant (alias keys accepted, invalid rows dropped,   */
+/* stale-marked provenance when the envelope is absent) but never       */
+/* invents candles: unparseable/empty payloads yield zero candles and   */
+/* callers render an honest unavailable state.                          */
+/* ------------------------------------------------------------------ */
+
+export const BarSchema = z
+  .object({
+    ts: z.string(),
+    open: z.number().nullable().optional(),
+    high: z.number().nullable().optional(),
+    low: z.number().nullable().optional(),
+    close: z.number().nullable().optional(),
+    volume: z.number().nullable().optional(),
+  })
+  .passthrough();
+export type Bar = z.infer<typeof BarSchema>;
+
+export const BarsResponseSchema = z
+  .object({
+    symbol: z.string(),
+    instrument_id: z.string().nullable().optional(),
+    timeframe: z.string().optional().default('1d'),
+    bars: z.array(BarSchema).optional().default([]),
+    provenance: ProvenanceSchema,
+  })
+  .passthrough();
+export type BarsResponse = z.infer<typeof BarsResponseSchema>;
+
+/** Chart-ready candle (structurally matches PriceChart's Candle). */
+export type BarsCandle = {
+  time: string; // YYYY-MM-DD
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+};
+
+export type BarsData = {
+  symbol: string;
+  timeframe: string;
+  candles: BarsCandle[];
+  provenance: Provenance;
+};
+
+function numFinite(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** ts/time/date (ISO string or epoch) -> YYYY-MM-DD. Null when unparseable. */
+export function normalizeBarTime(v: unknown): string | null {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    // Heuristic: seconds (< 1e12) vs milliseconds.
+    const ms = Math.abs(v) < 1e12 ? v * 1000 : v;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return null;
+    const day = s.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+/**
+ * Tolerant bars normalization (pure — safe to unit-test without network).
+ * Rows with an unparseable timestamp or any non-finite OHLC value are
+ * dropped, never zero-filled. Provenance falls back to a stale-marked
+ * envelope so badges render CACHED/FALLBACK instead of fake LIVE.
+ */
+export function normalizeBarsToCandles(
+  raw: unknown,
+  symbol: string,
+  timeframe = '1d',
+): BarsData {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const listRaw = Array.isArray(r.bars)
+    ? (r.bars as unknown[])
+    : Array.isArray(r.data)
+      ? (r.data as unknown[])
+      : Array.isArray(r.candles)
+        ? (r.candles as unknown[])
+        : [];
+  const candles: BarsCandle[] = [];
+  for (const row of listRaw) {
+    if (!row || typeof row !== 'object') continue;
+    const rec = row as Record<string, unknown>;
+    const time = normalizeBarTime(rec.ts ?? rec.time ?? rec.date);
+    if (!time) continue;
+    const open = numFinite(rec.open);
+    const high = numFinite(rec.high);
+    const low = numFinite(rec.low);
+    const close = numFinite(rec.close);
+    if (open === null || high === null || low === null || close === null) continue;
+    candles.push({ time, open, high, low, close });
+  }
+  return {
+    symbol:
+      (r.symbol as string | undefined) ??
+      (r.ticker as string | undefined) ??
+      symbol,
+    timeframe: (r.timeframe as string | undefined) ?? timeframe,
+    candles,
+    provenance: normalizeProvenance(r, 'bars-api'),
+  };
+}
+
+/**
+ * GET /api/market_data/bars?symbol=&timeframe=1d&limit=
+ * Throws on transport/validation error so callers render loading/error/
+ * unavailable states. Never synthesizes candles client-side.
+ */
+export async function getBars(
+  symbol: string,
+  timeframe = '1d',
+  limit = 90,
+): Promise<BarsData> {
+  const sym = String(symbol ?? '').trim();
+  const tf = String(timeframe ?? '1d').trim() || '1d';
+  const n = Number.isFinite(Number(limit))
+    ? Math.min(250, Math.max(1, Math.floor(Number(limit))))
+    : 90;
+  const { data } = await api.get('/api/market_data/bars', {
+    params: { symbol: sym, timeframe: tf, limit: n },
+  });
+  return normalizeBarsToCandles(data, sym, tf);
 }

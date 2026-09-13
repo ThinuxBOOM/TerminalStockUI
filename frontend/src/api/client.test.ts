@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   AI_TIMEOUT_MS,
+  BACKTEST_TIMEOUT_MS,
   FORECAST_HORIZONS,
   MARKET_STATES,
+  RANK_TIMEOUT_MS,
   SCREENER_TIMEOUT_MS,
   api,
   deriveMarketState,
@@ -11,6 +13,7 @@ import {
   friendlyAIError,
   isFreshFxProvenance,
   isFxProvenanceMissingError,
+  normalizeHealthProviders,
   normalizeMarketState,
   normalizeTargetCcy,
   type Provenance,
@@ -205,5 +208,32 @@ describe('friendlyAIError (timeout-aware)', () => {
     expect(friendlyAIError(new Error('timeout of 15000ms exceeded'))).toContain('60s');
     expect(friendlyAIError(new Error('boom'))).toBe('AI request failed (boom).');
     expect(friendlyAIError('oops')).toContain('AI request failed');
+  });
+});
+
+describe('normalizeHealthProviders (tracker rows lack name/status)', () => {
+  it('maps backend tracker rows to the HealthSchema shape', () => {
+    const out = normalizeHealthProviders([
+      { provider: 'yfinance', latency_p50_ms: 250, circuit: 'closed' },
+      { provider: 'akshare', latency_p50_ms: 0, circuit: 'open' },
+    ]);
+    expect(out[0]?.name).toBe('yfinance');
+    expect(out[0]?.status).toBe('ok');
+    expect(out[0]?.latency_ms).toBe(250);
+    expect(out[1]?.status).toBe('open');
+  });
+
+  it('keeps explicit name/status and passes non-arrays through as empty', () => {
+    const out = normalizeHealthProviders([{ name: 'x', status: 'degraded' }]);
+    expect(out[0]?.status).toBe('degraded');
+    expect(normalizeHealthProviders(null)).toEqual([]);
+    expect(normalizeHealthProviders({})).toEqual([]);
+  });
+});
+
+describe('slow-path timeouts (cold serverless budget)', () => {
+  it('backtest and rank get 60s like AI and screener', () => {
+    expect(BACKTEST_TIMEOUT_MS).toBe(60000);
+    expect(RANK_TIMEOUT_MS).toBe(60000);
   });
 });

@@ -95,29 +95,10 @@ def list_models() -> list[dict[str, str]]:
     return out
 
 
-def get_artifact(name: str, version: str | None = None) -> dict[str, str]:
-    """Return the registry entry for (name, version); latest when version is None."""
-    versions = REGISTRY.get(name)
-    if not versions:
-        raise KeyError(f"unknown model {name!r}")
-    if version is None:
-        version = sorted(versions)[-1]
-    entry = versions.get(version)
-    if entry is None:
-        raise KeyError(f"unknown version {version!r} for model {name!r}")
-    return {
-        "name": name,
-        "version": version,
-        "artifact_path": entry["artifact_path"],
-        "feature_version": entry["feature_version"],
-    }
-
-
 __all__ = [
     "ENSEMBLE_NAME",
     "ENSEMBLE_VERSION",
     "ENSEMBLE_MEMBERS",
     "REGISTRY",
     "list_models",
-    "get_artifact",
 ]

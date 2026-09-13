@@ -245,6 +245,6 @@ def list_ai_decisions(
             decisions = [d for d in decisions if (d.get("provider") or "").lower() == provider.lower()]
         total = len(decisions)
         page = decisions[offset: offset + limit]
-        return {"decisions": page, "count": len(page), "total": total, "limit": limit, "offset": offset}
+        return {"decisions": page, "count": len(page), "total": total, "limit": limit, "offset": offset, "disclosure": DISCLOSURE}
     except Exception:
-        return {"decisions": [], "count": 0, "total": 0, "limit": limit, "offset": offset}
+        return {"decisions": [], "count": 0, "total": 0, "limit": limit, "offset": offset, "disclosure": DISCLOSURE}

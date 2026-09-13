@@ -7,6 +7,10 @@ F is accepted anywhere a grade is carried and means the same as D.
 
 from __future__ import annotations
 
+#: Staleness rule (shared with market freshness in health/calendars):
+#: data older than STALE_MULTIPLE x the expected feed delay is "stale".
+STALE_MULTIPLE = 2
+
 
 def grade_quality(
     *,
@@ -28,7 +32,7 @@ def grade_quality(
         return "D", reasons
 
     expected = max(int(delay_minutes), 1)
-    stale = age_minutes > 2 * expected
+    stale = age_minutes > STALE_MULTIPLE * expected
     minor_stale = (not stale) and age_minutes > expected
 
     if material_missing:
@@ -38,7 +42,7 @@ def grade_quality(
         reasons.append("fallback-used")
         grade = "C"
     elif stale:
-        reasons.append(f"stale:{age_minutes:.0f}m>{2 * expected}m")
+        reasons.append(f"stale:{age_minutes:.0f}m>{STALE_MULTIPLE * expected}m")
         grade = "C"
     elif diverged:
         reasons.append("reconciliation-diverged")

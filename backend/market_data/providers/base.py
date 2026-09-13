@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Protocol
 
 
 class ProviderError(RuntimeError):
@@ -14,13 +13,6 @@ class ProviderError(RuntimeError):
         super().__init__(f"{provider}: {message}")
         self.provider = provider
         self.retryable = retryable
-
-
-class CircuitOpenError(ProviderError):
-    """Raised when the circuit is open and no fallback is permitted."""
-
-    def __init__(self, provider: str) -> None:
-        super().__init__(provider, "circuit open", retryable=True)
 
 
 class CircuitBreaker:
@@ -76,10 +68,3 @@ class RateLimiter:
             return True
         self.rejected += 1
         return False
-
-
-class QuoteProvider(Protocol):
-    name: str
-
-    def get_quote(self, symbol: str) -> dict:
-        """Return a *normalized* quote dict including missing_fields. ..."""
