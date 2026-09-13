@@ -183,5 +183,8 @@ class BaseProvider(ABC):
             raise RuntimeError(f"provider request failed: {self._redact_error(exc)}") from exc
         _ = time.monotonic() - started
         if response.status_code >= 400:
-            raise RuntimeError(f"provider HTTP {response.status_code}")
+            # Include Google's error body (no key material in it — headers
+            # are never logged). Turns opaque "HTTP 400" stubs into the real
+            # cause: bad key, unknown model, billing, region, bad field.
+            raise RuntimeError(f"provider HTTP {response.status_code}: {response.text[:180]}")
         return response.text
