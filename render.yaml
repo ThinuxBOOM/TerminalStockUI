@@ -1,0 +1,59 @@
+# OneMarket Analyzer — Render blueprint ($0 path).
+# Import: Render Dashboard → New → Blueprint → connect GitHub repo → select this file.
+# Docs: https://render.com/docs/blueprint-spec
+# Data stays on Supabase (you already migrated). No Render Postgres/Redis needed.
+# Secrets are NEVER committed here — set them in Render Dashboard → Service → Environment.
+
+services:
+  # --- Backend: FastAPI (free web service, spins down after 15m idle) ---
+  - type: web
+    name: onemarket-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # backend/api/main.py supports flat layout: `uvicorn api.main:app` with backend/ as CWD.
+    # $PORT is injected by Render; must bind 0.0.0.0.
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # Supabase pooled :6543, e.g. postgresql://postgres.<REF>:<PW>@aws-0-<REGION>.pooler.supabase.com:6543/postgres
+      - key: SECRET_KEY
+        generateValue: true # openssl rand -hex 32 equivalent; rotating invalidates stored provider keys
+      - key: REDIS_URL
+        sync: false # OPTIONAL — leave empty for in-memory cache (no local disk). Or Upstash URL.
+      - key: UPSTASH_REDIS_URL
+        sync: false # OPTIONAL — preferred if you add Upstash later.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+
+  # --- Frontend: Vite static (free, CDN). Skip this service if you use Cloudflare Pages instead. ---
+  - type: web
+    name: onemarket-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      # IMPORTANT: Vite embeds VITE_* at BUILD time. Set to your backend URL, then redeploy
+      # frontend on every backend-URL change. No trailing slash.
+      # e.g. https://onemarket-backend-xxxx.onrender.com
+      - key: VITE_API_BASE_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html # SPA fallback for /security/:symbol, /forecast/:symbol, etc.
