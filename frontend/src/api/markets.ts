@@ -385,7 +385,7 @@ async function getMarketsOverviewFallback(): Promise<MarketsOverview> {
  */
 export async function getMarketsOverview(): Promise<MarketsOverview> {
   try {
-    const { data } = await api.get('/api/markets/overview');
+    const { data } = await api.get('/api/markets/overview', { timeout: 60000 });
     return normalizeMarketsOverview(data);
   } catch (err) {
     if (!isEndpointMissingError(err)) throw err;
@@ -400,7 +400,9 @@ export async function getMarketsOverview(): Promise<MarketsOverview> {
 export async function getMarketLiquidity(mic: string): Promise<MarketBreadth> {
   const upper = mic.trim().toUpperCase();
   try {
-    const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`);
+    const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
+      timeout: 60000,
+    });
     return normalizeMarketBreadth(data, upper);
   } catch (err) {
     if (!isEndpointMissingError(err)) throw err;
