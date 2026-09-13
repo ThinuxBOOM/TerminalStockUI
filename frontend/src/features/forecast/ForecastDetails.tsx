@@ -80,7 +80,9 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
       )}
       {f && (f.provenance.fallback_used || f.provenance.delay_minutes > 30) && !forecastQ.isError && (
         <StaleBanner
-          detail={`forecast via ${f.provenance.source}, delay ${f.provenance.delay_minutes}m`}
+          detail={`forecast via ${f.provenance.source}, delay ${f.provenance.delay_minutes}m${
+            f.provenance.fallback_used ? ' — fallback/synthetic bars, not market history' : ''
+          }`}
         />
       )}
 
