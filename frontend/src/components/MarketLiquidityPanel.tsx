@@ -1,8 +1,11 @@
+import { useState } from 'react';
 import EmptyState from './EmptyState';
 import ErrorState from './ErrorState';
 import FreshnessBadge from './FreshnessBadge';
 import ProvenanceBadge from './ProvenanceBadge';
 import Skeleton from './Skeleton';
+import { CrossMarketChart, MarketDetailGraphs } from './MarketGraphs';
+import { useMarketDetail } from '../hooks/useMarketLiquidity';
 import {
   isStaleLiquidity,
   type MarketBreadth,
@@ -145,6 +148,45 @@ function MarketCard({ m }: { m: MarketBreadth }) {
   );
 }
 
+function MarketCardWithGraphs({ m }: { m: MarketBreadth }) {
+  const [expanded, setExpanded] = useState(false);
+  const detail = useMarketDetail(m.mic, expanded);
+  const rows = detail.data?.rows?.length ? detail.data.rows : (m.rows ?? []);
+  return (
+    <div className="min-w-0">
+      <MarketCard m={m} />
+      <button
+        type="button"
+        className="term-btn-ghost mt-1 text-xs"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? 'Hide' : 'Show'} ${m.mic} symbol graphs`}
+      >
+        {expanded ? '▾ HIDE GRAPHS' : '▸ SHOW GRAPHS'}
+      </button>
+      {expanded && (
+        <div className="mt-2">
+          {detail.isLoading && <Skeleton label={`loading ${m.mic} symbols…`} lines={3} />}
+          {detail.isError && (
+            <ErrorState
+              title={`${m.mic} detail unavailable`}
+              detail={
+                detail.error instanceof Error
+                  ? detail.error.message
+                  : 'Per-symbol endpoint unreachable.'
+              }
+              onRetry={() => void detail.refetch()}
+            />
+          )}
+          {!detail.isLoading && !detail.isError && (
+            <MarketDetailGraphs rows={rows} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Homepage per-market liquidity + breadth section (XNYS/XNAS/XSHG/XPAR/XAMS/XBRU).
  * All figures come from props (hook data) — no prices are hardcoded.
@@ -237,9 +279,12 @@ export default function MarketLiquidityPanel({
           are NOT ranked.
         </p>
       )}
+      <div className="mt-3">
+        <CrossMarketChart markets={markets} />
+      </div>
       <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {markets.map((m) => (
-          <MarketCard key={m.mic} m={m} />
+          <MarketCardWithGraphs key={m.mic} m={m} />
         ))}
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-1.5">

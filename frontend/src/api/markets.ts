@@ -32,6 +32,16 @@ export const MARKET_LABELS: Record<string, string> = {
   XBRU: 'Euronext Brussels (XBRU)',
 };
 
+export type MarketSymbolRow = {
+  symbol: string;
+  price: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  turnover: number | null;
+  range_pct: number | null;
+  market_state: string | null;
+};
+
 export type MarketBreadth = {
   mic: string;
   label: string;
@@ -45,6 +55,9 @@ export type MarketBreadth = {
   avg_range_pct: number | null;
   market_state_counts: Record<string, number>;
   provenance: Provenance;
+  /** Per-symbol rows (present on GET /api/markets/{mic}/liquidity and the
+   *  screener fallback; empty on the overview aggregate). Powers graphs. */
+  rows: MarketSymbolRow[];
 };
 
 export type MarketsOverview = {
@@ -181,8 +194,31 @@ export function normalizeMarketBreadth(raw: unknown, micFallback = ''): MarketBr
       r.avg_range_pct ?? r.avgRangePct ?? r.avg_range ?? r.mean_range_pct,
     ),
     market_state_counts,
+    rows: normalizeMarketRows(r.rows ?? r.symbols ?? r.details ?? r.items),
     provenance: localProvenance(r, `markets-api:${mic}`),
   };
+}
+
+/** Tolerant parse of per-symbol rows for graphs (never throws, skips junk). */
+export function normalizeMarketRows(raw: unknown): MarketSymbolRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: MarketSymbolRow[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const symbol = str(item.symbol ?? item.exchange_symbol ?? item.provider_symbol);
+    if (!symbol) continue;
+    const st = item.market_state ?? item.state ?? item.marketState;
+    out.push({
+      symbol,
+      price: numOrNull(item.price ?? item.last ?? item.close),
+      change_pct: numOrNull(item.change_pct ?? item.changePct ?? item.change),
+      volume: numOrNull(item.volume ?? item.volume_shares ?? item.total_volume),
+      turnover: numOrNull(item.turnover ?? item.notional ?? item.total_turnover),
+      range_pct: numOrNull(item.range_pct ?? item.rangePct ?? item.day_range_pct),
+      market_state: typeof st === 'string' && st ? st : null,
+    });
+  }
+  return out;
 }
 
 /** Tolerant parse of GET /api/markets/overview (object with `markets` or a bare array). */
@@ -291,6 +327,21 @@ export function computeBreadthFromScreener(mic: string, rows: ScreenerRow[]): Ma
     turnover: turnoverN > 0 ? turnoverSum : null,
     avg_range_pct: rangeN > 0 ? rangeSum / rangeN : null,
     market_state_counts,
+    rows: rows.map((row) => ({
+      symbol: row.symbol,
+      price: numOrNull(row.price),
+      change_pct: numOrNull(row.change_pct),
+      volume: rowVolume(row),
+      turnover:
+        rowVolume(row) !== null && numOrNull(row.price) !== null
+          ? (rowVolume(row) as number) * (numOrNull(row.price) as number)
+          : null,
+      range_pct: rowRangePct(row),
+      market_state:
+        typeof row.market_state === 'string' && row.market_state
+          ? row.market_state
+          : null,
+    })),
     provenance: {
       source: `client-fallback:screener${rows.length === 0 ? ':empty' : ''}`,
       as_of: new Date().toISOString(),

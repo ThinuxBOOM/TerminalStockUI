@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { getMarketsOverview } from '../api/markets';
+import { getMarketLiquidity, getMarketsOverview } from '../api/markets';
 
 /**
  * Homepage per-market liquidity+breadth query.
@@ -12,6 +12,21 @@ export function useMarketLiquidity() {
   return useQuery({
     queryKey: ['markets-overview'],
     queryFn: getMarketsOverview,
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+/**
+ * Per-market detail (rows for graphs). Disabled until the card is expanded
+ * so the homepage never fires 6 detail fan-outs on load.
+ */
+export function useMarketDetail(mic: string, enabled: boolean) {
+  const upper = mic.trim().toUpperCase();
+  return useQuery({
+    queryKey: ['market-liquidity', upper],
+    queryFn: () => getMarketLiquidity(upper),
+    enabled,
     staleTime: 30_000,
     retry: 1,
   });
