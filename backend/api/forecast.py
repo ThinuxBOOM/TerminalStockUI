@@ -9,10 +9,13 @@ provenance envelope + model/feature/data versions + timestamp + the
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.service import ForecastService, get_forecast_service
+from backend.market_data.provenance import build_provenance
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
@@ -160,6 +163,98 @@ def forecast_drivers(
     return why[:4], risks[:4]
 
 
+@router.get("/{symbol}/calibration/history")
+def calibration_history(
+    symbol: str,
+    horizon: int = Query(default=21, description="Trading-day horizon: 5, 21 or 63"),
+    limit: int = Query(default=20, ge=1, le=50, description="Max snapshots (cap 50)"),
+    svc: ForecastService = Depends(get_forecast_service),
+) -> dict:
+    """Calibration snapshot history for (symbol, horizon), newest first.
+
+    Lists persisted snapshots [{brier, ece, n_windows, reliability, members,
+    model_version, data_version, created_at}]. DB miss -> empty history
+    (never 500).
+    """
+    from backend.forecasting.calibration.snapshots import canonical_symbol
+
+    if int(horizon) not in FORECAST_HORIZONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
+        )
+    horizon = int(horizon)
+    market_service = getattr(svc, "market", None)
+    try:
+        canonical = canonical_symbol(symbol, market_service)
+    except Exception:
+        canonical = (symbol or "").strip().upper()
+    # Provenance: best-effort bars envelope, honest fallback otherwise.
+    try:
+        bars = market_service.get_bars(
+            (symbol or "").strip().upper(), timeframe="1d", limit=5
+        )
+        provenance = dict(bars.get("provenance", {}))
+        if not provenance:
+            raise ValueError("empty provenance")
+    except Exception:
+        try:
+            provenance = build_provenance(
+                "forecast-calibration",
+                as_of=datetime.now(timezone.utc),
+                delay_minutes=15,
+                quality_grade="B",
+                fallback_used=False,
+                missing_fields=[],
+            ).model_dump(mode="json")
+        except Exception:
+            provenance = {
+                "source": "forecast-calibration",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "delay_minutes": 15,
+                "quality_grade": "B",
+                "fallback_used": False,
+                "missing_fields": [],
+            }
+    try:
+        from backend.db.session import get_session_factory, init_db
+        from backend.db.models import CalibrationSnapshot
+
+        try:
+            init_db()
+        except Exception:
+            pass
+        Session = get_session_factory()
+        db = Session()
+        try:
+            rows = (
+                db.query(CalibrationSnapshot)
+                .filter(
+                    CalibrationSnapshot.symbol == (canonical or "").strip().upper(),
+                    CalibrationSnapshot.horizon_days == int(horizon),
+                )
+                .order_by(CalibrationSnapshot.created_at.desc())
+                .limit(int(limit))
+                .all()
+            )
+            history = [_snapshot_wire(r) for r in rows]
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        history = []
+    return {
+        "symbol": (canonical or "").strip().upper(),
+        "horizon": horizon,
+        "history": history,
+        "count": len(history),
+        "provenance": provenance,
+        "disclosure": "Not investment advice",
+    }
+
+
 @router.get("/{symbol}")
 def get_forecast(
     symbol: str,
@@ -184,7 +279,7 @@ def get_forecast(
     # Calibration snapshot (reliability rows + member accuracy for driver
     # ordering) is best-effort; []/None when none. member_accuracy never
     # reaches the wire — ordering input only.
-    cal_rows, member_acc = _latest_calibration(
+    cal_rows, member_acc, cal_meta = _latest_calibration(
         symbol,
         int(horizon),
         str(result.get("model_version", "")),
@@ -209,6 +304,7 @@ def get_forecast(
     # (symbol, horizon, model_version); [] when none (offline/tests/DB
     # issues must never break the forecast path).
     payload["calibration"] = cal_rows
+    payload["calibration_meta"] = cal_meta
     return payload
 
 
@@ -230,10 +326,70 @@ def forecast_limitations(result: dict) -> list[str]:
     return items
 
 
+def _snapshot_meta(row) -> dict | None:
+    """Wire calibration_meta for one snapshot row (never raises)."""
+    try:
+        brier = getattr(row, "brier", None)
+        ece = getattr(row, "ece", None)
+        try:
+            brier_f = None if brier is None else float(brier)
+        except (TypeError, ValueError):
+            brier_f = None
+        try:
+            ece_f = None if ece is None else float(ece)
+        except (TypeError, ValueError):
+            ece_f = None
+        try:
+            n_windows = int(getattr(row, "n_windows", 0) or 0)
+        except (TypeError, ValueError):
+            n_windows = 0
+        members = getattr(row, "members", None)
+        members_d = dict(members) if isinstance(members, dict) else {}
+        created = getattr(row, "created_at", None)
+        try:
+            created_s = created.isoformat() if hasattr(created, "isoformat") else str(created)
+        except Exception:
+            created_s = str(created)
+        return {
+            "brier": brier_f,
+            "ece": ece_f,
+            "n_windows": n_windows,
+            "members": members_d,
+            "model_version": str(getattr(row, "model_version", "") or ""),
+            "data_version": str(getattr(row, "data_version", "") or ""),
+            "created_at": created_s,
+        }
+    except Exception:
+        return None
+
+
+def _snapshot_wire(row) -> dict:
+    """Full wire shape for one snapshot in history (never raises)."""
+    meta = _snapshot_meta(row) or {
+        "brier": None, "ece": None, "n_windows": 0, "members": {},
+        "model_version": "", "data_version": "", "created_at": "",
+    }
+    try:
+        reliability = getattr(row, "reliability", None)
+        rel = list(reliability) if isinstance(reliability, list) else []
+    except Exception:
+        rel = []
+    return {
+        "brier": meta["brier"],
+        "ece": meta["ece"],
+        "n_windows": meta["n_windows"],
+        "reliability": rel,
+        "members": meta["members"],
+        "model_version": meta["model_version"],
+        "data_version": meta["data_version"],
+        "created_at": meta["created_at"],
+    }
+
+
 def _latest_calibration(
     symbol: str, horizon: int, model_version: str, market_service=None
-) -> tuple[list, dict | None]:
-    """Best-effort (reliability rows, member accuracy) for the payload."""
+) -> tuple[list, dict | None, dict | None]:
+    """Best-effort (reliability rows, member accuracy, calibration_meta)."""
     try:
         from backend.db.session import get_session_factory, init_db
         from backend.forecasting.calibration.snapshots import (
@@ -251,16 +407,16 @@ def _latest_calibration(
             canonical = canonical_symbol(symbol, market_service)
             row = get_latest_snapshot(db, canonical, int(horizon), model_version)
             if row is None:
-                return [], None
+                return [], None, None
             reliability = getattr(row, "reliability", None)
             rows = list(reliability) if isinstance(reliability, list) else []
             members = getattr(row, "members", None)
             acc = dict(members) if isinstance(members, dict) and members else None
-            return rows, acc
+            return rows, acc, _snapshot_meta(row)
         finally:
             try:
                 db.close()
             except Exception:
                 pass
     except Exception:
-        return [], None
+        return [], None, None

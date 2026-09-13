@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -10,6 +10,9 @@ import {
 import ProvenanceBadge from '../components/ProvenanceBadge';
 import FreshnessBadge from '../components/FreshnessBadge';
 import MarketStateBadge from '../components/MarketStateBadge';
+import MarketLiquidityPanel from '../components/MarketLiquidityPanel';
+import { useMarketLiquidity } from '../hooks/useMarketLiquidity';
+import useWatchlist from '../hooks/useWatchlist';
 import CurrencyValue from '../components/CurrencyValue';
 import Skeleton from '../components/Skeleton';
 import EmptyState from '../components/EmptyState';
@@ -25,25 +28,6 @@ const VENUES = [
   { mic: 'XAMS', label: 'Euronext Amsterdam (XAMS)', symbol: 'ASML.AS' },
   { mic: 'XBRU', label: 'Euronext Brussels (XBRU)', symbol: 'UCB.BR' },
 ] as const;
-
-const WATCHLIST_KEY = 'onemarket.watchlist.v1';
-const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', '600519.SS', 'ASML.AS'];
-
-function loadWatchlist(): string[] {
-  try {
-    const raw = localStorage.getItem(WATCHLIST_KEY);
-    if (!raw) return [...DEFAULT_WATCHLIST];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [...DEFAULT_WATCHLIST];
-    const clean = parsed
-      .map((s) => String(s ?? '').trim())
-      .filter(Boolean)
-      .slice(0, 30);
-    return clean.length > 0 ? clean : [...DEFAULT_WATCHLIST];
-  } catch {
-    return [...DEFAULT_WATCHLIST];
-  }
-}
 
 function normalizeSymbolInput(v: string): string {
   return v.trim().toUpperCase().replace(/\s+/g, '');
@@ -159,29 +143,21 @@ export default function HomePage() {
     retry: false,
     staleTime: 60_000,
   });
+  const liquidity = useMarketLiquidity();
 
-  const [watchlist, setWatchlist] = useState<string[]>(loadWatchlist);
+  const { symbols: watchlist, add: addWatchSymbol, remove: removeWatchSymbol } =
+    useWatchlist();
   const [draft, setDraft] = useState('');
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(WATCHLIST_KEY, JSON.stringify(watchlist));
-    } catch {
-      /* storage unavailable — watchlist stays in-memory */
-    }
-  }, [watchlist]);
 
   function addSymbol() {
     const sym = normalizeSymbolInput(draft);
     if (!sym) return;
-    setWatchlist((prev) =>
-      prev.map((s) => s.toUpperCase()).includes(sym) ? prev : [...prev, sym],
-    );
+    addWatchSymbol(sym, 'manual');
     setDraft('');
   }
 
   function removeSymbol(sym: string) {
-    setWatchlist((prev) => prev.filter((s) => s.toUpperCase() !== sym.toUpperCase()));
+    removeWatchSymbol(sym);
   }
 
   const degraded = health.isError || health.data?.status !== 'ok';
@@ -217,6 +193,14 @@ export default function HomePage() {
           Live per-venue state from quote market_state + health — never hardcoded.
         </p>
       </section>
+
+      <MarketLiquidityPanel
+        data={liquidity.data ?? null}
+        isLoading={liquidity.isLoading}
+        isError={liquidity.isError}
+        error={liquidity.error}
+        onRetry={() => void liquidity.refetch()}
+      />
 
       <section className="term-panel min-w-0 p-4" aria-labelledby="home-watchlist">
         <div className="flex items-center justify-between gap-2">

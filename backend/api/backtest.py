@@ -13,7 +13,7 @@ import hashlib
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from backend.api.deps import get_market_service
@@ -255,34 +255,46 @@ def run_backtest(
 @router.get("/{symbol}")
 def backtest_history(
     symbol: str,
+    include_reliability: bool = Query(
+        default=False,
+        description="Include reliability tables (+ brier/ece) per horizon",
+    ),
     market: MarketDataService = Depends(get_market_service),
 ) -> dict:
-    """Lightweight calibration history for one symbol (summaries only)."""
+    """Lightweight calibration history for one symbol (summaries only).
+
+    ``include_reliability=true`` adds the full reliability table per horizon
+    (additive; default false keeps the lightweight summary shape).
+    """
     sym = symbol.strip().upper()
     bars = market.get_bars(sym, timeframe="1d", limit=5)
     provenance = dict(bars.get("provenance", {}))
     runs = _HISTORY.get(sym, [])
-    summaries = [
-        {
-            "run_id": r["run_id"],
-            "as_of": r["as_of"],
-            "horizons": r["horizons"],
-            "params": r["params"],
-            "metrics": {
-                h: {
-                    "n_folds": m["n_folds"],
-                    "n_points": m["n_points"],
-                    "brier": m["brier"],
-                    "ece": m["ece"],
-                }
-                for h, m in r["results"].items()
-            },
-            "model_version": r["model_version"],
-            "feature_version": r["feature_version"],
-            "data_version": r["data_version"],
-        }
-        for r in runs
-    ]
+    summaries = []
+    for r in runs:
+        metrics: dict[str, dict] = {}
+        for h, m in r["results"].items():
+            entry: dict = {
+                "n_folds": m["n_folds"],
+                "n_points": m["n_points"],
+                "brier": m["brier"],
+                "ece": m["ece"],
+            }
+            if include_reliability:
+                entry["reliability"] = list(m.get("reliability", []))
+            metrics[h] = entry
+        summaries.append(
+            {
+                "run_id": r["run_id"],
+                "as_of": r["as_of"],
+                "horizons": r["horizons"],
+                "params": r["params"],
+                "metrics": metrics,
+                "model_version": r["model_version"],
+                "feature_version": r["feature_version"],
+                "data_version": r["data_version"],
+            }
+        )
     return {
         "symbol": sym,
         "as_of": str(provenance.get("as_of")),

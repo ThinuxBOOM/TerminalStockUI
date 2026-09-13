@@ -1,10 +1,17 @@
-import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   FORECAST_HORIZONS,
   runBacktest,
   type Backtest,
 } from '../api/client';
+import {
+  getBacktestHistory,
+  getRecentBacktests,
+  saveRecentBacktest,
+} from '../api/backtestHistory';
+import useWatchlist from '../hooks/useWatchlist';
 import ProvenanceBadge from '../components/ProvenanceBadge';
 import FreshnessBadge from '../components/FreshnessBadge';
 import CalibrationChart from '../components/CalibrationChart';
@@ -16,13 +23,36 @@ import ErrorState, { StaleBanner } from '../components/ErrorState';
  * Shows failures as well as successes; never a large backtesting suite.
  */
 export default function BacktestLabPage() {
-  const [symbol, setSymbol] = useState('AAPL');
+  const [searchParams] = useSearchParams();
+  const [symbol, setSymbol] = useState(
+    () => searchParams.get('symbol')?.trim().toUpperCase() || 'AAPL',
+  );
   const [horizons, setHorizons] = useState<number[]>([21]);
   const [formError, setFormError] = useState<string | null>(null);
+  const { add: addToWatchlist } = useWatchlist();
+
+  // Deep-link support: /backtest?symbol=XYZ (e.g. from Forecast "Run backtest →").
+  useEffect(() => {
+    const s = searchParams.get('symbol')?.trim().toUpperCase();
+    if (s) setSymbol(s);
+  }, [searchParams]);
 
   const lab = useMutation({
     mutationFn: ({ s, h }: { s: string; h: number[] }) => runBacktest(s, h),
+    onSuccess: (_data, vars) => {
+      saveRecentBacktest(vars.s, vars.h);
+    },
   });
+
+  const trimmedSymbol = symbol.trim().toUpperCase();
+  const historyQ = useQuery({
+    queryKey: ['backtest-history', trimmedSymbol],
+    queryFn: () => getBacktestHistory(trimmedSymbol, true),
+    enabled: trimmedSymbol.length > 0,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const recent = getRecentBacktests();
 
   function toggle(h: number) {
     setHorizons((prev) => (prev.includes(h) ? prev.filter((x) => x !== h) : [...prev, h].sort()));
@@ -40,6 +70,20 @@ export default function BacktestLabPage() {
     }
     setFormError(null);
     lab.mutate({ s, h: horizons });
+  }
+
+  function rerun(entrySymbol: string, entryHorizons: number[]) {
+    const s = entrySymbol.trim().toUpperCase();
+    if (!s) return;
+    const h = entryHorizons.length > 0 ? [...entryHorizons].sort((a, b) => a - b) : horizons;
+    if (h.length === 0) {
+      setFormError('Select at least one horizon.');
+      return;
+    }
+    setSymbol(s);
+    setHorizons(h);
+    setFormError(null);
+    lab.mutate({ s, h });
   }
 
   const r: Backtest | undefined = lab.data ?? undefined;
@@ -108,7 +152,136 @@ export default function BacktestLabPage() {
             table — failures included.
           </div>
         )}
-        {r && <LabResults r={r} />}
+        {r && (
+          <>
+            <LabResults r={r} />
+            <section className="term-panel mt-4 flex flex-wrap items-center gap-2 p-4">
+              <button
+                className="term-btn"
+                type="button"
+                onClick={() => addToWatchlist(r.symbol, 'backtest')}
+              >
+                + ADD {r.symbol} TO WATCHLIST
+              </button>
+              <Link
+                className="term-btn-ghost text-xs"
+                to={`/forecast/${encodeURIComponent(r.symbol)}`}
+              >
+                VIEW FORECAST →
+              </Link>
+              <span className="text-[11px] text-term-muted">
+                Saved to recent backtests; forecast shows this run in its calibration history.
+              </span>
+            </section>
+          </>
+        )}
+
+        <section className="term-panel mt-4 p-4">
+          <p className="term-label">Recent backtests · this browser</p>
+          {recent.length === 0 ? (
+            <p className="mt-1 text-xs text-term-muted">
+              No backtests run yet in this browser — runs persist here after each success.
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-1 text-xs">
+              {recent.map((entry) => (
+                <li
+                  key={`${entry.symbol}-${entry.at}`}
+                  className="flex flex-wrap items-center justify-between gap-2 border-b border-term-border pb-1"
+                >
+                  <span>
+                    <b className="text-term-green">{entry.symbol}</b>
+                    <span className="ml-2 text-term-muted">
+                      {entry.horizons.length > 0
+                        ? entry.horizons.map((h) => `${h}d`).join(', ')
+                        : '—'}
+                    </span>
+                    <span className="ml-2 text-[10px] text-term-muted">
+                      {new Date(entry.at).toLocaleString()}
+                    </span>
+                  </span>
+                  <span className="flex gap-2">
+                    <button
+                      className="term-btn-ghost text-xs"
+                      type="button"
+                      onClick={() => rerun(entry.symbol, entry.horizons)}
+                      disabled={lab.isPending}
+                    >
+                      RE-RUN
+                    </button>
+                    <Link
+                      className="text-term-green"
+                      to={`/forecast/${encodeURIComponent(entry.symbol)}`}
+                    >
+                      FORECAST →
+                    </Link>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="term-panel mt-4 p-4">
+          <p className="term-label">
+            Persisted history · {trimmedSymbol || '—'} (backend)
+          </p>
+          {historyQ.isLoading && (
+            <p className="mt-1 text-xs text-term-muted">loading run history…</p>
+          )}
+          {historyQ.isError && (
+            <p className="mt-1 text-xs text-term-amber">
+              ⚠ run history unavailable — backend /api/backtest/{trimmedSymbol || '…'} unreachable.
+            </p>
+          )}
+          {!historyQ.isLoading && !historyQ.isError && (historyQ.data ?? []).length === 0 && (
+            <p className="mt-1 text-xs text-term-muted">
+              No persisted runs for {trimmedSymbol || 'this symbol'} yet — run a backtest above.
+            </p>
+          )}
+          {(historyQ.data ?? []).length > 0 && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-term-muted">
+                    <th className="py-1 pr-2">Run</th>
+                    <th className="py-1 pr-2">As of</th>
+                    <th className="py-1 pr-2">Horizons</th>
+                    <th className="py-1 pr-2">Brier</th>
+                    <th className="py-1 pr-2">ECE</th>
+                    <th className="py-1 pr-2">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(historyQ.data ?? []).map((run) => {
+                    const keys = Object.keys(run.metrics);
+                    const first = keys.length > 0 ? run.metrics[keys[0]] : undefined;
+                    return (
+                      <tr key={run.run_id} className="border-t border-term-border">
+                        <td className="py-1 pr-2 font-mono text-[11px]">{run.run_id.slice(0, 8)}</td>
+                        <td className="py-1 pr-2 text-term-muted">{run.as_of ?? '—'}</td>
+                        <td className="py-1 pr-2">
+                          {run.horizons.length > 0 ? run.horizons.map((h) => `${h}d`).join(', ') : '—'}
+                        </td>
+                        <td className="py-1 pr-2">
+                          {first?.brier === null || first?.brier === undefined
+                            ? '—'
+                            : Number(first.brier).toFixed(4)}
+                        </td>
+                        <td className="py-1 pr-2">
+                          {first?.ece === null || first?.ece === undefined
+                            ? '—'
+                            : Number(first.ece).toFixed(4)}
+                        </td>
+                        <td className="py-1 pr-2">{first?.n_points ?? '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

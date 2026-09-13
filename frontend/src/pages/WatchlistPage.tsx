@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import useWatchlist from '../hooks/useWatchlist';
 import {
   TARGET_CURRENCIES,
   getQuote,
@@ -16,8 +17,8 @@ import Loading from '../components/Loading';
 import MarketStateBadge from '../components/MarketStateBadge';
 import ProvenanceBadge from '../components/ProvenanceBadge';
 
-/** M7 default cross-market set: US + Euronext (Paris/Amsterdam/Brussels) + SSE. */
-const DEFAULT_SYMBOLS = ['AAPL', 'MC.PA', 'ASML.AS', 'UCB.BR', '600519.SS'];
+/** M7 default cross-market set is owned by the shared useWatchlist hook
+ *  (key onemarket.watchlist.v1, default [AAPL,MSFT,600519.SS,ASML.AS]). */
 
 const GATE_MESSAGE = 'Cross-market comparison unavailable — FX provenance missing';
 
@@ -39,7 +40,7 @@ async function fetchNativeQuotes(symbols: string[]): Promise<(Quote | null)[]> {
 }
 
 export default function WatchlistPage() {
-  const [symbols, setSymbols] = useState<string[]>(DEFAULT_SYMBOLS);
+  const { symbols, add, remove, clear } = useWatchlist();
   const [draft, setDraft] = useState('');
   const [targetCcy, setTargetCcy] = useState<TargetCurrency>('USD');
 
@@ -68,16 +69,16 @@ export default function WatchlistPage() {
   function addSymbol() {
     const sym = normalizeSymbolInput(draft);
     if (!sym) return;
-    if (symbols.map((s) => s.toUpperCase()).includes(sym)) {
-      setDraft('');
-      return;
-    }
-    setSymbols((prev) => [...prev, sym]);
+    add(sym, 'manual');
     setDraft('');
   }
 
   function removeSymbol(sym: string) {
-    setSymbols((prev) => prev.filter((s) => s.toUpperCase() !== sym.toUpperCase()));
+    remove(sym);
+  }
+
+  function clearWatchlist() {
+    clear();
   }
 
   return (
@@ -121,6 +122,16 @@ export default function WatchlistPage() {
             ADD
           </button>
         </form>
+        {symbols.length > 0 && (
+          <button
+            className="term-btn-ghost text-xs"
+            type="button"
+            onClick={clearWatchlist}
+            aria-label="Clear watchlist"
+          >
+            CLEAR
+          </button>
+        )}
       </div>
 
       <FXProvenanceBanner

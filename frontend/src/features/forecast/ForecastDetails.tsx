@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   AI_PROFILES,
@@ -10,6 +11,10 @@ import {
   type AIProfile,
   type Forecast,
 } from '../../api/client';
+import {
+  getCalibrationHistory,
+} from '../../api/calibrationHistory';
+import { getRecentBacktests } from '../../api/backtestHistory';
 import ProvenanceBadge from '../../components/ProvenanceBadge';
 import FreshnessBadge from '../../components/FreshnessBadge';
 import CalibrationChart from '../../components/CalibrationChart';
@@ -49,6 +54,31 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
   const live: Forecast | null = forecastQ.data ?? null;
   const f: Forecast | null = live;
   const analytics = analyticsQ.data ?? null;
+
+  const calHistoryQ = useQuery({
+    queryKey: ['calibration-history', symbol, horizon],
+    queryFn: () => getCalibrationHistory(symbol, horizon, 20),
+    retry: false,
+    staleTime: 60_000,
+  });
+  const calHistory = calHistoryQ.data ?? [];
+  const latestMeta = calHistory[0] ?? null;
+  const liveBins = f?.calibration ?? [];
+  // Latest bins: live forecast first, history snapshot as fallback.
+  const chartRows = liveBins.length > 0 ? liveBins : (latestMeta?.reliability ?? []);
+  const hasAnyCalibration = chartRows.length > 0 || calHistory.length > 0;
+  const recentBacktest = getRecentBacktests().find(
+    (r) => r.symbol === symbol.trim().toUpperCase(),
+  );
+  const versions = (f?.versions ?? {}) as Record<string, unknown>;
+  const inputs = (f?.inputs ?? {}) as Record<string, unknown>;
+  const metaBrier = latestMeta?.brier ?? null;
+  const metaEce = latestMeta?.ece ?? null;
+  const metaN = latestMeta?.n_windows ?? (typeof inputs.n_windows === 'number' ? inputs.n_windows : null);
+  const metaModel =
+    latestMeta?.model_version ?? (typeof versions.model_version === 'string' ? versions.model_version : null) ?? (typeof inputs.model_version === 'string' ? inputs.model_version : null);
+  const metaData =
+    latestMeta?.data_version ?? (typeof versions.data_version === 'string' ? versions.data_version : null) ?? (typeof inputs.data_version === 'string' ? inputs.data_version : null);
 
   const dirWord = f ? (f.probability >= 0.5 ? 'bullish' : 'bearish') : undefined;
 
@@ -222,8 +252,38 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
 
       {/* calibration */}
       <section className="term-panel p-4">
-        <CalibrationChart rows={f?.calibration ?? []} title={`Calibration history · ${f?.horizon_days ?? horizon}d`} />
-        {f && f.calibration.length > 0 ? (
+        <div className="mb-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
+          <div className="rounded border border-term-border p-2">
+            <p className="text-term-muted">Brier</p>
+            <p className="text-base font-bold">
+              {metaBrier === null || metaBrier === undefined ? '—' : Number(metaBrier).toFixed(4)}
+            </p>
+          </div>
+          <div className="rounded border border-term-border p-2">
+            <p className="text-term-muted">ECE</p>
+            <p className="text-base font-bold">
+              {metaEce === null || metaEce === undefined ? '—' : Number(metaEce).toFixed(4)}
+            </p>
+          </div>
+          <div className="rounded border border-term-border p-2">
+            <p className="text-term-muted">Windows</p>
+            <p className="text-base font-bold">{metaN ?? '—'}</p>
+          </div>
+          <div className="rounded border border-term-border p-2">
+            <p className="text-term-muted">Model</p>
+            <p className="truncate text-xs font-bold" title={String(metaModel ?? '')}>
+              {metaModel ? String(metaModel) : '—'}
+            </p>
+          </div>
+          <div className="rounded border border-term-border p-2">
+            <p className="text-term-muted">Data</p>
+            <p className="truncate text-xs font-bold" title={String(metaData ?? '')}>
+              {metaData ? String(metaData) : '—'}
+            </p>
+          </div>
+        </div>
+        <CalibrationChart rows={chartRows} title={`Calibration history · ${f?.horizon_days ?? horizon}d`} />
+        {chartRows.length > 0 ? (
           <div className="mt-2 overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
@@ -235,7 +295,7 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
                 </tr>
               </thead>
               <tbody>
-                {f.calibration.map((r, i) => (
+                {chartRows.map((r, i) => (
                   <tr key={i} className="border-t border-term-border">
                     <td className="py-1 pr-2">
                       {r.bin_low.toFixed(2)}–{r.bin_high.toFixed(2)}
@@ -255,13 +315,79 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
                 ))}
               </tbody>
             </table>
+            {liveBins.length === 0 && latestMeta && (
+              <p className="mt-1 text-[10px] text-term-muted">
+                Live bins unavailable — showing latest persisted snapshot
+                {latestMeta.created_at ? ` (${latestMeta.created_at})` : ''}.
+              </p>
+            )}
           </div>
-        ) : (
+        ) : null}
+        {!hasAnyCalibration && (
           <p className="mt-2 text-xs text-term-muted">
-            No calibration bins for this horizon yet — walk-forward history lands with the M3
+            No calibration bins yet — walk-forward history lands with the M3
             engine; the Backtest Lab shows failures as well as successes.
           </p>
         )}
+        {calHistoryQ.isLoading && (
+          <p className="mt-2 text-[11px] text-term-muted">loading calibration history…</p>
+        )}
+        {calHistory.length > 0 && (
+          <div className="mt-3">
+            <p className="term-label">Calibration trend · past snapshots</p>
+            <div className="mt-1 space-y-1">
+              {calHistory.slice(0, 10).map((h, i) => {
+                const b = h.brier ?? 0;
+                const e = h.ece ?? 0;
+                const bWidth = Math.min(100, Math.max(0, (b / 0.25) * 100));
+                const eWidth = Math.min(100, Math.max(0, (e / 0.2) * 100));
+                return (
+                  <div key={`${h.created_at ?? 'snapshot'}-${i}`} className="text-[11px]">
+                    <div className="flex justify-between gap-2 text-term-muted">
+                      <span>{h.created_at ? new Date(h.created_at).toLocaleString() : `snapshot ${i + 1}`}</span>
+                      <span>
+                        Brier {h.brier === null ? '—' : Number(h.brier).toFixed(4)} · ECE{' '}
+                        {h.ece === null ? '—' : Number(h.ece).toFixed(4)}
+                        {h.n_windows !== null ? ` · n=${h.n_windows}` : ''}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 h-1 w-full rounded bg-term-border">
+                      <div
+                        className="h-1 rounded bg-term-green"
+                        style={{ width: `${bWidth}%` }}
+                        title={`Brier ${h.brier ?? '—'} (0 = perfect, 0.25 = coin-flip)`}
+                      />
+                    </div>
+                    <div className="mt-0.5 h-1 w-full rounded bg-term-border">
+                      <div
+                        className="h-1 rounded bg-term-cyan"
+                        style={{ width: `${eWidth}%` }}
+                        title={`ECE ${h.ece ?? '—'} (lower = better calibrated)`}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          <Link
+            className="term-btn-ghost text-xs"
+            to={`/backtest?symbol=${encodeURIComponent(symbol)}`}
+          >
+            RUN BACKTEST →
+          </Link>
+          {recentBacktest && (
+            <span className="text-[11px] text-term-muted">
+              Backtest run {new Date(recentBacktest.at).toLocaleString()}
+              {recentBacktest.horizons.length > 0
+                ? ` (${recentBacktest.horizons.map((x) => `${x}d`).join(', ')})`
+                : ''}
+              — see the Backtest Lab for details.
+            </span>
+          )}
+        </div>
         {f && (
           <div className="mt-2">
             <ProvenanceBadge p={f.provenance} />
