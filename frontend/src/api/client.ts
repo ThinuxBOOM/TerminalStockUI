@@ -655,10 +655,30 @@ function normalizeAIOpinion(raw: unknown): AIOpinion {
 /**
  * POST /api/ai/insight { symbol, profile } — explicit AI calls only.
  * Never overrides the deterministic core; weight capped at 20% (see card).
+ *
+ * Own timeout (60s, not the shared 15s): a cold serverless function plus a
+ * thinking model (large evidence prompt, up to 2048 output tokens) routinely
+ * exceeds 15s on first call. Repeats are served from the evidence-hash
+ * cache and return fast.
  */
+export const AI_TIMEOUT_MS = 60000;
+
 export async function postAIInsight(symbol: string, profile: AIProfile): Promise<AIOpinion> {
-  const { data } = await api.post('/api/ai/insight', { symbol, profile });
+  const { data } = await api.post(
+    '/api/ai/insight',
+    { symbol, profile },
+    { timeout: AI_TIMEOUT_MS },
+  );
   return normalizeAIOpinion(data);
+}
+
+/** Human message for AI request failures (timeout-aware). */
+export function friendlyAIError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? 'unknown error');
+  if ((error as { code?: unknown })?.code === 'ECONNABORTED' || /timeout of \d+ms exceeded/i.test(message)) {
+    return 'AI took longer than 60s (cold start + thinking model) — deterministic forecast unaffected. Retry; repeat calls are usually instant via the evidence cache.';
+  }
+  return `AI request failed (${message}).`;
 }
 
 /* ---------------------------- AI performance ----------------------- */

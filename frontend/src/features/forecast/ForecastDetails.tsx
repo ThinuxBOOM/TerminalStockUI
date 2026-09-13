@@ -3,6 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   AI_PROFILES,
   FORECAST_HORIZONS,
+  friendlyAIError,
   getAnalytics,
   getForecast,
   postAIInsight,
@@ -350,7 +351,7 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
         </button>
         {aiM.isError && (
           <span className="text-term-amber">
-            ⚠ AI unavailable ({aiM.error instanceof Error ? aiM.error.message : 'request failed'})
+            ⚠ {friendlyAIError(aiM.error)}
             — deterministic forecast above is unaffected.
           </span>
         )}
@@ -362,11 +363,7 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
         provenance={f.provenance}
         onRequest={aiM.data ? undefined : () => aiM.mutate()}
         requesting={aiM.isPending}
-        requestError={
-          aiM.isError
-            ? `AI request failed (${aiM.error instanceof Error ? aiM.error.message : 'unknown error'}).`
-            : null
-        }
+        requestError={aiM.isError ? friendlyAIError(aiM.error) : null}
       />
     </div>
   );

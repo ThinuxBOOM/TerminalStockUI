@@ -4,6 +4,11 @@
   "buildCommand": "npm run build --prefix frontend",
   "outputDirectory": "frontend/dist",
   "installCommand": "npm install --prefix frontend",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  },
   "crons": [
     {
       "path": "/api/cron/ingest",
