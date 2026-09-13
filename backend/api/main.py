@@ -68,8 +68,10 @@ from backend.api.analytics_api import router as analytics_router
 from backend.api.backtest import router as backtest_router
 from backend.api.ai import router as ai_router
 from backend.api.audit import router as audit_router
+from backend.api.alerts import router as alerts_router
 from backend.api.cron import router as cron_router
 from backend.api.fx import router as fx_router
+from backend.api.screener import router as screener_router
 
 
 def create_app() -> FastAPI:
@@ -84,8 +86,10 @@ def create_app() -> FastAPI:
     app.include_router(backtest_router)
     app.include_router(ai_router)
     app.include_router(audit_router)
+    app.include_router(alerts_router)
     app.include_router(cron_router)
     app.include_router(fx_router)
+    app.include_router(screener_router)
 
     @app.get("/", tags=["health"])
     def root() -> dict:

@@ -155,16 +155,61 @@ def refresh_forecast(symbol: str, db: Any = None, **kwargs: Any) -> dict:
 
 
 def evaluate_alerts(db: Any = None, **kwargs: Any) -> dict:
-    """Stub: evaluate alert conditions (no notification fan-out here)."""
+    """Evaluate alert conditions via the shared alerts core.
+
+    Without ``db`` this stays pure in-memory (no DB, no Redis, no network)
+    so unit tests and ``--once`` never need infrastructure. With ``db`` it
+    runs :func:`backend.api.alerts.evaluate_due_alerts` (same core as
+    ``POST/GET /api/cron/evaluate``): fires due alerts, audits them, and
+    attempts delivery best-effort. Optional ``market`` / ``forecast`` /
+    ``notifier`` kwargs inject fakes (tests); otherwise service defaults
+    are used. Delivery failure never blocks firing.
+    """
     job = "evaluate_alerts"
+    if db is None:
+        provenance = build_provenance(job)
+        result = {
+            "job": job, "ok": True,
+            "alerts_checked": 0, "alerts_fired": 0, "stub": True,
+            "detail": "in-memory stub: alert rules evaluated; delivery lives outside workers",
+            "provenance": provenance,
+        }
+        return _log_result(result)
     provenance = build_provenance(job)
+    try:
+        from backend.api.alerts import evaluate_due_alerts  # lazy: no hard api dep at import
+
+        outcome = evaluate_due_alerts(
+            db,
+            market=kwargs.get("market"),
+            forecast=kwargs.get("forecast"),
+            notifier=kwargs.get("notifier"),
+        )
+    except Exception as exc:
+        logger.warning("evaluate_alerts job failed: %s", type(exc).__name__)
+        result = {
+            "job": job, "ok": False,
+            "alerts_checked": 0, "alerts_fired": 0,
+            "errors": {"_batch": f"{type(exc).__name__}: {str(exc)[:200]}"},
+            "provenance": provenance,
+        }
+        _audit(db, job=job, entity_id="all",
+               payload={"ok": False, "error": type(exc).__name__})
+        return _log_result(result)
+    checked = int(outcome.get("checked") or 0)
+    fired_list = list(outcome.get("fired") or [])
+    errors = dict(outcome.get("errors") or {})
     result = {
-        "job": job, "ok": True,
-        "alerts_checked": 0, "alerts_fired": 0, "stub": True,
-        "detail": "in-memory stub: alert rules evaluated; delivery lives outside workers",
+        "job": job, "ok": "_batch" not in errors,
+        "alerts_checked": checked, "alerts_fired": len(fired_list),
+        "fired": fired_list, "errors": errors,
+        "detail": "alert rules evaluated via backend.api.alerts; delivery attempted best-effort",
+        "disclosure": "Not investment advice. For informational purposes only.",
         "provenance": provenance,
     }
-    _audit(db, job=job, entity_id="all", payload={"stub": True})
+    _audit(db, job=job, entity_id="all",
+           payload={"alerts_checked": checked,
+                    "alerts_fired": len(fired_list)})
     return _log_result(result)
 
 

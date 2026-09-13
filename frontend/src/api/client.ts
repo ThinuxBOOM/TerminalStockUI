@@ -1229,3 +1229,150 @@ export async function getAuditForecasts(limit = 5): Promise<AuditForecastsResult
         : 'Not investment advice. For informational purposes only.',
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 3a: screener — rank the registry universe by forecast         */
+/* direction probability (additive — no existing export changed).      */
+/* Parsers are tolerant: alias keys accepted, stale-marked provenance  */
+/* when the envelope is absent. Callers treat throw → error state.     */
+/* ------------------------------------------------------------------ */
+
+export const ScreenerRowSchema = z
+  .object({
+    symbol: z.string(),
+    company_name: z.string().optional().default(''),
+    exchange_mic: z.string().optional().default(''),
+    currency: z.string().optional().default('USD'),
+    price: z.number().nullable().optional(),
+    change_pct: z.number().nullable().optional(),
+    market_state: z.string().nullable().optional(),
+    direction_probability: z.number().min(0).max(1),
+    confidence: z.string().optional().default('Unknown'),
+    model_version: z.string().optional().default(''),
+    horizon: z.number().optional(),
+    horizons: z.array(z.number()).optional().default([]),
+    provenance: ProvenanceSchema,
+  })
+  .passthrough();
+export type ScreenerRow = z.infer<typeof ScreenerRowSchema>;
+
+export const ScreenerSkippedSchema = z
+  .object({
+    symbol: z.string(),
+    reason: z.string().optional().default(''),
+  })
+  .passthrough();
+export type ScreenerSkipped = z.infer<typeof ScreenerSkippedSchema>;
+
+export const ScreenerResponseSchema = z
+  .object({
+    results: z.array(ScreenerRowSchema).optional().default([]),
+    count: z.number().optional().default(0),
+    universe_size: z.number().optional().default(0),
+    skipped: z.array(ScreenerSkippedSchema).optional().default([]),
+    horizon: z.number().optional(),
+    disclosure: z.string().optional().default(''),
+  })
+  .passthrough();
+export type ScreenerResponse = z.infer<typeof ScreenerResponseSchema>;
+
+export type ScreenerParams = {
+  market?: string | null;
+  minDirection?: number;
+  horizon?: number;
+  limit?: number;
+};
+
+function normalizeScreenerRow(raw: unknown, horizon: number): ScreenerRow {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const prob = num(
+    r.direction_probability ?? r.probability ?? r.direction_prob ?? r.proba,
+    Number.NaN,
+  );
+  const candidate = {
+    ...(r as Record<string, unknown>),
+    symbol:
+      (r.symbol as string | undefined) ??
+      (r.ticker as string | undefined) ??
+      'UNKNOWN',
+    company_name:
+      (r.company_name as string | undefined) ??
+      (r.companyName as string | undefined) ??
+      (r.name as string | undefined) ??
+      '',
+    exchange_mic:
+      (r.exchange_mic as string | undefined) ??
+      (r.exchangeMic as string | undefined) ??
+      (r.mic as string | undefined) ??
+      '',
+    currency: (r.currency as string | undefined) ?? 'USD',
+    price: rateNumber(r.price ?? r.last),
+    change_pct: rateNumber(r.change_pct ?? r.changePct),
+    market_state:
+      (r.market_state as string | undefined) ??
+      (r.marketState as string | undefined) ??
+      null,
+    direction_probability: prob,
+    confidence: (r.confidence as string | undefined) ?? 'Unknown',
+    model_version: (r.model_version as string | undefined) ?? '',
+    horizon: num(r.horizon ?? horizon, horizon),
+    horizons: Array.isArray(r.horizons)
+      ? (r.horizons as unknown[]).map((h) => Number(h)).filter((h) => Number.isFinite(h))
+      : [horizon],
+    provenance: normalizeProvenance(r, 'screener-api'),
+  };
+  return ScreenerRowSchema.parse(candidate);
+}
+
+function normalizeScreener(raw: unknown, horizon: number): ScreenerResponse {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const listRaw = Array.isArray(r.results)
+    ? r.results
+    : Array.isArray(r.rows)
+      ? r.rows
+      : Array.isArray(r.items)
+        ? r.items
+        : [];
+  const results = (listRaw as unknown[]).map((row) => normalizeScreenerRow(row, horizon));
+  const skippedRaw = Array.isArray(r.skipped) ? (r.skipped as unknown[]) : [];
+  const skipped = skippedRaw.flatMap((s) => {
+    const parsed = ScreenerSkippedSchema.safeParse(s);
+    return parsed.success ? [parsed.data] : [];
+  });
+  return ScreenerResponseSchema.parse({
+    ...(r as Record<string, unknown>),
+    results,
+    count:
+      typeof r.count === 'number'
+        ? (r.count as number)
+        : results.length,
+    universe_size:
+      typeof r.universe_size === 'number'
+        ? (r.universe_size as number)
+        : typeof r.universeSize === 'number'
+          ? (r.universeSize as number)
+          : results.length,
+    skipped,
+    horizon: num(r.horizon ?? horizon, horizon),
+    disclosure: (r.disclosure as string | undefined) ?? '',
+  });
+}
+
+/**
+ * GET /api/screener?market=&min_direction=&horizon=&limit=
+ * `market` accepts a MIC (XNYS/XNAS/XSHG/XPAR/XAMS/XBRU); All/empty
+ * omits the param. Throws on transport/validation error so the page
+ * can render its error state.
+ */
+export async function getScreener(params: ScreenerParams = {}): Promise<ScreenerResponse> {
+  const horizon = params.horizon ?? 21;
+  const mic = (params.market ?? '').trim().toUpperCase();
+  const query: Record<string, string | number> = {
+    horizon,
+    min_direction: params.minDirection ?? 0.5,
+    limit: params.limit ?? 20,
+  };
+  if (mic && mic !== 'ALL') query.market = mic;
+  const { data } = await api.get('/api/screener', { params: query });
+  return normalizeScreener(data, horizon);
+}

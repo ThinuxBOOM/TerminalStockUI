@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from backend.api.deps import get_market_service, get_registry
+from backend.forecasting.service import ForecastService, get_forecast_service
 from backend.instruments.registry import InstrumentRegistry
 from backend.market_data import ingest as ingest_module
 from backend.market_data.provenance import build_provenance
@@ -287,5 +288,92 @@ def cron_calibrate_post(
             "calibrated": 0,
             "snapshots": {},
             "errors": {"_batch": "calibrate failed"},
+            "provenance": _cron_provenance(True),
+        }
+
+
+def _run_evaluate(market: MarketDataService, forecast: ForecastService) -> dict:
+    """Evaluate all due active alerts via the shared alerts core.
+
+    Per-alert failures (thin history, missing quote fields) are reported in
+    ``errors`` keyed by alert_id; the batch itself never 500s. Returns
+    ``{checked, fired, errors, provenance, disclosure}``.
+    """
+    from backend.api.alerts import evaluate_due_alerts
+    from backend.db.session import get_session_factory, init_db
+
+    try:
+        init_db()
+        Session = get_session_factory()
+        db = Session()
+    except Exception:
+        # DB unreachable: never 500 the batch; connection text stays out of
+        # responses and logs (same posture as _run_calibrate).
+        logger.warning("evaluate db unavailable")
+        return {
+            "checked": 0,
+            "fired": [],
+            "errors": {"_batch": "db unavailable"},
+            "provenance": _cron_provenance(True),
+        }
+    try:
+        return evaluate_due_alerts(db, market=market, forecast=forecast)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron evaluate batch failed")
+        return {
+            "checked": 0,
+            "fired": [],
+            "errors": {"_batch": "evaluate failed"},
+            "provenance": _cron_provenance(True),
+        }
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@router.get("/evaluate")
+def cron_evaluate_get(
+    request: Request,
+    market: MarketDataService = Depends(get_market_service),
+    forecast: ForecastService = Depends(get_forecast_service),
+) -> dict:
+    """Vercel Cron entry: ``GET /api/cron/evaluate`` (all due alerts)."""
+    _check_cron_auth(request)
+    try:
+        return _run_evaluate(market, forecast)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron evaluate batch failed")
+        return {
+            "checked": 0,
+            "fired": [],
+            "errors": {"_batch": "evaluate failed"},
+            "provenance": _cron_provenance(True),
+        }
+
+
+@router.post("/evaluate")
+def cron_evaluate_post(
+    request: Request,
+    market: MarketDataService = Depends(get_market_service),
+    forecast: ForecastService = Depends(get_forecast_service),
+) -> dict:
+    """Manual run: ``POST /api/cron/evaluate`` (all due alerts; no body)."""
+    _check_cron_auth(request)
+    try:
+        return _run_evaluate(market, forecast)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron evaluate batch failed")
+        return {
+            "checked": 0,
+            "fired": [],
+            "errors": {"_batch": "evaluate failed"},
             "provenance": _cron_provenance(True),
         }

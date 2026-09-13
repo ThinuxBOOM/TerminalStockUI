@@ -95,6 +95,10 @@ class BaseProvider(ABC):
         (e.g. ``GEMINI_API_KEY``). Vercel env vars are the persistent key
         path on serverless; the UI save flow needs a DB-backed endpoint
         before it can work there.
+        DB fallback (Phase 3c, LAST resort): when neither the secret
+        store nor the environment yields a key, consult the encrypted
+        DB row via backend.security.store_db.get_db_secret (same
+        SECRET_KEY-derived Fernet; ANY DB/decrypt issue -> None).
         """
         try:
             store = self._store()
@@ -110,6 +114,14 @@ class BaseProvider(ABC):
         env_key = os.getenv(f"{self.name.upper()}_API_KEY", "")
         if isinstance(env_key, str) and env_key.strip():
             return env_key.strip()
+        try:
+            from backend.security.store_db import get_db_secret
+
+            db_key = get_db_secret(self.name)
+        except Exception:
+            return None
+        if isinstance(db_key, str) and db_key.strip():
+            return db_key
         return None
 
     def is_configured(self) -> bool:
@@ -120,7 +132,16 @@ class BaseProvider(ABC):
             pass
         import os
 
-        return bool(os.getenv(f"{self.name.upper()}_API_KEY", "").strip())
+        if bool(os.getenv(f"{self.name.upper()}_API_KEY", "").strip()):
+            return True
+        try:
+            from backend.security.store_db import db_configured
+
+            if bool(db_configured(self.name)):
+                return True
+        except Exception:
+            pass
+        return False
 
     # -- interface ------------------------------------------------------
     @abstractmethod

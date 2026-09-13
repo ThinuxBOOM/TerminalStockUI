@@ -163,3 +163,65 @@ Index("ix_calibration_snapshots_symbol_horizon",
       CalibrationSnapshot.created_at.desc())
 
 _ = PG_UUID  # keep linter honest: Postgres UUID is the deploy target
+
+
+# --- Phase 3b: alerts (APPENDED at end-of-file by design) --------------------
+# Parallel agents append other models to this same file: do not move this block
+# above existing models and do not edit any line above it. Mirrors
+# infra/migrations/0003_alerts.sql (Postgres JSONB/NUMERIC map to portable
+# JSON/Numeric here so SQLite tests stay green).
+import sqlalchemy as _sa  # local alias for the appended alert models only
+
+
+class Alert(Base):
+    """User-defined alert rule (Phase 3b).
+
+    ``condition`` is one of price_above / price_below / direction_above /
+    direction_below / change_pct_below. ``horizon_days`` is consumed by the
+    direction_* conditions only (forecast direction_probability horizon).
+    ``last_fired_at`` + ``cooldown_hours`` gate re-fires.
+    """
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        _sa.CheckConstraint(
+            "condition IN ('price_above', 'price_below', 'direction_above', "
+            "'direction_below', 'change_pct_below')",
+            name="ck_alerts_condition",
+        ),
+        _sa.CheckConstraint(
+            "horizon_days IN (5, 21, 63)",
+            name="ck_alerts_horizon_days",
+        ),
+    )
+
+    alert_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange_mic: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    condition: Mapped[str] = mapped_column(Text, nullable=False)
+    threshold: Mapped[float] = mapped_column(Numeric, nullable=False)
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False, default=21)
+    target_ccy: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    cooldown_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class AlertEvent(Base):
+    """Fired-alert event (append-only; cascade-deleted with its alert)."""
+
+    __tablename__ = "alert_events"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("alerts.alert_id", ondelete="CASCADE"), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    observed: Mapped[float] = mapped_column(Numeric, nullable=False)
+    threshold: Mapped[float] = mapped_column(Numeric, nullable=False)
+    provenance: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_alerts_symbol_active", Alert.symbol, Alert.is_active)
+Index("ix_alert_events_alert", AlertEvent.alert_id, AlertEvent.created_at.desc())
