@@ -30,8 +30,13 @@ class GeminiProvider(BaseProvider):
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 800,
-                "responseMimeType": "application/json",
+                # NOTE: no responseMimeType — application/json without a
+                # responseSchema is rejected (HTTP 400) on current models.
+                # Strictness is enforced client-side instead: prompts demand
+                # JSON-only and parse_opinion_strict strips fences/prose.
+                # 2048: thinking models share this budget with thinking
+                # tokens; 800 risked truncation -> validation stub.
+                "maxOutputTokens": 2048,
             },
         }
         key = ""  # drop plaintext reference ASAP; never logged/returned
