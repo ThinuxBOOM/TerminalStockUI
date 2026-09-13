@@ -29,6 +29,18 @@ function clampProb(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
+/** Timeout-aware error copy: a full live scan takes ~30s cold. */
+function screenerErrorDetail(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Backend unreachable. Check VITE_API_BASE_URL.';
+  if (
+    (error as { code?: unknown })?.code === 'ECONNABORTED' ||
+    /timeout of \d+ms exceeded/i.test(message)
+  ) {
+    return 'Full-universe scan timed out (takes ~30s cold: 17 quotes + forecasts). Retry — warm quotes/cache make repeats faster.';
+  }
+  return message;
+}
+
 /**
  * Screener (Phase 3a): rank the registry universe by deterministic
  * forecast direction probability. Ranked rows link to the Security
@@ -148,11 +160,7 @@ export default function ScreenerPage() {
         {screen.isError && (
           <ErrorState
             title="Screener unavailable"
-            detail={
-              screen.error instanceof Error
-                ? screen.error.message
-                : 'Backend unreachable. Check VITE_API_BASE_URL.'
-            }
+            detail={screenerErrorDetail(screen.error)}
             onRetry={() => void screen.refetch()}
           />
         )}

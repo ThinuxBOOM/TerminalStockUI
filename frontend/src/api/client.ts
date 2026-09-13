@@ -1363,7 +1363,13 @@ function normalizeScreener(raw: unknown, horizon: number): ScreenerResponse {
  * `market` accepts a MIC (XNYS/XNAS/XSHG/XPAR/XAMS/XBRU); All/empty
  * omits the param. Throws on transport/validation error so the page
  * can render its error state.
+ *
+ * Own timeout (60s, not the shared 15s): a full-universe scan runs a
+ * quote + ensemble forecast per instrument (~30s live). Repeats are
+ * faster once quotes/cache are warm.
  */
+export const SCREENER_TIMEOUT_MS = 60000;
+
 export async function getScreener(params: ScreenerParams = {}): Promise<ScreenerResponse> {
   const horizon = params.horizon ?? 21;
   const mic = (params.market ?? '').trim().toUpperCase();
@@ -1373,6 +1379,9 @@ export async function getScreener(params: ScreenerParams = {}): Promise<Screener
     limit: params.limit ?? 20,
   };
   if (mic && mic !== 'ALL') query.market = mic;
-  const { data } = await api.get('/api/screener', { params: query });
+  const { data } = await api.get('/api/screener', {
+    params: query,
+    timeout: SCREENER_TIMEOUT_MS,
+  });
   return normalizeScreener(data, horizon);
 }
