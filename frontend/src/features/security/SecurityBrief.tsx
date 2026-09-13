@@ -269,7 +269,8 @@ function ForecastCard({
           Data quality: <b className="text-term-cyan">{f.quality_grade}</b>
         </p>
         <p className="text-xs">
-          AI provider: <b>Gemini 3.7 Flash</b>
+          AI provider:{' '}
+          <b>{f.provider && f.provider !== 'deterministic-engine' ? f.provider : 'none — deterministic core'}</b>
         </p>
         <p className="text-xs">
           Why: <span className="text-term-muted">{whyText}</span>

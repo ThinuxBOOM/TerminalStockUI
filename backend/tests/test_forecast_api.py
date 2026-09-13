@@ -47,6 +47,33 @@ def test_forecast_shape_and_provenance():
     assert set(body["components"]) >= {"historical-drift", "momentum"}
 
 
+def test_forecast_display_fields_for_terminal_ui():
+    """Display contract: label/quality/provider/why/risks/evidence_ids.
+
+    Regression for the empty-label / quality-U / unavailable-drivers panel:
+    every field the Security Brief renders must be present and derived.
+    """
+    from backend.api.forecast import direction_label
+
+    assert direction_label(0.64) == "moderately positive"
+    assert direction_label(0.36) == "moderately negative"
+    assert direction_label(0.5) == "neutral"
+    assert direction_label(0.80) == "clearly positive"
+    client = _client()
+    body = client.get("/api/forecast/AAPL", params={"horizon": 21}).json()
+    assert body["label"] in (
+        "clearly positive", "moderately positive", "slightly positive",
+        "neutral", "slightly negative", "moderately negative",
+        "clearly negative",
+    )
+    assert body["quality_grade"] == body["provenance"]["quality_grade"]
+    assert body["provider"] == "deterministic-engine"
+    assert isinstance(body["why"], list) and isinstance(body["risks"], list)
+    assert len(body["evidence_ids"]) >= 2
+    assert all(isinstance(e, str) and e for e in body["evidence_ids"])
+    assert any("momentum" in e for e in body["evidence_ids"])
+
+
 def test_forecast_all_horizons_ok():
     client = _client()
     for horizon in FORECAST_HORIZONS:
