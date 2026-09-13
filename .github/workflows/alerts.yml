@@ -24,10 +24,18 @@ jobs:
         run: |
           : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
           : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          # Normalize: strip whitespace/CR and any trailing slash (a pasted
+          # newline makes curl exit 3 with a malformed URL and no output).
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
           code=$(curl -s -o /tmp/eval.json -w "%{http_code}" \
             -H "Authorization: Bearer $CRON_SECRET" \
             "$APP_URL/api/cron/evaluate")
+          echo "HTTP status: $code"
           cat /tmp/eval.json
+          echo ""
           test "$code" = "200"
         env:
           APP_URL: ${{ secrets.APP_URL }}
