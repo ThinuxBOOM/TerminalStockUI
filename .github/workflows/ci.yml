@@ -63,6 +63,13 @@ jobs:
         run: npm run typecheck --prefix frontend
         continue-on-error: true
 
+      # Phase 4b: frontend pure-logic specs (`npm test` = `vitest run`).
+      # Same temporary continue-on-error as typecheck until node_modules
+      # stabilizes (cf. NVM4306 note in README/docs/OPERATIONS.md).
+      - name: Test frontend
+        run: npm test --prefix frontend
+        continue-on-error: true
+
   deploy-check:
     name: deploy preflight (stdlib-only)
     runs-on: ubuntu-latest

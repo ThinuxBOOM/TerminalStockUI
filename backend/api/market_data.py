@@ -36,7 +36,9 @@ def _enrich_market_state(out: dict) -> dict:
         from datetime import datetime as _dt
         as_of = _dt.fromisoformat(as_of_raw) if isinstance(as_of_raw, str) else as_of_raw
         delay = prov.get("delay_minutes", 15) if isinstance(prov, dict) else 15
-        out["market_state"] = _calendar_market_state(as_of, delay_minutes=int(delay), mic=mic)
+        out["market_state"] = _calendar_market_state(
+            as_of, delay_minutes=int(delay), mic=mic, now=as_of, at=as_of
+        )
     except Exception:
         pass
     return out

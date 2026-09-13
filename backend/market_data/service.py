@@ -250,6 +250,12 @@ class MarketDataService:
             fallback_used=fallback,
             missing_fields=quote.get("missing_fields", []),
         )
+        try:
+            _market_state = market_state(
+                as_of, delay_minutes=expected, mic=mic, now=as_of, at=as_of
+            )
+        except Exception:
+            _market_state = market_state(as_of, delay_minutes=expected)
         response = {
             "symbol": provider_symbol,
             "instrument": instrument.model_dump_canonical() if instrument else None,
@@ -265,7 +271,7 @@ class MarketDataService:
             or (instrument.currency if instrument else ("CNY" if sse else "USD")),
             "change": quote.get("change"),
             "change_pct": quote.get("change_pct"),
-            "market_state": market_state(as_of, delay_minutes=expected),
+            "market_state": _market_state,
             "provenance": provenance.model_dump(mode="json"),
         }
         if self.cache is not None and not fallback:

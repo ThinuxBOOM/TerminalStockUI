@@ -1030,21 +1030,25 @@ function normalizeRankedRow(raw: unknown, targetCcy: string): RankedRow {
   });
 }
 
-function normalizeRank(
+export function normalizeRank(
   raw: unknown,
   symbols: string[],
   targetCcy: string,
 ): RankResponse {
   const r = (raw ?? {}) as Record<string, unknown>;
-  const listRaw = Array.isArray(r.ranking)
-    ? r.ranking
-    : Array.isArray(r.results)
-      ? r.results
-      : Array.isArray(r.items)
-        ? r.items
-        : Array.isArray(r.rows)
-          ? r.rows
-          : [];
+  // Backend canonical key first (backend/market_data/fx/convert.py sends
+  // `ranked`); legacy aliases after. Missing all -> empty ranking.
+  const listRaw = Array.isArray(r.ranked)
+    ? r.ranked
+    : Array.isArray(r.ranking)
+      ? r.ranking
+      : Array.isArray(r.results)
+        ? r.results
+        : Array.isArray(r.items)
+          ? r.items
+          : Array.isArray(r.rows)
+            ? r.rows
+            : [];
   const ranking = (listRaw as unknown[]).map((row) =>
     normalizeRankedRow(row, targetCcy),
   );
@@ -1075,7 +1079,7 @@ function normalizeRank(
 /**
  * POST /api/fx/rank { symbols, target_ccy }
  * Cross-market ranking in `target_ccy`. NEVER call for display unless
- * `isFreshFxProvenance(fx_provenance)` holds; on HTTP 409/502 with
+ * `isFreshFxProvenance(fx_provenance)` holds; on HTTP 423/502 with
  * `FX_PROVENANCE_MISSING` the error is rethrown untouched so the
  * Watchlist can render "Cross-market comparison unavailable — FX
  * provenance missing" instead of ranked numbers.

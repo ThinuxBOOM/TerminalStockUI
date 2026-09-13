@@ -81,11 +81,23 @@ Deterministic forecast (Milestone 3). Measurable probabilities, not advice.
 
 ### `POST /api/securities/{instrument_id}/ai-insight`
 Explicit-request-only AI call (Milestone 4/5). Body: `{ "profile": "quick_insight|forecast_assist|deep_research|report", "provider": "gemini|openai|anthropic|xai", "model": "..." }`.
+- Implemented routes are `POST /api/ai/insight {symbol, profile}` (`backend/api/ai.py:169-186`)
+  and `POST /api/ai/forecast_opinion {symbol, horizon[, profile, quant_prob, ai_weight, ai_enabled]}`
+  (`backend/api/ai.py:189-225`); the `/api/securities/.../ai-*` paths above are the
+  pre-implementation sketch and are NOT served (see Phase 4a table below).
 - Returns **strict-schema JSON** bounded opinion: `direction, probability (0–1),
   time_horizon_days (5|21|63 only), catalysts[], risks[], evidence_ids[], limitations[]`.
 - Rejects claims without `evidence_ids`; rejects out-of-range probabilities/horizons.
 - `ai_weight ≤ 0.20`, server-enforced. Disabling AI leaves `/forecast` intact.
 - API keys never accepted from, or returned to, the client.
+- Profile keys: server normalizes (`backend/api/ai.py:72-76`
+  `key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")`;
+  accepted `PROFILES = ("quick_insight", "forecast_assist", "deep_research", "report")`
+  in `backend/ai/prompts/__init__.py:23`), so display labels (`Quick Insight`,
+  `Deep Research`, `Forecast Assist`, `Report` sent by `frontend/src/api/client.ts:290-296`
+  via `postAIInsight` at `frontend/src/api/client.ts:666-673`) are accepted and mapped
+  to snake_case. Unknown profiles → `422 {"detail": "unknown AI profile: ...; expected one of
+  ['quick_insight', 'forecast_assist', 'deep_research', 'report']"}`.
 
 ### `GET /api/providers/health`
 Per-provider latency/error/circuit state for the dashboard (Milestone 0):
@@ -111,7 +123,14 @@ only** and never override the quantitative core.
 
 ### `GET /api/securities/{instrument_id}/forecast?horizon_days=21` (M3)
 
-- Query: `horizon_days` ∈ `{5, 21, 63}` only; any other value → `400 INVALID_HORIZON`.
+- Implemented route is `GET /api/forecast/{symbol}?horizon=5|21|63`
+  (`backend/api/forecast.py:163-168`). Query key is `horizon` (not `horizon_days`).
+- Horizons outside `{5, 21, 63}` → `422` (not `400`) with
+  `{"detail": "horizon must be one of [5, 21, 63], got <value>"}` exactly
+  (`backend/api/forecast.py:170-174`; `FORECAST_HORIZONS = (5, 21, 63)` in
+  `backend/forecasting/common.py:13`). The `400 INVALID_HORIZON` code in earlier
+  drafts is docs-only — no such `error.code` is emitted by code (grep over
+  `backend/` finds no `INVALID_HORIZON`).
 - Response: same shape as the `GET .../forecast` example above, plus:
   - `model_version`, `feature_version`, `data_version` (all required, non-empty).
   - `created_at` (row timestamp), `target_date` (as_of + horizon).
@@ -121,7 +140,10 @@ only** and never override the quantitative core.
 - Every call persists a versioned row to `forecasts`
   (`UNIQUE (instrument_id, horizon_days, target_date, model_version,
   feature_version, data_version)`) and emits `forecast.created` to the audit log.
-- Grade D data → `409 FORECAST_BLOCKED` with `{"value": null, "status": "unavailable"}` semantics; never fabricate.
+- Grade D data → docs-draft `409 FORECAST_BLOCKED` is docs-only — no such
+  `error.code` is emitted by code (grep over `backend/` finds no `FORECAST_BLOCKED`).
+  Unavailable semantics (`{"value": null, "status": "unavailable"}`) are preserved
+  per-metric by the analytics modules; forecasts never fabricate.
 
 ### `GET /api/securities/{instrument_id}/analytics` (M2, referenced by M3/M4)
 
@@ -136,19 +158,45 @@ only** and never override the quantitative core.
 
 ### `POST /api/securities/{instrument_id}/ai-insight` (M4/M5)
 
-- Explicit-request only. Body: `{profile: quick_insight|forecast_assist|deep_research|report, provider: gemini|openai|anthropic|xai, model: "..."}`.
+- Implemented as `POST /api/ai/insight` (`backend/api/ai.py:169-186`); the
+  securities-scoped path is the pre-implementation sketch, not a served route.
+- Explicit-request only. Body: `{symbol, profile}` where `profile` accepts
+  `quick_insight|forecast_assist|deep_research|report` AND the display-label forms
+  (`Quick Insight`, `Deep Research`, `Forecast Assist`, `Report`) via server-side
+  normalization (`backend/api/ai.py:72-76`). Unknown profile → `422`
+  `{"detail": "unknown AI profile: ...; expected one of [...]"}`.
 - Returns strict-schema bounded opinion: `direction (bullish|bearish|neutral), probability (0–1), time_horizon_days (5|21|63 only), catalysts[], risks[], evidence_ids[] (non-empty), limitations[]`.
 - Server-enforced: reject claims without `evidence_ids`; reject out-of-range probabilities/horizons; `ai_weight ≤ 0.20`.
 - Keys: never accepted from, or returned to, the client. Request/response payloads are redacted in logs and audit rows.
 
 ### `POST /api/securities/{instrument_id}/ai-forecast-opinion` (M5, bounded)
 
-- Same validation as `ai-insight` with `forecast_assist` profile semantics: may raise/lower/leave unchanged the displayed confidence but never overrides the deterministic forecast. Disabling AI leaves `/forecast` intact.
+- Implemented as `POST /api/ai/forecast_opinion` (`backend/api/ai.py:189-225`).
+- Same profile validation as `ai-insight` with `forecast_assist` profile semantics: may raise/lower/leave unchanged the displayed confidence but never overrides the deterministic forecast. Disabling AI leaves `/forecast` intact.
+- Horizon validation: `backend/api/ai.py:79-97` (`_check_horizon`) — any non-`5|21|63`
+  value (bool, non-integer float, non-numeric string, out-of-range int) → `422`
+  `{"detail": "horizon must be one of 5, 21, 63"}` exactly. `quant_prob` outside
+  `[0, 1]` → `422 {"detail": "quant_prob must be in [0, 1]"}` (`backend/api/ai.py:195-196`).
+  Bad `ai_weight` → `422` with the `ValueError` text from `resolve_ai_weight`
+  (`backend/api/ai.py:197-200`; presets/cap in `backend/ai/blend.py:17-46`).
 
-### `GET /api/ai/providers/performance?exchange=XNAS&horizon_days=21` (M5)
+### `GET /api/ai/providers/performance?exchange=XNAS&horizon=21` (M5)
 
-- Historical provider/model scoreboard by exchange and horizon: `{provider, model, exchange, horizon_days, n_opinions, brier_score, calibration_error, hit_rate}`.
+- Implemented route `GET /api/ai/providers/performance[?exchange&horizon]`
+  (`backend/api/ai.py:228-236`). Query keys are `exchange` and `horizon` (not
+  `horizon_days`); non-`5|21|63` `horizon` → `422 {"detail": "horizon must be one of 5, 21, 63"}`
+  (`backend/api/ai.py:233-234`).
+- Historical provider/model scoreboard by exchange and horizon: `{rows, disclaimer}` where
+  each row is `{provider, model, exchange, horizon, calls, stub_calls, errors, decided,
+  accuracy, stub_rate, error_rate, avg_latency_ms}` (`backend/ai/router.py:100-114`).
 - Used to justify the fixed 20% cap and any future learned weighting (only after sufficient out-of-sample evidence).
+
+### `POST /api/ai/providers/health/test` and `POST /api/providers/health/test`
+
+- `POST /api/ai/providers/health/test [{provider}]` (`backend/api/ai.py:239-249`):
+  unknown provider → `422 {"detail": "unknown provider: ..."}`; returns `{providers: [...]}` (config only, never key material).
+- `POST /api/providers/health/test[?provider=yfinance]` (`backend/api/providers.py:26-34`):
+  fetches a reference `AAPL` quote, returns fresh tracker stats.
 
 ### `GET /api/audit/forecasts?symbol=AAPL&horizon_days=21&limit=50&offset=0` (M0/M3, implemented in `backend/api/audit.py`)
 
@@ -165,17 +213,23 @@ only** and never override the quantitative core.
   app.include_router(audit_router)
   ```
 
-### Error codes (all endpoints)
+### Error codes (all endpoints — code truth, Phase 4a)
 
-| `error.code` | HTTP | Meaning |
-|---|---|---|
-| `INVALID_HORIZON` | 400 | `horizon_days` not in `{5, 21, 63}` |
-| `UNKNOWN_INSTRUMENT` | 404 | `instrument_id` not in registry/DB |
-| `FORECAST_BLOCKED` | 409 | Grade-D data; forecast unavailable, reason in `message` |
-| `AI_VALIDATION_FAILED` | 422 | Provider returned malformed opinion (missing `evidence_ids`, bad probability/horizon) |
-| `AI_DISABLED` | 409 | AI requested but no provider configured; deterministic `/forecast` still works |
-| `PROVIDER_UNAVAILABLE` | 502 | Upstream failed; cached `fallback_used: true` payload when available |
-| `RATE_LIMITED` | 429 | Provider/token-bucket budget exhausted; `retryable: true` |
+| `error.code` / `detail` | HTTP | Meaning | Source |
+|---|---|---|---|
+| (no code; `detail: "horizon must be one of [5, 21, 63], got ..."`) | 422 | `horizon` not in `{5, 21, 63}` on forecast/screener | `backend/api/forecast.py:170-174`, `backend/api/screener.py:82-86` |
+| (no code; `detail: "horizon must be one of 5, 21, 63"`) | 422 | bad AI horizon on `/api/ai/*` | `backend/api/ai.py:79-97,233-234` |
+| (no code; `detail: "unknown AI profile: ...; expected one of [...]"`) | 422 | unknown AI profile | `backend/api/ai.py:72-76` |
+| (no code; `detail: "unknown instrument_id"`) | 404 | `instrument_id` not in registry/DB | `backend/api/market_data.py:74-76,88-90` |
+| (no code; `detail: "unknown alert ..."` ) | 404 | `alert_id` not found / unparseable UUID | `backend/api/alerts.py:134-155` |
+| `INVALID_HORIZON` | — (docs-only) | Earlier drafts claimed `400`; code emits `422` with the strings above, no `error.code` | grep `backend/` finds no `INVALID_HORIZON` |
+| `UNKNOWN_INSTRUMENT` | — (docs-only; note pre-existing typo) | Draft code string; code emits `404 {"detail": "unknown instrument_id"}` | `backend/api/market_data.py:74-76` |
+| `FORECAST_BLOCKED` | — (docs-only) | Draft `409`; no such code in code | grep `backend/` finds no `FORECAST_BLOCKED` |
+| `AI_VALIDATION_FAILED` | — (docs-only) | Draft `422` code; code uses bare `422 {"detail": ...}` with fail-safe stub/degrade, never this string | grep `backend/` finds no `AI_VALIDATION_FAILED`; see `backend/ai/router.py:170-216` |
+| `AI_DISABLED` | — (docs-only) | Draft `409`; disabled behavior is weight-0 blend (`ai_enabled=False → 0.0`, `backend/ai/blend.py:23-32,87-99`) with `/forecast` intact, never this code | grep `backend/` finds no `AI_DISABLED` |
+| `PROVIDER_UNAVAILABLE` | 502 | Upstream failed; cached `fallback_used: true` payload when available (`detail: str(exc)` from `ProviderError`) | `backend/api/market_data.py:54-55`, `backend/api/fx.py:147-149,174-176,231-233` |
+| `RATE_LIMITED` | 429 | Provider/token-bucket budget exhausted; `retryable: true` | (retained draft semantics; no dedicated backend symbol in Phase 4a scope) |
+| `FX_PROVENANCE_MISSING` | 423 (NOT 409) | FX provenance stale/missing/fallback-without-opt-in; `/api/fx/rank` refused | `backend/market_data/fx/convert.py:23`, `backend/api/fx.py:243-254` |
 
 ### Disclosure note (required)
 
@@ -437,14 +491,166 @@ Success (truncated):
 }
 ```
 
-Gate refusal:
+Gate refusal (HTTP 423 — `backend/api/fx.py:244-254`):
 
 ```json
 {"error": {"code": "FX_PROVENANCE_MISSING", "message": "FX feed stale/missing; ranking refused", "retryable": true, "provenance": {...}}}
 ```
 
-### Error codes (M7 addition)
+Note: the wire `message` is the gate exception text from
+`backend/market_data/fx/convert.py:103-123` (e.g. `"FX provenance missing: ..."`,
+`"FX rates stale: as_of is ...h old (limit 24h); ..."`, or
+`"FX rates are fallback (ECB reference stub): pass allow_fallback=True ..."`),
+not the abbreviated sketch above. Gate rules: missing/unparseable `as_of` → refuse;
+`as_of` older than 24h (`MAX_AGE_HOURS = 24.0`, `backend/market_data/fx/convert.py:24`) →
+refuse; `fallback_used: true` without explicit `allow_fallback=true` in
+`POST /api/fx/rank {symbols, target_ccy, allow_fallback=false}` (`backend/api/fx.py:68-71,240-242`) → refuse.
+
+### Error codes (M7 addition — corrected Phase 4a)
 
 | `error.code` | HTTP | Meaning |
 |---|---|---|
-| `FX_PROVENANCE_MISSING` | 409 | FX provenance stale/missing; `/api/fx/rank` (and convert when applicable) refused. Client shows the gate message and native-currency quotes only. |
+| `FX_PROVENANCE_MISSING` | 423 (NOT 409 — earlier drafts said 409; code returns `JSONResponse(status_code=423, ...)` at `backend/api/fx.py:244-254` with `CODE = "FX_PROVENANCE_MISSING"` from `backend/market_data/fx/convert.py:23`) | FX provenance stale/missing; `/api/fx/rank` (and convert when applicable) refused. Client shows the gate message and native-currency quotes only. |
+
+---
+
+## Phase 4a appendix (implemented fetcher paths + new surfaces — normative)
+
+Code wins over all earlier sketches. Every row below was verified against the
+router cited; frontend alignment notes cite `frontend/src/api/client.ts`.
+
+### Fetcher paths table (all current routes)
+
+| Client call | HTTP | Backend route | Source |
+|---|---|---|---|
+| `getForecast(symbol, horizon)` path-style (primary) | `GET /api/forecast/{symbol}?horizon=5\|21\|63` | `backend/api/forecast.py:163-168` | `frontend/src/api/client.ts:461-468` |
+| `getForecast` legacy fallback | `GET /api/forecast?symbol=&horizon=` (older backends only) | NOT served by current code (no such route in `backend/api/forecast.py`) — fallback retained client-side only | `frontend/src/api/client.ts:469-475` |
+| `getAnalytics(symbol)` path-style (primary) | `GET /api/analytics/{symbol}` | `backend/api/analytics_api.py:159-163` | `frontend/src/api/client.ts:513-517` |
+| `getAnalytics` legacy fallback | `GET /api/analytics?symbol=` (older backends only) | NOT served by current code | `frontend/src/api/client.ts:519-525` |
+| `runBacktest(symbol, horizons)` (primary) | `POST /api/backtest/run {symbol, horizons[, train_size, test_size, gap, n_bins, limit]}` | `backend/api/backtest.py:243-249` | `frontend/src/api/client.ts:577-581` |
+| `runBacktest` legacy fallback | `POST /api/backtest {symbol, horizons}` (older backends only) | NOT served by current code | `frontend/src/api/client.ts:582-589` |
+| `getAIPerformance()` (primary) | `GET /api/ai/providers/performance[?exchange&horizon]` | `backend/api/ai.py:228-236` | `frontend/src/api/client.ts:729-732` |
+| `getAIPerformance` legacy fallback | `GET /api/ai/performance` (older backends only) | NOT served by current code | `frontend/src/api/client.ts:734-740` |
+| `postAIInsight(symbol, profile)` | `POST /api/ai/insight {symbol, profile}` (no fallback; own 60s timeout) | `backend/api/ai.py:169-186` | `frontend/src/api/client.ts:664-673` |
+| `testProviderHealth(provider)` (primary) | `POST /api/providers/health/test` (+ `?provider=` query echoed) | `backend/api/providers.py:26-34` | `frontend/src/api/client.ts:756-775` |
+| `testProviderHealth` fallback | `POST /api/ai/test` (older backends only) | NOT served by current code (no such route in `backend/api/ai.py`) | `frontend/src/api/client.ts:776-782` |
+| `getProvidersHealth()` | `GET /api/providers/health` | `backend/api/providers.py:13-23` | `frontend/src/api/client.ts:1119-1126` |
+| `getScreener({market, minDirection, horizon, limit})` | `GET /api/screener?market=&min_direction=&horizon=&limit=` (no fallback) | `backend/api/screener.py:69-80` (single `GET ""` → `/api/screener`) | `frontend/src/api/client.ts:1373-1387` |
+| quote | `GET /api/market_data/quote?symbol=&market=` | `backend/api/market_data.py:45-56` | `frontend/src/api/client.ts:258-272` |
+| bars | `GET /api/market_data/bars?symbol=&timeframe=&limit=` | `backend/api/market_data.py:58-65` | — |
+| securities quote/bars | `GET /api/securities/{instrument_id}/quote\|bars` | `backend/api/market_data.py:68-93` (`404 {"detail": "unknown instrument_id"}`) | — |
+| alerts CRUD | `POST /api/alerts[/]`, `GET /api/alerts[/][?active_only=]`, `PATCH /api/alerts/{alert_id}`, `DELETE /api/alerts/{alert_id}` (204) | `backend/api/alerts.py:252-253,286-287,315-321,348-366` | — |
+| provider keys | `POST /api/providers/keys`, `GET /api/providers/keys/status` | `backend/api/providers.py:121-157,160-182` | — |
+| provider budgets | `POST /api/providers/budget`, `GET /api/providers/budget` | `backend/api/providers.py:185-216,219-238` | — |
+| AI providers | `GET /api/ai/providers/performance`, `POST /api/ai/providers/health/test` | `backend/api/ai.py:228-249` | — |
+| cron | `GET\|POST /api/cron/ingest`, `GET\|POST /api/cron/calibrate`, `GET\|POST /api/cron/evaluate` | `backend/api/cron.py:114-161,243-292,338-379` | — |
+| FX | `GET /api/fx/pairs`, `GET /api/fx/rate?base=&quote=`, `POST /api/fx/convert`, `POST /api/fx/rank` | `backend/api/fx.py:121-132,135-160,163-188,191-257` | `frontend/src/api/client.ts:940-945,974-987,1083-1094` |
+| health | `GET /health` (+ `/` root) | `backend/api/health.py:28-40`, `backend/api/main.py:94-96` | `frontend/src/api/client.ts:214-217` (`api.get('/health')`) |
+| audit | `GET /api/audit/forecasts`, `GET /api/audit/ai_decisions` | `backend/api/audit.py` (see M3/M4 appendix) | `frontend/src/api/client.ts:1187-1189` |
+
+Frontend timeouts: shared `axios` instance `timeout: 15000` (`frontend/src/api/client.ts:142-146`);
+`AI_TIMEOUT_MS = 60000` for `postAIInsight` (`frontend/src/api/client.ts:664-673`, message in
+`friendlyAIError` at `frontend/src/api/client.ts:676-682`); `SCREENER_TIMEOUT_MS = 60000`
+for `getScreener` (`frontend/src/api/client.ts:1371-1386`). Serverless
+`functions.api/index.py.maxDuration = 60` (`vercel.json:7-11`) — matches the 60s AI/screener budget.
+
+### `/health` rewrite behavior
+
+`vercel.json:22-34` rewrites: `/api/(.*) → /api` (serverless function `api/index.py`),
+`/health → /api` (same function), SPA fallback otherwise. `api/index.py:20` imports
+`backend.api.main:app`, which mounts `GET /health` (`backend/api/main.py:79`,
+`backend/api/health.py:28-40` returning `{status, postgres, redis, version, providers}`).
+So deployed `GET /health` hits the serverless function and returns the FastAPI health
+payload; locally it hits FastAPI directly.
+
+### Cron schedules + alerts-via-Actions
+
+- Vercel crons (`vercel.json:12-21`): `GET /api/cron/ingest` at `0 1 * * *` (01:00 UTC),
+  `GET /api/cron/calibrate` at `0 2 * * *` (02:00 UTC). Both also accept `?symbol=` and
+  `POST {symbols: [...]}` manual runs (`backend/api/cron.py:114-161,243-292`).
+- Alerts evaluation is NOT a third Vercel cron (Hobby slot cap — both slots taken, see
+  `.github/workflows/alerts.yml:1-9`): GitHub Actions `Evaluate alerts` runs
+  `*/15 * * * *` + `workflow_dispatch` (`.github/workflows/alerts.yml:12-17`) and curls
+  `$APP_URL/api/cron/evaluate` with `Authorization: Bearer $CRON_SECRET`
+  (`.github/workflows/alerts.yml:33-39`). `GET|POST /api/cron/evaluate` shares
+  `evaluate_due_alerts` with the worker (`backend/api/cron.py:295-379`,
+  `backend/api/alerts.py:438-580`).
+- Cron auth: when `CRON_SECRET` is set, all six cron endpoints require
+  `Authorization: Bearer <secret>` (constant-time compare) else `401 {"detail": "unauthorized"}`
+  (`backend/api/cron.py:65-80`); when unset they are open (local dev).
+
+### New surface 1: screener — `GET /api/screener` (`backend/api/screener.py:69-142`)
+
+Request params: `market` (MIC in `{XNYS, XNAS, XSHG, XPAR, XAMS, XBRU}` or `ALL`/omitted;
+`backend/api/screener.py:36,56-66`), `min_direction` (float `0.0–1.0`, default `0.5`),
+`horizon` (`5|21|63`, default `21`), `limit` (`1–50`, default `20`).
+Errors: bad `horizon` → `422 {"detail": "horizon must be one of [5, 21, 63], got ..."}`;
+unknown `market` → `422 {"detail": "unknown market ...: expected one of [...] or ALL"}`.
+Per-symbol failures degrade to `skipped: [{symbol, reason}]`, never a batch 500.
+
+```json
+{
+  "results": [
+    {
+      "symbol": "AAPL", "company_name": "Apple Inc.", "exchange_mic": "XNAS",
+      "currency": "USD", "price": 232.1, "change_pct": 0.42, "market_state": "open",
+      "direction_probability": 0.61, "confidence": "moderate",
+      "model_version": "ensemble-v1", "horizon": 21, "horizons": [21],
+      "quality": {"metric": "piotroski", "quality_flag": "...", "reason": "..."},
+      "provenance": {"source": "...", "as_of": "...", "delay_minutes": 15, "quality_grade": "B", "fallback_used": false, "missing_fields": []}
+    }
+  ],
+  "count": 1, "universe_size": 42, "skipped": [], "horizon": 21,
+  "disclosure": "Not investment advice. For informational purposes only."
+}
+```
+
+(Field names copied from `backend/api/screener.py:108-123,135-142`; quality signal is
+`piotroski_score({})` per `backend/api/screener.py:40-53`, never a fabricated score.)
+
+### New surface 2: alerts — `/api/alerts*` (`backend/api/alerts.py:56,252-366`)
+
+- `POST /api/alerts[/] {symbol, condition, threshold, horizon_days=21, target_ccy="USD"}`
+  → `{alert, provenance, disclosure}`. `condition ∈ {price_above, price_below,
+  direction_above, direction_below, change_pct_below}` (`backend/api/alerts.py:60-70`);
+  `horizon_days ∈ {5,21,63}` for `direction_*` only; symbol must resolve via registry
+  else `422 {"detail": "unknown symbol ..."}` (`backend/api/alerts.py:261-265`);
+  non-finite `threshold` → `422 {"detail": "threshold must be a finite number"}`
+  (`backend/api/alerts.py:176-198,225-246`); bad `horizon_days`/`target_ccy` →
+  pydantic `422`; row shape `{alert_id, symbol, exchange_mic, condition, threshold,
+  horizon_days, target_ccy, is_active, cooldown_hours=24, last_fired_at, created_at}`
+  (`backend/api/alerts.py:108-121,266-275`).
+- `GET /api/alerts[/][?active_only=false]` → `{alerts, count, provenance, disclosure}`
+  (`backend/api/alerts.py:286-312`).
+- `PATCH /api/alerts/{alert_id} {is_active?, threshold?, cooldown_hours?≥0}` →
+  `{alert, provenance, disclosure}`; empty subset → `422 {"detail": "no updatable fields:
+  expected subset of {is_active, threshold, cooldown_hours}"}` (`backend/api/alerts.py:315-345`);
+  unknown id → `404 {"detail": "unknown alert ..."}` (`backend/api/alerts.py:134-155`).
+- `DELETE /api/alerts/{alert_id}` → `204` empty (events cascade;
+  `backend/api/alerts.py:348-366`).
+- Evaluation `POST|GET /api/cron/evaluate` → `{checked, fired: [{alert_id, symbol,
+  observed}], errors, provenance, disclosure}` (`backend/api/alerts.py:438-580`).
+
+### New surface 3: provider keys / budgets — `/api/providers/keys*|budget*` (`backend/api/providers.py:37-238`)
+
+Allowed `provider ∈ {gemini, openai, anthropic, xai}` (`backend/api/providers.py:39-40`);
+unknown → `422 {"detail": "unknown provider; expected one of [...]"}` (`backend/api/providers.py:43-47`).
+
+- `POST /api/providers/keys {provider, model?, api_key}` → `{ok: true, provider, model,
+  configured: true}` (encrypted at rest via `put_db_secret`; `backend/api/providers.py:121-157`).
+  `model` must be a string ≤ 64 chars else `422 {"detail": "model must be a string <= 64 characters"}`
+  (`backend/api/providers.py:50-57`); `api_key` non-empty ≤ 2000 chars else
+  `422 {"detail": "api_key must be a non-empty string" | "api_key must be <= 2000 characters"}`
+  (`backend/api/providers.py:60-65`); non-dict body → `422 {"detail": "body must be {provider, model?, api_key}"}`.
+- `GET /api/providers/keys/status` → `{providers: [{provider, model, configured, updated_at}]}`
+  config flags only, never key material (`backend/api/providers.py:160-182`);
+  `configured` = secret-store OR env OR DB (`backend/api/providers.py:95-118`).
+- `POST /api/providers/budget {provider, monthly_usd}` → `{ok: true, provider, monthly_usd}`
+  (`backend/api/providers.py:185-216`); `monthly_usd` finite ≥ 0 else
+  `422 {"detail": "monthly_usd must be a finite number >= 0"}` (`backend/api/providers.py:68-79`);
+  non-dict body → `422 {"detail": "body must be {provider, monthly_usd}"}`.
+- `GET /api/providers/budget` → `{budgets: {provider: monthly_usd}}`
+  (`backend/api/providers.py:219-238`).
+- Dashboard: `GET /api/providers/health` → `{providers: [...]}` with zero-row stub
+  (`backend/api/providers.py:13-23`); `POST /api/providers/health/test` reference-quote
+  probe (`backend/api/providers.py:26-34`).
