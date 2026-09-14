@@ -55,6 +55,7 @@ def _ensure_canonical_package() -> None:
 _ensure_canonical_package()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend import __version__ as _version
 from backend.api.deps import reset_deps  # noqa: F401  (public test hook)
@@ -75,8 +76,58 @@ from backend.api.markets import router as markets_router
 from backend.api.screener import router as screener_router
 
 
+def _cors_origins() -> list[str]:
+    """Explicit allow-list from CORS_ORIGINS (comma-separated).
+
+    Defaults cover local Vite dev + Vercel previews. Production should set
+    CORS_ORIGINS to the exact frontend origin(s) — never "*".
+    """
+    raw = os.getenv("CORS_ORIGINS", "") or ""
+    configured = [part.strip() for part in raw.split(",") if part.strip()]
+    if configured:
+        return configured
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="OneMarket Analyzer", version=_version)
+    # Hardening middlewares (all no-ops in local dev by default; enforced
+    # via env in staging/prod — see backend/security/*.py):
+    #  - CORS allow-list (CORS_ORIGINS)
+    #  - Security headers (CSP, HSTS in production, X-Frame-Options, ...)
+    #  - Request body size cap (MAX_REQUEST_BYTES, default 1 MiB)
+    #  - Sliding-window rate limiting (RATE_LIMIT_PER_MIN, default 300)
+    #  - Opt-in API-key auth (API_KEY; open when unset)
+    from backend.security.middleware import (
+        RequestSizeLimitMiddleware,
+        SecurityHeadersMiddleware,
+        api_key_middleware,
+        rate_limit_middleware,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Role"],
+        max_age=600,
+    )
+    app.middleware("http")(api_key_middleware)
+    app.middleware("http")(rate_limit_middleware)
+    app.add_middleware(RequestSizeLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
+    try:
+        from backend.security.secrets import warn_if_default_secret_key
+
+        warn_if_default_secret_key()
+    except Exception:
+        pass
     app.include_router(health_router)  # GET /health
     app.include_router(instruments_router)
     app.include_router(market_data_router)

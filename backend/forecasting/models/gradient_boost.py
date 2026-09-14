@@ -49,6 +49,7 @@ class GradientBoostDirectionModel:
             raise ValueError("horizons must be >= 1")
         self.models_: dict[int, Any] = {}
         self.n_train_: dict[int, int] = {}
+        self.feature_columns_: list[str] = []
 
     def fit(self, features: pd.DataFrame, close: pd.Series) -> "GradientBoostDirectionModel":
         """Fit one classifier per horizon on label-observable rows."""
@@ -82,6 +83,7 @@ class GradientBoostDirectionModel:
             fitted[horizon] = clf
             counts[horizon] = int(len(yh))
         self.models_, self.n_train_ = fitted, counts
+        self.feature_columns_ = list(frame.columns)
         return self
 
     def predict_direction_proba(
@@ -93,7 +95,11 @@ class GradientBoostDirectionModel:
         """Direction probabilities for the latest feature row, per horizon."""
         if not self.models_:
             raise ValueError("model is not fitted; call fit() first")
-        row = pd.DataFrame(latest_features).iloc[[-1]].to_numpy(dtype=float)
+        frame = pd.DataFrame(latest_features)
+        missing = [c for c in self.feature_columns_ if c not in frame.columns]
+        if missing:
+            raise ValueError(f"latest_features missing columns: {missing}")
+        row = frame.iloc[[-1]][self.feature_columns_].to_numpy(dtype=float)
         out: dict[int, ForecastResult] = {}
         for horizon, clf in self.models_.items():
             proba = float(clf.predict_proba(row)[0, 1])

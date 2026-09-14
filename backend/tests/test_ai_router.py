@@ -30,6 +30,16 @@ from backend.security.secrets import EncryptedSecretStore, redact_mapping
 @pytest.fixture()
 def empty_store(monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-for-ai-router-tests")
+    # Hermetic: provider is_configured() falls back to <PROVIDER>_API_KEY env
+    # and DB rows. Clear both so "no key" really means stub for all vendors.
+    for _var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"):
+        monkeypatch.delenv(_var, raising=False)
+    try:
+        from backend.security import store_db as store_db_module
+
+        monkeypatch.setattr(store_db_module, "get_db_secret", lambda provider: None)
+    except Exception:
+        pass
     from backend.security import secrets as secrets_module
 
     secrets_module.reset_fernet()

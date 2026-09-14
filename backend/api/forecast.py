@@ -204,18 +204,18 @@ def calibration_history(
                 "forecast-calibration",
                 as_of=datetime.now(timezone.utc),
                 delay_minutes=15,
-                quality_grade="B",
-                fallback_used=False,
-                missing_fields=[],
+                quality_grade="C",
+                fallback_used=True,
+                missing_fields=["bars"],
             ).model_dump(mode="json")
         except Exception:
             provenance = {
                 "source": "forecast-calibration",
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "delay_minutes": 15,
-                "quality_grade": "B",
-                "fallback_used": False,
-                "missing_fields": [],
+                "quality_grade": "C",
+                "fallback_used": True,
+                "missing_fields": ["bars"],
             }
     try:
         from backend.db.session import get_session_factory, init_db
@@ -332,13 +332,27 @@ def forecast_limitations(result: dict) -> list[str]:
         "Walk-forward validation only; no look-ahead.",
         "Missing data renders unavailable, never silently imputed.",
         "Disabling AI leaves forecasting intact.",
+        "Direction probabilities are uncalibrated ensemble means (see ECE); "
+        "confidence labels reflect ensemble agreement downgraded by "
+        "data-quality and trailing-risk signals (vol regime, drawdown, "
+        "staleness), not calibrated skill. High agreement near 0.5 caps at "
+        "moderate; AI disagreement downgrades the blend label.",
     ]
     band = result.get("expected_return_range") or {}
     if band.get("n_windows") is not None:
         try:
+            n = int(band['n_windows'])
             items.append(
-                f"Return range estimated from {int(band['n_windows'])} historical windows."
+                f"Return range estimated from {n} historical windows."
             )
+            if n < 10:
+                items.append(
+                    "Insufficient windows (n<10): range and calibration unreliable."
+                )
+            elif n < 30:
+                items.append(
+                    "Small sample (n<30): range and calibration carry wide uncertainty."
+                )
         except (TypeError, ValueError):
             pass
     return items
@@ -564,7 +578,8 @@ def _persist_forecast_record(result: dict, symbol: str, market_service=None) -> 
                 dd = None
             confidence = str(result.get("confidence") or "")
             if confidence not in ("low", "moderate", "high"):
-                confidence = "moderate"
+                # Conservative fallback: unknown labels must not inflate to moderate.
+                confidence = "low"
             model_version = str(result.get("model_version") or "")
             feature_version = str(result.get("feature_version") or "")
             data_version = str(result.get("data_version") or "")

@@ -230,14 +230,16 @@ def test_sse_confidence_penalized_one_notch_on_limit_proximity():
     res = svc_lim.forecast("600519.SS", 21, as_of=FIXED_AS_OF)
     comp = res["components"]
     spread = max(comp.values()) - min(comp.values())
-    base = _confidence(spread, len(comp), str(res["provenance"].get("quality_grade", "B")))
+    base = _confidence(spread, len(comp), str(res["provenance"].get("quality_grade", "B")),
+                       direction_prob=res["direction_probability"])
     assert res["confidence"] == _penalize_confidence(base)
     assert res["confidence"] in ("low", "moderate") or base == "low"
     svc_ok = ForecastService(market_service=_FakeMarket(make_sse_normal()))
     res_ok = svc_ok.forecast("600519.SS", 21, as_of=FIXED_AS_OF)
     comp_ok = res_ok["components"]
     spread_ok = max(comp_ok.values()) - min(comp_ok.values())
-    base_ok = _confidence(spread_ok, len(comp_ok), str(res_ok["provenance"].get("quality_grade", "B")))
+    base_ok = _confidence(spread_ok, len(comp_ok), str(res_ok["provenance"].get("quality_grade", "B")),
+                          direction_prob=res_ok["direction_probability"])
     assert res_ok["confidence"] == base_ok  # no proximity -> no penalty
 
 

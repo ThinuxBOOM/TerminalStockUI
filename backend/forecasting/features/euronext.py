@@ -32,9 +32,9 @@ Formulas (NaN-safe; division by zero yields NaN, never inf):
   * ``mom_5_t = close_t / close_{t-5} - 1`` (likewise mom_10, mom_20).
   * ``vol_21_t = std(logret_{t-20..t}) * sqrt(252)`` (annualized trailing
     volatility, ddof=1).
-  * ``rsi_14_t`` = Wilder RSI(14) on closes (ewm alpha=1/14).
-  * ``turnover_5d_t = volume_t / mean(volume_{t-4..t})`` (volume-ratio
-    proxy only, not settlement records).
+  * ``rsi_14_t`` = Wilder RSI(14) on closes (ewm alpha=1/14, flat -> 50).
+  * ``turnover_5d_t = volume_t / mean(volume_{t-5..t-1})`` (ex-current
+    trailing mean; volume-ratio proxy only, not settlement records).
   * ``gap_proxy_t = (open_t - close_{t-1}) / close_{t-1}``
     (overnight/close-to-close gap proxy from daily bars; first row NaN).
 """
@@ -123,8 +123,11 @@ def build_euronext_features(
     with np.errstate(divide="ignore", invalid="ignore"):
         rsi = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
     rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    # Flat history is neutral 50, consistent with core features + analytics RSI.
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
 
-    vol_mean = volume.rolling(int(turnover_window), min_periods=int(turnover_window)).mean()
+    # Ex-current trailing mean: spike bar must not dampen its own denominator.
+    vol_mean = volume.shift(1).rolling(int(turnover_window), min_periods=int(turnover_window)).mean()
     with np.errstate(divide="ignore", invalid="ignore"):
         turnover = volume / vol_mean
     turnover = turnover.mask((vol_mean == 0) | (~np.isfinite(turnover)))

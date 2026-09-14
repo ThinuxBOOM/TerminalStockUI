@@ -49,6 +49,19 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _local_tz_for_symbol(symbol_hint: str) -> str:
+    sym = (symbol_hint or "").strip().upper()
+    if sym.endswith(".SS"):
+        return "Asia/Shanghai"
+    if sym.endswith(".PA"):
+        return "Europe/Paris"
+    if sym.endswith(".AS"):
+        return "Europe/Amsterdam"
+    if sym.endswith(".BR"):
+        return "Europe/Brussels"
+    return "America/New_York"
+
+
 def default_universe() -> list[str]:
     """Ingest universe: ``INGEST_SYMBOLS`` comma-list wins, else default."""
     raw = (os.getenv("INGEST_SYMBOLS", "") or "").strip()
@@ -87,8 +100,14 @@ def _inum(value: object) -> int | None:
         return None
 
 
-def _index_to_utc(idx: object) -> datetime | None:
-    """Normalize a yfinance history index entry to an aware UTC datetime."""
+def _index_to_utc(idx: object, symbol_hint: str = "") -> datetime | None:
+    """Normalize a yfinance history index entry to an aware UTC datetime.
+
+    yfinance bars are exchange-local. Naive midnight entries are localized
+    via the symbol hint (.SS->Asia/Shanghai, .PA/.AS/.BR->Europe/*, else
+    America/New_York) before converting to UTC, so XSHG midnight no longer
+    stamps as UTC midnight (8h shift).
+    """
     try:
         if hasattr(idx, "to_pydatetime"):
             moment = idx.to_pydatetime()  # type: ignore[union-attr]
@@ -103,6 +122,14 @@ def _index_to_utc(idx: object) -> datetime | None:
     if not isinstance(moment, datetime):
         return None
     try:
+        if moment.tzinfo is None:
+            # Exchange-local naive midnight -> localize before UTC convert.
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(_local_tz_for_symbol(symbol_hint))
+                moment = moment.replace(tzinfo=tz)
+            except Exception:
+                pass
         return _ensure_utc(moment)
     except Exception:
         return None
@@ -155,7 +182,7 @@ def fetch_daily_bars(
         raise RuntimeError(f"no close column for {symbol}")
     bars: list[dict] = []
     for idx, row in hist.iterrows():
-        ts = _index_to_utc(idx)
+        ts = _index_to_utc(idx, symbol_hint=symbol)
         if ts is None:
             continue
         close = _fnum(row[c_close])

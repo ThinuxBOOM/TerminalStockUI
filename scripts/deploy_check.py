@@ -317,15 +317,19 @@ def check_frontend_dist(root: Path, rep: Report) -> None:
         return
     scripts = pkg.get("scripts", {})
     build = scripts.get("build", "")
+    vite_config = next(
+        (f"frontend/{name}" for name in ("vite.config.ts", "vite.config.js", "vite.config.mjs", "vite.config.cjs") if (root / "frontend" / name).is_file()),
+        "frontend/vite.config.ts (missing)",
+    )
     ok = {"build runs vite build": "vite build" in build,
           "typecheck script": "typecheck" in scripts,
-          "vite.config.ts": (root / "frontend" / "vite.config.ts").is_file()}
+          "vite.config.ts/js": (root / "frontend" / "vite.config.ts").is_file() or (root / "frontend" / "vite.config.js").is_file()}
     bad = [k for k, v in ok.items() if not v]
     if bad:
         rep.add("FAIL", "frontend dist config", ["missing: " + ", ".join(bad)])
     else:
         rep.add("PASS", "frontend dist config (build -> frontend/dist)",
-                ["build: %r; typecheck: %r" % (build, scripts.get("typecheck"))])
+                ["build: %r; typecheck: %r; vite config: %s" % (build, scripts.get("typecheck"), vite_config)])
 
 
 def check_env_example(root: Path, rep: Report) -> None:

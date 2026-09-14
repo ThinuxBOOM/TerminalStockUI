@@ -62,6 +62,12 @@ def wacc(inputs: Mapping) -> MetricResult:
     if equity < 0 or debt < 0:
         return unavailable(WACC_FORMULA, required,
                            "market values must be non-negative")
+    if not 0.0 <= re_ <= 1.0:
+        return unavailable(WACC_FORMULA, required,
+                           f"cost_of_equity must be in [0, 1] (decimal, not percent), got {re_}")
+    if not 0.0 <= rd <= 1.0:
+        return unavailable(WACC_FORMULA, required,
+                           f"cost_of_debt must be in [0, 1] (decimal, not percent), got {rd}")
     value = (equity / enterprise) * re_ + (debt / enterprise) * rd * (1.0 - tax)
     return MetricResult(value, WACC_FORMULA, tuple(required), "ok")
 
@@ -73,9 +79,11 @@ def dcf_sensitivity(
     terminal_growth_rates: Sequence[float],
     projection_years: int = 5,
 ) -> MetricResult:
-    """STUB: equity-value-per-share grid over (discount rate x terminal growth).
+    """STUB: enterprise-value grid over (discount rate x terminal growth).
 
-    Simplified single-stage model (see DCF_STUB_FORMULA). Cells where the
+    Simplified single-stage model (see DCF_STUB_FORMULA). Returns total firm
+    PV (enterprise value proxy), NOT per-share value: no shares_outstanding
+    or net-debt adjustment is applied. Cells where the
     discount rate does not exceed terminal growth are NaN (Gordon undefined).
     """
     sources = ("base_fcf", "short_growth", "discount_rates",

@@ -96,11 +96,19 @@ class EuxDriftBaseline:
     std_daily: float | None = None
     n_obs: int = 0
     cap_pct: float = WINSOR_CAP_PCT
+    # Unclipped sigma for direction (clipping shrinks sigma and inflates
+    # |z|; bands keep the clipped sigma for robustness). Mirrors SSE fix.
+    std_unclipped: float | None = None
 
     def fit(self, daily_returns, cap_pct: float = WINSOR_CAP_PCT) -> "EuxDriftBaseline":
         clipped = winsorize_returns(daily_returns, cap_pct=float(cap_pct))
+        raw = pd.Series(daily_returns, dtype=float).dropna().to_numpy()
         self.mean_daily = float(np.mean(clipped))
         self.std_daily = float(np.std(clipped, ddof=1))
+        try:
+            self.std_unclipped = float(np.std(raw, ddof=1)) if len(raw) >= 2 else self.std_daily
+        except (TypeError, ValueError):
+            self.std_unclipped = self.std_daily
         self.n_obs = int(len(clipped))
         self.cap_pct = float(cap_pct)
         return self
@@ -109,6 +117,13 @@ class EuxDriftBaseline:
         if self.mean_daily is None or self.std_daily is None:
             raise ValueError("model is not fitted; call fit() first")
         return self.mean_daily, self.std_daily
+
+    def _direction_sigma(self) -> float:
+        """Sigma for P(up): unclipped (latent) vol, not the shrunk clipped one."""
+        if self.std_unclipped is not None and math.isfinite(self.std_unclipped) and self.std_unclipped > 0:
+            return self.std_unclipped
+        _, clipped = self._require_fit()
+        return clipped
 
     def direction_probability(
         self,
@@ -125,10 +140,13 @@ class EuxDriftBaseline:
             raise ValueError("horizon_days must be >= 1")
         mu, sigma = self._require_fit()
         horizon = int(horizon_days)
-        if sigma == 0:
+        # Direction uses the unclipped (latent-vol) sigma: the clipped sigma
+        # understates tails and would overstate |z| ~ sqrt(h).
+        sigma_dir = self._direction_sigma()
+        if sigma_dir == 0:
             proba = 1.0 if mu > 0 else (0.0 if mu < 0 else 0.5)
         else:
-            proba = _normal_cdf(mu * horizon / (sigma * math.sqrt(horizon)))
+            proba = _normal_cdf(mu * horizon / (sigma_dir * math.sqrt(horizon)))
         return ForecastResult(
             TARGET_DIRECTION, horizon, float(min(max(proba, 0.0), 1.0)),
             FORMULA_DIRECTION, MODEL_NAME, MODEL_VERSION, EUX_FEATURE_VERSION,

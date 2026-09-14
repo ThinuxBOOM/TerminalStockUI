@@ -5,7 +5,12 @@ then scales by horizon: mu_h = mu*h, sigma_h = sigma*sqrt(h).
   * direction_probability = Phi(mu_h / sigma_h) (standard normal CDF via
     math.erf; degenerate sigma=0 falls back to sign(mu)).
   * expected_return_range = mu_h +/- z*sigma_h, reported in SIMPLE-return
-    space via exp() (log-normal convention).
+    space via exp() (log-normal convention). NOTE: mid = exp(mu*h)-1 is the
+    MEDIAN (not the mean exp(mu*h+0.5*sigma^2*h)-1; Jensen gap ~0.4pp at
+    typical vol/horizon).
+  * Plug-in correction: predictive variance inflates by (1 + h/n) to
+    account for standard error of mu (true var ~= sigma^2*h + sigma^2*h^2/n).
+    At n=250 this is ~1% at h=5, ~4% at h=21, ~12% at h=63.
 Deterministic: closed form, no randomness. Reference baseline only.
 """
 
@@ -33,7 +38,8 @@ FORMULA_DIRECTION = (
     "trailing daily log returns (sigma=0 -> sign(mu))"
 )
 FORMULA_RANGE = (
-    "range_h = exp(mu*h +/- z*sigma*sqrt(h)) - 1 (log-normal band)"
+    "range_h = exp(mu*h +/- z*sigma*sqrt(h)) - 1 (log-normal band; "
+    "mid = median exp(mu*h)-1, not mean)"
 )
 
 
@@ -70,6 +76,20 @@ class HistoricalDriftBaseline:
             raise ValueError("model is not fitted; call fit() first")
         return self.mean_daily, self.std_daily
 
+    def _predictive_scale(self, horizon: int) -> float:
+        """sqrt(1 + h/n) plug-in inflation; 1.0 when n unknown/small."""
+        try:
+            n = int(self.n_obs)
+            h = int(horizon)
+        except (TypeError, ValueError):
+            return 1.0
+        if n < 2 or h < 1:
+            return 1.0
+        try:
+            return math.sqrt(1.0 + float(h) / float(n))
+        except (ValueError, OverflowError):
+            return 1.0
+
     def direction_probability(
         self,
         horizon_days: int,
@@ -88,7 +108,8 @@ class HistoricalDriftBaseline:
         if sigma == 0:
             proba = 1.0 if mu > 0 else (0.0 if mu < 0 else 0.5)
         else:
-            proba = _normal_cdf(mu * horizon / (sigma * math.sqrt(horizon)))
+            _scale = self._predictive_scale(horizon)
+            proba = _normal_cdf(mu * horizon / (sigma * math.sqrt(horizon) * _scale))
         return ForecastResult(
             TARGET_DIRECTION, horizon, float(min(max(proba, 0.0), 1.0)),
             FORMULA_DIRECTION, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
@@ -116,7 +137,8 @@ class HistoricalDriftBaseline:
         if not zf > 0:
             raise ValueError("z must be > 0")
         mu, sigma = self._require_fit()
-        mid_log, half_log = mu * horizon, zf * sigma * math.sqrt(horizon)
+        _scale = self._predictive_scale(horizon)
+        mid_log, half_log = mu * horizon, zf * sigma * math.sqrt(horizon) * _scale
         try:
             low = float(math.exp(mid_log - half_log) - 1.0)
             mid = float(math.exp(mid_log) - 1.0)

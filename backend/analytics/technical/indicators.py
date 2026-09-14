@@ -31,14 +31,15 @@ EMA_FORMULA = "EMA_t(w) = alpha*close_t + (1-alpha)*EMA_{t-1}, alpha = 2/(w+1), 
 RSI_FORMULA = (
     "RSI_t(w) = 100 - 100/(1 + RS_t); RS_t = avg_gain_t/avg_loss_t with "
     "Wilder smoothing avg_t = (avg_{t-1}*(w-1) + value_t)/w "
-    "(ewm alpha=1/w, adjust=False); RSI=100 when avg_loss=0 and avg_gain>0"
+    "(ewm alpha=1/w, adjust=False); RSI=100 when avg_loss=0 and avg_gain>0; "
+    "RSI=50 when avg_loss=0 and avg_gain=0 (flat, neutral)"
 )
 MACD_FORMULA = (
     "MACD = EMA(fast) - EMA(slow); signal = EMA(MACD, signal_w); "
     "histogram = MACD - signal (all EMAs adjust=False)"
 )
 BOLLINGER_FORMULA = (
-    "middle = SMA(w); upper/lower = middle +/- k*std(w, ddof=1); "
+    "middle = SMA(w); upper/lower = middle +/- k*std(w, ddof=0 population); "
     "bandwidth = (upper-lower)/middle; %B = (close-lower)/(upper-lower)"
 )
 ATR_FORMULA = (
@@ -95,7 +96,9 @@ def rsi(close: Any, window: int = 14) -> MetricResult:
     rs = avg_gain / avg_loss
     values = 100.0 - (100.0 / (1.0 + rs))
     values = values.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
-    values = values.mask((avg_loss == 0) & (avg_gain == 0), 0.0)
+    # Flat/no-movement is neutral 50 (TradingView/StockCharts convention),
+    # not oversold 0: RS is 0/0 undefined here.
+    values = values.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
     return MetricResult(values, RSI_FORMULA, ("close",), quality_of(dropped),
                         reason=f"dropped {dropped} NaN observations" if dropped else None)
 
@@ -107,13 +110,16 @@ def macd(close: Any, fast: int = 12, slow: int = 26, signal: int = 9) -> MetricR
             raise ValueError(f"{name} must be an integer >= 2, got {param!r}")
     if not fast < slow:
         raise ValueError(f"require fast < slow, got fast={fast} slow={slow}")
-    series, dropped, error = validate_series(close, "close", min_length=slow + 1)
+    series, dropped, error = validate_series(close, "close", min_length=slow + signal)
     if error is not None:
         return unavailable(MACD_FORMULA, ["close"], error)
-    ema_fast = series.ewm(span=fast, adjust=False, min_periods=1).mean()
-    ema_slow = series.ewm(span=slow, adjust=False, min_periods=1).mean()
+    # Warmup-correct EMAs: each stage needs its own full window before the
+    # output is stable. min_periods=1 would emit 0.0 on bar 1 and unstable
+    # values for the first ~slow+signal bars.
+    ema_fast = series.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = series.ewm(span=slow, adjust=False, min_periods=slow).mean()
     line = ema_fast - ema_slow
-    signal_line = line.ewm(span=signal, adjust=False, min_periods=1).mean()
+    signal_line = line.ewm(span=signal, adjust=False, min_periods=signal).mean()
     frame = pd.DataFrame(
         {"macd": line, "signal": signal_line, "histogram": line - signal_line}
     )
@@ -130,7 +136,8 @@ def bollinger(close: Any, window: int = 20, num_std: float = 2.0) -> MetricResul
     if error is not None:
         return unavailable(BOLLINGER_FORMULA, ["close"], error)
     middle = series.rolling(window=window, min_periods=window).mean()
-    std = series.rolling(window=window, min_periods=window).std(ddof=1)
+    # Population std (ddof=0) per Bollinger/StockCharts; ddof=1 widens bands ~2.6% at w=20.
+    std = series.rolling(window=window, min_periods=window).std(ddof=0)
     upper = middle + float(num_std) * std
     lower = middle - float(num_std) * std
     width = upper - lower
@@ -179,7 +186,11 @@ def volatility(
     series, dropped, error = validate_series(close, "close", min_length=window + 1)
     if error is not None:
         return unavailable(VOLATILITY_FORMULA, ["close"], error)
-    log_returns = np.log(series / series.shift(1))
+    if bool((series <= 0).any()):
+        return unavailable(VOLATILITY_FORMULA, ["close"],
+                           "close must be > 0 for log returns")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_returns = np.log(series / series.shift(1))
     values = log_returns.rolling(window=window, min_periods=window).std(ddof=1) * np.sqrt(
         float(annualization)
     )
@@ -197,7 +208,9 @@ def volume_anomaly(volume: Any, window: int = 20) -> MetricResult:
     roll_std = series.rolling(window=window, min_periods=window).std(ddof=1)
     with np.errstate(divide="ignore", invalid="ignore"):
         z_scores = (series - roll_mean) / roll_std
-    z_scores = z_scores.mask((roll_std == 0) & z_scores.notna(), 0.0)
+    # When std==0 the ratio is 0/0=NaN; the contract promises z=0 there.
+    # Mask on roll_std alone (not z.notna()) so the NaN case is covered.
+    z_scores = z_scores.mask(roll_std == 0, 0.0)
     return MetricResult(z_scores, VOLUME_ANOMALY_FORMULA, ("volume",),
                         quality_of(dropped),
                         reason=f"dropped {dropped} NaN observations" if dropped else None)

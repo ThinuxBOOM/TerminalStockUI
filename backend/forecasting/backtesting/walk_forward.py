@@ -38,6 +38,8 @@ class WalkForwardSplitter:
         gap: Bars skipped between train end and test start (purge zone so
             that forward-label horizons ending inside the gap cannot leak;
             choose gap >= max label horizon when labels are precomputed).
+            Default 0 is unsafe alone — direct callers must pass an explicit
+            gap; the backtest API enforces gap >= max(horizons) with 422.
         expanding: If True, train blocks start at 0 and grow.
         step: How far the origin advances per fold (default = test_size).
     """

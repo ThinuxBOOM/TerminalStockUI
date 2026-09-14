@@ -44,10 +44,30 @@ def _stub_service() -> MarketDataService:
     )
 
 
+def _clear_screener_cache() -> None:
+    """Screener caches ranked envelopes in the global cache singleton.
+
+    The key covers (market, horizon, min_direction, limit, offset) only, so
+    tests that mutate the universe or stub failures must start cold or they
+    read a previous test's envelope (empty-universe sees rows, flaky-AAPL
+    sees no skipped). Best-effort: never raises.
+    """
+    try:
+        from backend.cache import get_cache
+
+        _c = get_cache()
+        _clear = getattr(_c, "clear", None)
+        if callable(_clear):
+            _clear()
+    except Exception:
+        pass
+
+
 def _client(svc: MarketDataService | None = None,
             registry: InstrumentRegistry | None = None) -> TestClient:
     reset_deps()
     reset_forecast_service()
+    _clear_screener_cache()
     stub = svc or _stub_service()
     reg = registry or stub.registry
     deps_module._service = stub
@@ -63,6 +83,7 @@ def _client(svc: MarketDataService | None = None,
 def _teardown() -> None:
     reset_deps()
     reset_forecast_service()
+    _clear_screener_cache()
 
 
 def test_screener_contract_shape_keys():

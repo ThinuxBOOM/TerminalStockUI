@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.market_data.health import market_state as _calendar_market_state
 from backend.market_data.providers.base import ProviderError
 from backend.market_data.service import MarketDataService
+from backend.security.validation import validate_instrument_id, validate_symbol
 from backend.api.deps import get_market_service, get_registry
 from backend.api.schemas import BarsResponse, QuoteResponse
 
@@ -61,6 +62,7 @@ def quote(
     svc: MarketDataService = Depends(get_market_service),
 ):
     """GET /api/market_data/quote?symbol=AAPL"""
+    symbol = validate_symbol(symbol)
     try:
         return _enrich_market_state(svc.get_quote(symbol, market))
     except HTTPException:
@@ -80,6 +82,8 @@ def bars(
     limit: int = Query(default=30, ge=1, le=250),
     svc: MarketDataService = Depends(get_market_service),
 ):
+    symbol = validate_symbol(symbol)
+    timeframe = _check_timeframe(timeframe)
     try:
         return svc.get_bars(symbol, timeframe, limit)
     except HTTPException:
@@ -92,12 +96,20 @@ def bars(
         raise HTTPException(status_code=502, detail=f"bars failed: {exc}") from exc
 
 
+def _check_timeframe(value: object) -> str:
+    text = str(value or "1d").strip()
+    if len(text) > 8 or not text.replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(status_code=422, detail="invalid timeframe")
+    return text
+
+
 @securities_router.get("/{instrument_id}/quote", response_model=QuoteResponse)
 def security_quote(
     instrument_id: str,
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
+    instrument_id = validate_instrument_id(instrument_id)
     try:
         inst = registry.get_by_id(instrument_id)
     except HTTPException:
@@ -126,6 +138,8 @@ def security_bars(
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
+    instrument_id = validate_instrument_id(instrument_id)
+    timeframe = _check_timeframe(timeframe)
     try:
         inst = registry.get_by_id(instrument_id)
     except HTTPException:

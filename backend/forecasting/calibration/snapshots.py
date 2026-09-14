@@ -91,6 +91,12 @@ TEST_SIZE = 1
 STRIDE = 10
 #: Reliability bins (matches the calibration dashboard contract).
 N_BINS = 10
+#: Minimum scored windows before Brier/ECE read as skill (below this the
+#: snapshot is flagged weak; cron counts only n>=MIN_SCORED_WINDOWS as
+#: calibrated).
+MIN_SCORED_WINDOWS = 10
+#: Amber threshold: n below this carries wide uncertainty.
+SMALL_SAMPLE_WINDOWS = 30
 
 BASE_MEMBERS: tuple[str, ...] = ("historical-drift", "momentum", "logistic-direction")
 
@@ -363,6 +369,12 @@ def build_snapshot(
 
     if not y_true:
         return zero()
+    n_windows = int(len(y_true))
+    warning = (
+        "insufficient windows (n<10): scores unreliable"
+        if n_windows < MIN_SCORED_WINDOWS
+        else ("small sample (n<30): wide uncertainty" if n_windows < SMALL_SAMPLE_WINDOWS else None)
+    )
     table = reliability_table(y_true, y_prob, n_bins=N_BINS)
     members: dict[str, dict] = {}
     for name in expected_members:
@@ -386,6 +398,7 @@ def build_snapshot(
         "brier": float(brier_score(y_true, y_prob)),
         "ece": float(calibration_error(y_true, y_prob, n_bins=N_BINS)),
         "n_windows": int(len(y_true)),
+        "warning": warning,
         "reliability": _reliability_records(table),
         "members": members,
     }

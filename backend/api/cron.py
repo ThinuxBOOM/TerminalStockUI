@@ -159,9 +159,10 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
 
     Per-pair failures are reported in ``errors`` (keyed ``"SYM:horizon"``);
     the batch itself never 500s. ``snapshots`` maps the same key to the
-    scored window count; ``calibrated`` counts SCORED rows (n_windows > 0)
-    while ``unscored`` counts written rows with zero windows (thin history:
-    honest NULL metrics, not skill).
+    scored window count; ``calibrated`` counts rows with n_windows >= 10
+    (single-digit windows are written but flagged weak, not skill) while
+    ``unscored`` counts written rows with zero windows (thin history:
+    honest NULL metrics, not skill) plus weak n<10 rows.
     """
     from backend.db.session import get_session_factory, init_db
     from backend.forecasting.calibration.snapshots import (
@@ -215,8 +216,9 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
                     n_windows = int(snap.get("n_windows") or 0)
                     snapshots[key] = n_windows
                     # Zero-window rows are written (honest NULL metrics) but
-                    # must not read as scored skill.
-                    if n_windows > 0:
+                    # must not read as scored skill. Single-digit windows
+                    # (n<10) are written + flagged weak, not counted.
+                    if n_windows >= 10:
                         calibrated += 1
                     else:
                         unscored += 1
