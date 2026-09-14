@@ -5,7 +5,7 @@
   "outputDirectory": "frontend/dist",
   "installCommand": "npm install --prefix frontend",
   "functions": {
-    "api/index.py": {
+    "api/**/*.py": {
       "maxDuration": 60
     }
   },
