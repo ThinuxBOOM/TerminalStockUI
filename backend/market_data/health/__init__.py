@@ -6,6 +6,7 @@ Grades follow docs/DATA_QUALITY.md; market states: open|closed|delayed|stale.
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -29,13 +30,45 @@ class ProviderHealthTracker:
         self._circuits: dict[str, str] = {}
 
     def record(self, provider: str, latency_ms: float, ok: bool) -> None:
-        self._calls[provider].append({"t": _utcnow(), "latency_ms": float(latency_ms), "ok": ok})
+        # Harden: coerce provider to str, sanitize non-finite latency to 0.0
+        # (prevents NaN/inf leaks into stats JSON), and bound the provider
+        # map so long-lived processes cannot grow it without bound.
+        try:
+            key = str(provider or "unknown")
+        except Exception:
+            key = "unknown"
+        try:
+            latency = float(latency_ms or 0.0)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            latency = 0.0
+        if not math.isfinite(latency) or latency < 0:
+            latency = 0.0
+        # Bound distinct provider keys (fixed set in practice: yfinance,
+        # akshare, fx); drop oldest-inserted on overflow, newest preserved.
+        if key not in self._calls and len(self._calls) >= 64:
+            try:
+                self._calls.pop(next(iter(self._calls)), None)
+            except Exception:
+                pass
+        self._calls[key].append({"t": _utcnow(), "latency_ms": latency, "ok": bool(ok)})
 
     def set_circuit(self, provider: str, state: str) -> None:
-        self._circuits[provider] = state
+        try:
+            key = str(provider or "unknown")
+        except Exception:
+            key = "unknown"
+        if key not in self._circuits and len(self._circuits) >= 64:
+            try:
+                self._circuits.pop(next(iter(self._circuits)), None)
+            except Exception:
+                pass
+        self._circuits[key] = state
 
     def get_circuit(self, provider: str) -> str:
-        return self._circuits.get(provider, "closed")
+        try:
+            return self._circuits.get(str(provider), "closed")
+        except Exception:
+            return "closed"
 
     def stats(self, provider: str) -> dict:
         calls = list(self._calls.get(provider, []))
@@ -94,6 +127,12 @@ def market_state(
     wall = at or now
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        # Naive caller timestamps are assumed UTC (avoids naive/aware
+        # subtraction crashes in the age math below).
+        now = now.replace(tzinfo=timezone.utc)
+    if wall.tzinfo is None:
+        wall = wall.replace(tzinfo=timezone.utc)
     age_min = (now - as_of).total_seconds() / 60
     expected = max(int(delay_minutes), 1)
     stale_after = max(STALE_MULTIPLE * expected, 24 * 60 if session_bars >= 1 else STALE_MULTIPLE * expected)
@@ -130,13 +169,22 @@ def reconcile_quotes(a: dict, b: dict, *, price_tolerance: float = 0.01) -> dict
     """
     result: dict = {"compared": False, "agree": False, "divergence_pct": None}
     try:
-        pa, pb = float(a.get("price")), float(b.get("price"))
-    except (TypeError, ValueError):
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            result["reason"] = "missing-price"
+            return result
+        pa, pb = float(a.get("price")), float(b.get("price"))  # type: ignore[arg-type]
+    except (TypeError, ValueError, AttributeError):
         result["reason"] = "missing-price"
+        return result
+    if not (math.isfinite(pa) and math.isfinite(pb)):
+        result["reason"] = "invalid-price"
         return result
     if pa <= 0 or pb <= 0:
         result["reason"] = "invalid-price"
         return result
     div = abs(pa - pb) / pb
+    if not math.isfinite(div):
+        result["reason"] = "invalid-price"
+        return result
     result.update({"compared": True, "divergence_pct": round(div, 6), "agree": div <= price_tolerance})
     return result

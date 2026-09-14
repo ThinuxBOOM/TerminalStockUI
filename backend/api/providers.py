@@ -29,9 +29,25 @@ def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker
 @router.post("/health/test")
 def test_provider(provider: str = "yfinance", svc=Depends(get_market_service)):
     """Health probe: fetch a reference quote and return the fresh stats."""
-    svc.get_quote(PROBE_SYMBOL)
-    tracker = get_health_tracker()
-    stats = tracker.stats(provider)
+    from fastapi import HTTPException as _HTTPException
+
+    from ..market_data.providers.base import ProviderError as _ProviderError
+
+    try:
+        svc.get_quote(PROBE_SYMBOL)
+    except _HTTPException:
+        raise
+    except _ProviderError as exc:
+        raise _HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
+    try:
+        tracker = get_health_tracker()
+        stats = tracker.stats(provider)
+    except Exception as exc:
+        raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
     if stats["total_calls"] == 0:
         stats = {**stats, "provider": provider}
     return stats
@@ -135,6 +151,10 @@ def save_provider_key(body: dict) -> dict:
         put_db_secret(provider, api_key, model)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"provider key save failed: {exc}")
     api_key = ""
     try:
         from backend.api.audit import append_audit_log
@@ -198,6 +218,10 @@ def save_provider_budget(body: dict) -> dict:
         set_db_budget(provider, monthly_usd)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"provider budget save failed: {exc}")
     try:
         from backend.api.audit import append_audit_log
         from backend.db.session import get_session_factory

@@ -49,12 +49,19 @@ EMPTY_STATEMENTS: dict = {}
 
 def _quality_signal() -> dict:
     """One cheap quality signal reused from the analytics quality module."""
-    result = piotroski_score(EMPTY_STATEMENTS)
-    return {
-        "metric": "piotroski",
-        "quality_flag": result.quality_flag,
-        "reason": result.reason,
-    }
+    try:
+        result = piotroski_score(EMPTY_STATEMENTS)
+        return {
+            "metric": "piotroski",
+            "quality_flag": result.quality_flag,
+            "reason": result.reason,
+        }
+    except Exception:
+        return {
+            "metric": "piotroski",
+            "quality_flag": "unavailable",
+            "reason": "quality signal unavailable",
+        }
 
 
 def _utcnow() -> datetime:
@@ -78,25 +85,36 @@ def _combine_provenance(entries: list[dict]) -> dict:
     stamps: list[datetime] = []
     for entry in entries:
         try:
-            stamps.append(datetime.fromisoformat(str(entry["as_of"]).replace("Z", "+00:00")))
-        except (KeyError, ValueError):
+            if not isinstance(entry, dict):
+                raise ValueError("bad provenance entry")
+            raw = entry.get("as_of")
+            stamp = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            stamps.append(stamp)
+        except Exception:
             stamps.append(_utcnow())
     oldest = min(stamps)
     if oldest.tzinfo is None:
         oldest = oldest.replace(tzinfo=timezone.utc)
-    sources = sorted({str(e.get("source", "unknown")) for e in entries})
-    fallback = any(bool(e.get("fallback_used")) for e in entries)
-    missing = sorted({m for e in entries for m in (e.get("missing_fields") or [])})
-    grade, _ = grade_quality(
-        delay_minutes=max(int(e.get("delay_minutes", 15) or 0) for e in entries),
-        age_minutes=max(0.0, (_utcnow() - oldest).total_seconds() / 60),
-        missing_fields=missing,
-        fallback_used=fallback,
-        reconciled=False,
-    )
+    try:
+        sources = sorted({str(e.get("source", "unknown")) for e in entries if isinstance(e, dict)})
+        fallback = any(bool(e.get("fallback_used")) for e in entries if isinstance(e, dict))
+        missing = sorted({m for e in entries if isinstance(e, dict) for m in (e.get("missing_fields") or [])})
+        delays = [int(e.get("delay_minutes", 15) or 0) for e in entries if isinstance(e, dict)]
+        max_delay = max(delays) if delays else 15
+        grade, _ = grade_quality(
+            delay_minutes=max_delay,
+            age_minutes=max(0.0, (_utcnow() - oldest).total_seconds() / 60),
+            missing_fields=missing,
+            fallback_used=fallback,
+            reconciled=False,
+        )
+    except Exception:
+        sources, fallback, missing, max_delay, grade = ["screener"], False, [], 15, "B"
     return build_provenance(
         "+".join(sources), as_of=oldest,
-        delay_minutes=max(int(e.get("delay_minutes", 15) or 0) for e in entries),
+        delay_minutes=max_delay,
         quality_grade=grade, fallback_used=fallback, missing_fields=missing,
     ).model_dump(mode="json")
 
@@ -127,29 +145,57 @@ def screen(
     svc: MarketDataService = Depends(get_market_service),
 ) -> dict:
     """Scan the registry universe, rank by forecast direction probability."""
-    if int(horizon) not in FORECAST_HORIZONS:
+    try:
+        horizon_int = int(horizon)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
+        ) from None
+    if horizon_int not in FORECAST_HORIZONS:
         raise HTTPException(
             status_code=422,
             detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
         )
-    horizon = int(horizon)
+    horizon = horizon_int
     mic = _normalize_market(market)
 
-    universe = registry.all()
+    try:
+        universe = registry.all()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"screener universe failed: {exc}") from exc
     if mic is not None:
-        universe = [i for i in universe if i.exchange_mic == mic]
+        try:
+            universe = [i for i in universe if getattr(i, "exchange_mic", None) == mic]
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"screener filter failed: {exc}") from exc
     universe_size = len(universe)
 
-    forecaster = ForecastService(market_service=svc)
+    try:
+        forecaster = ForecastService(market_service=svc)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"screener forecaster failed: {exc}") from exc
     quality = _quality_signal()
 
     results: list[dict] = []
     skipped: list[dict] = []
     for inst in universe:
-        symbol_key = inst.provider_symbol or inst.exchange_symbol
         try:
-            quote = svc.get_quote(symbol_key, inst.exchange_mic)
+            symbol_key = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
+        except Exception:
+            skipped.append({"symbol": "UNKNOWN", "reason": "bad registry entry"})
+            continue
+        try:
+            quote = svc.get_quote(symbol_key, getattr(inst, "exchange_mic", None))
+            if not isinstance(quote, dict):
+                raise ValueError("quote unavailable")
             fc = forecaster.forecast(symbol_key, horizon)
+            if not isinstance(fc, dict):
+                raise ValueError("forecast unavailable")
             direction = float(fc["direction_probability"])
             if not (0.0 <= direction <= 1.0):
                 raise ValueError(f"direction_probability out of range: {direction!r}")
@@ -169,8 +215,13 @@ def screen(
                 "quality": quality,
                 "provenance": quote.get("provenance"),
             })
-        except HTTPException:
-            raise
+        except HTTPException as exc:
+            # Per-symbol degrade (never abort the batch on one bad symbol):
+            # HTTP errors from the underlying services become skipped entries.
+            skipped.append({
+                "symbol": symbol_key,
+                "reason": f"{type(exc).__name__}: {exc.detail if hasattr(exc, 'detail') else exc}",
+            })
         except Exception as exc:  # per-symbol degrade, never 500
             skipped.append({
                 "symbol": symbol_key,

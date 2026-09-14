@@ -222,7 +222,11 @@ def build_snapshot(
     raise ``ValueError``). Deterministic: same bars -> same snapshot.
     """
     _ = db  # contracted kwarg; persistence lives in upsert_snapshot
-    horizon = int(horizon)
+    try:
+        horizon = int(horizon)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon!r}") from exc
     if horizon not in FORECAST_HORIZONS:
         raise ValueError(
             f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}")

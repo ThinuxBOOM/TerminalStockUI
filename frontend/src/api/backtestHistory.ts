@@ -1,4 +1,4 @@
-import { api, type ReliabilityRow } from './client';
+import { api, coalesceInflight, normalizeSymbolParam, type ReliabilityRow } from './client';
 
 export const BACKTEST_RECENT_KEY = 'onemarket.backtest.recent.v1';
 const MAX_RECENT = 20;
@@ -87,48 +87,52 @@ function normalizeRun(raw: unknown): BacktestHistoryRun | null {
 /**
  * GET /api/backtest/{symbol}?include_reliability=true — lightweight
  * per-symbol run history (summaries; backend omits full reliability
- * tables). Tolerant: unknown shapes → []. 404 (never run) → [].
+ * tables). Tolerant: unknown shapes → []. Only 404/501 (never run /
+ * not deployed) → []; other transport errors rethrow so ErrorState
+ * shows instead of a silent empty list. Shares the TanStack
+ * ['backtest-history', SYMBOL] resource via in-flight coalescing for
+ * divergent call sites; symbol key is case-insensitive (UPPER).
  */
 export async function getBacktestHistory(
   symbol: string,
   includeReliability = true,
 ): Promise<BacktestHistoryRun[]> {
-  const sym = String(symbol ?? '').trim();
+  const sym = normalizeSymbolParam(symbol);
   if (!sym) return [];
-  try {
-    const { data } = await api.get(`/api/backtest/${encodeURIComponent(sym)}`, {
-      params: { include_reliability: includeReliability },
-    });
-    const raw = (data ?? {}) as Record<string, unknown>;
-    const listRaw = Array.isArray(data)
-      ? (data as unknown[])
-      : Array.isArray(raw.runs)
-        ? (raw.runs as unknown[])
-        : Array.isArray(raw.results)
-          ? (raw.results as unknown[])
-          : Array.isArray(raw.history)
-            ? (raw.history as unknown[])
-            : [];
-    const out: BacktestHistoryRun[] = [];
-    for (const row of listRaw) {
-      const parsed = normalizeRun(row);
-      if (parsed) out.push(parsed);
+  return coalesceInflight(`backtest-history:${sym}:${includeReliability}`, async () => {
+    try {
+      const { data } = await api.get(`/api/backtest/${encodeURIComponent(sym)}`, {
+        params: { include_reliability: includeReliability },
+      });
+      const raw = (data ?? {}) as Record<string, unknown>;
+      const listRaw = Array.isArray(data)
+        ? (data as unknown[])
+        : Array.isArray(raw.runs)
+          ? (raw.runs as unknown[])
+          : Array.isArray(raw.results)
+            ? (raw.results as unknown[])
+            : Array.isArray(raw.history)
+              ? (raw.history as unknown[])
+              : [];
+      const out: BacktestHistoryRun[] = [];
+      for (const row of listRaw) {
+        const parsed = normalizeRun(row);
+        if (parsed) out.push(parsed);
+      }
+      return out;
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 404 || status === 501) return [];
+      throw err;
     }
-    return out;
-  } catch (err) {
-    const status = (err as { response?: { status?: number } })?.response?.status;
-    if (status === 404) return [];
-    // Backend may 422 on unknown symbols (no bars) — also "no history".
-    if (status === 422) return [];
-    return [];
-  }
+  });
 }
 
 /** Append {symbol, horizons, at} to the localStorage recent list (max 20). */
 export function saveRecentBacktest(symbol: string, horizons: number[]): void {
   try {
     if (typeof localStorage === 'undefined') return;
-    const sym = String(symbol ?? '').trim().toUpperCase();
+    const sym = normalizeSymbolParam(symbol);
     if (!sym) return;
     const clean = horizons
       .map((h) => Number(h))
@@ -158,7 +162,7 @@ export function getRecentBacktests(): RecentBacktest[] {
     for (const row of parsed) {
       if (!row || typeof row !== 'object') continue;
       const r = row as Record<string, unknown>;
-      const symbol = String(r.symbol ?? '').trim().toUpperCase();
+      const symbol = normalizeSymbolParam(r.symbol);
       if (!symbol) continue;
       const horizons = Array.isArray(r.horizons)
         ? (r.horizons as unknown[]).map((h) => Number(h)).filter((n) => Number.isFinite(n))

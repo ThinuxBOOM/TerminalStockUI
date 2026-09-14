@@ -110,17 +110,30 @@ def _serialize(result: MetricResult) -> dict:
 
 
 def _technical_bundle(frame: pd.DataFrame) -> dict:
-    close, high, low, volume = frame["close"], frame["high"], frame["low"], frame["volume"]
-    return {
-        "sma_20": _serialize(sma(close, window=20)),
-        "ema_20": _serialize(ema(close, window=20)),
-        "rsi_14": _serialize(rsi(close, window=14)),
-        "macd": _serialize(macd(close)),
-        "bollinger_20": _serialize(bollinger(close, window=20)),
-        "atr_14": _serialize(atr(high, low, close, window=14)),
-        "volatility_21": _serialize(volatility(close, window=21)),
-        "volume_anomaly": _serialize(is_volume_anomaly(volume, window=20)),
-    }
+    """Per-indicator degrade: one failing metric never 500s the bundle."""
+    specs = [
+        ("sma_20", lambda: sma(frame["close"], window=20)),
+        ("ema_20", lambda: ema(frame["close"], window=20)),
+        ("rsi_14", lambda: rsi(frame["close"], window=14)),
+        ("macd", lambda: macd(frame["close"])),
+        ("bollinger_20", lambda: bollinger(frame["close"], window=20)),
+        ("atr_14", lambda: atr(frame["high"], frame["low"], frame["close"], window=14)),
+        ("volatility_21", lambda: volatility(frame["close"], window=21)),
+        ("volume_anomaly", lambda: is_volume_anomaly(frame["volume"], window=20)),
+    ]
+    out: dict = {}
+    for name, thunk in specs:
+        try:
+            out[name] = _serialize(thunk())
+        except Exception:
+            out[name] = {
+                "value": None,
+                "formula": name,
+                "source_fields": [],
+                "quality_flag": "unavailable",
+                "reason": "insufficient history",
+            }
+    return out
 
 
 def _fundamentals_bundle() -> dict:
@@ -163,20 +176,47 @@ def get_analytics(
     svc: MarketDataService = Depends(get_market_service),
 ) -> dict:
     """Deterministic analytics for one symbol (technical live, statements unavailable)."""
-    sym = symbol.strip().upper()
-    bars = svc.get_bars(sym, timeframe="1d", limit=BAR_LIMIT)
-    rows = bars.get("bars", [])
-    frame = pd.DataFrame(
-        {
-            "open": [r["open"] for r in rows],
-            "high": [r["high"] for r in rows],
-            "low": [r["low"] for r in rows],
-            "close": [r["close"] for r in rows],
-            "volume": [float(r["volume"] or 0) for r in rows],
-        },
-        index=pd.to_datetime([r["ts"] for r in rows]),
-    )
-    provenance = dict(bars.get("provenance", {}))
+    from fastapi import HTTPException as _HTTPException
+
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise _HTTPException(status_code=422, detail="symbol must be a non-empty string")
+    try:
+        bars = svc.get_bars(sym, timeframe="1d", limit=BAR_LIMIT)
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        try:
+            from backend.market_data.providers.base import ProviderError as _PE
+
+            if isinstance(exc, _PE):
+                raise _HTTPException(status_code=502, detail=str(exc)) from exc
+        except _HTTPException:
+            raise
+        except Exception:
+            pass
+        raise _HTTPException(status_code=502, detail=f"analytics bars failed: {exc}") from exc
+    rows = bars.get("bars", []) if isinstance(bars, dict) else []
+    if not rows:
+        raise _HTTPException(status_code=422, detail=f"insufficient history for {sym!r}: 0 bars")
+    try:
+        frame = pd.DataFrame(
+            {
+                "open": [r["open"] for r in rows],
+                "high": [r["high"] for r in rows],
+                "low": [r["low"] for r in rows],
+                "close": [r["close"] for r in rows],
+                "volume": [float(r["volume"] or 0) for r in rows],
+            },
+            index=pd.to_datetime([r["ts"] for r in rows]),
+        )
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        raise _HTTPException(status_code=502, detail=f"analytics frame failed: {exc}") from exc
+    if frame.empty or len(frame) < 2:
+        raise _HTTPException(status_code=422, detail=f"insufficient history for {sym!r}: {len(frame)} bars")
+    provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}
     return {
         "symbol": sym,
         "as_of": str(provenance.get("as_of")),

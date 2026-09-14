@@ -33,7 +33,8 @@ POOLED_PORT = 6543
 
 def supabase_url() -> str:
     """Effective database URL (Supabase pooled :6543 URL in prod via DATABASE_URL)."""
-    return os.getenv("DATABASE_URL", "sqlite:///./onemarket.db")
+    raw = os.getenv("DATABASE_URL", "")
+    return (raw or "").strip() or "sqlite:///./onemarket.db"
 
 
 def is_supabase_pooled(url: str | None = None) -> bool:

@@ -38,13 +38,24 @@ def search(
     """GET /api/instruments/search?q=AAPL&market=XNAS&limit=10"""
     if market and market.upper() not in SUPPORTED_MICS:
         raise HTTPException(status_code=422, detail=f"unsupported market {market!r}")
-    results = search_instruments(registry.all(), q, market=market, limit=limit)
+    try:
+        candidates = search_instruments(registry.all(), q, market=market, limit=limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument search failed: {exc}") from exc
+    results: list[dict] = []
+    for r in candidates:
+        try:
+            results.append(_out(r))
+        except Exception:
+            continue
     provenance = build_provenance(
         "instrument-registry", as_of=datetime.now(timezone.utc),
         delay_minutes=0, quality_grade="A", fallback_used=False, missing_fields=[],
     )
     return {"query": q, "market": market.upper() if market else None,
-            "results": [_out(r) for r in results],
+            "results": results,
             "provenance": provenance.model_dump(mode="json")}
 
 
@@ -55,12 +66,22 @@ def resolve(
     registry: InstrumentRegistry = Depends(get_registry),
 ):
     """Resolve raw input incl. .SS/.PA/.AS/.BR suffixes; surfaces ambiguity."""
-    inst, candidates, ambiguous = registry.resolve(symbol, market)
+    try:
+        inst, candidates, ambiguous = registry.resolve(symbol, market)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument resolve failed: {exc}") from exc
     if inst is None:
         raise HTTPException(status_code=404, detail=f"no instrument for {symbol!r}")
+    try:
+        instrument_out = _out(inst)
+        candidates_out = [_out(c) for c in candidates]
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument resolve failed: {exc}") from exc
     provenance = build_provenance("instrument-registry", delay_minutes=0, quality_grade="A")
-    return {"instrument": _out(inst),
-            "candidates": [_out(c) for c in candidates],
+    return {"instrument": instrument_out,
+            "candidates": candidates_out,
             "ambiguous": ambiguous,
             "market_state": _market_state_for(inst),
             "currency": inst.currency,
@@ -70,11 +91,20 @@ def resolve(
 
 @router.get("/{instrument_id}")
 def detail(instrument_id: str, registry: InstrumentRegistry = Depends(get_registry)):
-    inst = registry.get_by_id(instrument_id)
+    try:
+        inst = registry.get_by_id(instrument_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument lookup failed: {exc}") from exc
     if inst is None:
         raise HTTPException(status_code=404, detail="unknown instrument_id")
+    try:
+        instrument_out = _out(inst)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument lookup failed: {exc}") from exc
     provenance = build_provenance("instrument-registry", delay_minutes=0, quality_grade="A")
-    return {"instrument": _out(inst),
+    return {"instrument": instrument_out,
             "market_state": _market_state_for(inst),
             "currency": inst.currency,
             "exchange_mic": inst.exchange_mic,

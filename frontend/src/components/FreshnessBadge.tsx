@@ -7,7 +7,14 @@ const STYLE: Record<string, string> = {
   cached: 'border-term-amber text-term-amber',
 };
 
-export default function FreshnessBadge({ p }: { p: Provenance }) {
+export default function FreshnessBadge({ p }: { p: Provenance | null | undefined }) {
+  if (!p || typeof p !== 'object') {
+    return (
+      <span className={`rounded border px-2 py-0.5 text-[10px] font-bold tracking-widest ${STYLE.stale}`}>
+        STALE
+      </span>
+    );
+  }
   const f = freshnessOf(p);
   const label =
     f === 'live' ? 'LIVE' : f === 'delayed' ? `DELAYED ${p.delay_minutes}m` : f === 'cached' ? 'CACHED / FALLBACK' : 'STALE';

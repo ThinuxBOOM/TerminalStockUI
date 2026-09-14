@@ -1,4 +1,4 @@
-import { api, type ReliabilityRow } from './client';
+import { api, coalesceInflight, FORECAST_TIMEOUT_MS, normalizeSymbolParam, type ReliabilityRow } from './client';
 
 export type CalibrationHistoryEntry = {
   brier: number | null;
@@ -119,69 +119,92 @@ function extractList(data: unknown): unknown[] {
  * fallback to the embedded `calibration` array on GET
  * /api/forecast/{symbol}?horizon=. Always normalizes to
  * {brier,ece,n_windows,members,reliability,model_version,data_version,created_at}[].
- * Missing endpoint / empty history → [] (callers render "No calibration bins yet").
+ * Only 404/501 (endpoint not deployed) trigger the forecast fallback or
+ * the empty list; other transport errors rethrow so ErrorState shows
+ * instead of a silent "No calibration bins yet". Empty history is a
+ * valid answer and still falls through to the embedded forecast
+ * snapshot. Identical concurrent calls share one in-flight promise.
  */
 export async function getCalibrationHistory(
   symbol: string,
   horizon: number,
   limit = 20,
 ): Promise<CalibrationHistoryEntry[]> {
-  const sym = String(symbol ?? '').trim();
+  const sym = normalizeSymbolParam(symbol);
   const h = Number(horizon);
   if (!sym || !Number.isFinite(h)) return [];
   const lim = Number.isFinite(Number(limit))
     ? Math.min(100, Math.max(1, Number(limit)))
     : 20;
 
-  // Primary: dedicated calibration-history endpoint.
-  try {
-    const { data } = await api.get(
-      `/api/forecast/${encodeURIComponent(sym)}/calibration/history`,
-      { params: { horizon: h, limit: lim } },
-    );
-    const out: CalibrationHistoryEntry[] = [];
-    for (const row of extractList(data)) {
-      const parsed = normalizeEntry(row);
-      if (parsed) out.push(parsed);
+  return coalesceInflight(`calibration-history:${sym}:${h}:${lim}`, async () => {
+    // Primary: dedicated calibration-history endpoint.
+    try {
+      const { data } = await api.get(
+        `/api/forecast/${encodeURIComponent(sym)}/calibration/history`,
+        { params: { horizon: h, limit: lim } },
+      );
+      const out: CalibrationHistoryEntry[] = [];
+      for (const row of extractList(data)) {
+        const parsed = normalizeEntry(row);
+        if (parsed) out.push(parsed);
+      }
+      if (out.length > 0) return out.slice(0, lim);
+      // Empty history is a valid answer — fall through to the embedded
+      // forecast calibration so the latest snapshot still shows.
+    } catch (err) {
+      if (!isEndpointMissingError(err)) throw err;
+      /* 404/501 → use the forecast fallback below */
     }
-    if (out.length > 0) return out.slice(0, lim);
-    // Empty history is a valid answer — fall through to the embedded
-    // forecast calibration so the latest snapshot still shows.
-  } catch {
-    /* endpoint missing (404) or unreachable — use the forecast fallback below */
-  }
 
-  // Fallback: embedded calibration on the forecast payload.
-  try {
-    const { data } = await api.get(`/api/forecast/${encodeURIComponent(sym)}`, {
-      params: { horizon: h },
-    });
-    const r = (data ?? {}) as Record<string, unknown>;
-    const meta =
-      (r.calibration_meta as Record<string, unknown> | undefined) ??
-      (r.calibrationMeta as Record<string, unknown> | undefined);
-    const versions = (r.versions as Record<string, unknown> | undefined) ?? {};
-    const inputs = (r.inputs as Record<string, unknown> | undefined) ?? {};
-    const provenance = (r.provenance as Record<string, unknown> | undefined) ?? {};
-    const single = normalizeEntry({
-      brier: r.brier ?? r.brier_score ?? meta?.brier ?? meta?.brier_score ?? null,
-      ece: r.ece ?? r.calibration_error ?? meta?.ece ?? meta?.calibration_error ?? null,
-      n_windows:
-        r.n_windows ??
-        inputs.n_windows ??
-        (r.expected_return_range as Record<string, unknown> | undefined)?.n_windows ??
-        meta?.n_windows ??
-        null,
-      members: r.members ?? null,
-      reliability: r.calibration ?? r.reliability ?? [],
-      model_version:
-        r.model_version ?? versions.model_version ?? inputs.model_version ?? meta?.model_version ?? null,
-      data_version:
-        r.data_version ?? versions.data_version ?? inputs.data_version ?? meta?.data_version ?? null,
-      created_at: provenance.as_of ?? meta?.created_at ?? meta?.as_of ?? null,
-    });
-    return single ? [single] : [];
-  } catch {
-    return [];
-  }
+    // Fallback: embedded calibration on the forecast payload.
+    // Same 60s budget as getForecast (ensemble + cold serverless), not
+    // the shared 15s — this hits the identical /api/forecast/{symbol} endpoint.
+    try {
+      const { data } = await api.get(`/api/forecast/${encodeURIComponent(sym)}`, {
+        params: { horizon: h },
+        timeout: FORECAST_TIMEOUT_MS,
+      });
+      const r = (data ?? {}) as Record<string, unknown>;
+      const meta =
+        (r.calibration_meta as Record<string, unknown> | undefined) ??
+        (r.calibrationMeta as Record<string, unknown> | undefined);
+      const versions = (r.versions as Record<string, unknown> | undefined) ?? {};
+      const inputs = (r.inputs as Record<string, unknown> | undefined) ?? {};
+      const provenance = (r.provenance as Record<string, unknown> | undefined) ?? {};
+      const single = normalizeEntry({
+        brier: r.brier ?? r.brier_score ?? meta?.brier ?? meta?.brier_score ?? null,
+        ece: r.ece ?? r.calibration_error ?? meta?.ece ?? meta?.calibration_error ?? null,
+        n_windows:
+          r.n_windows ??
+          inputs.n_windows ??
+          (r.expected_return_range as Record<string, unknown> | undefined)?.n_windows ??
+          meta?.n_windows ??
+          null,
+        members: r.members ?? null,
+        reliability: r.calibration ?? r.reliability ?? [],
+        model_version:
+          r.model_version ?? versions.model_version ?? inputs.model_version ?? meta?.model_version ?? null,
+        data_version:
+          r.data_version ?? versions.data_version ?? inputs.data_version ?? meta?.data_version ?? null,
+        created_at: provenance.as_of ?? meta?.created_at ?? meta?.as_of ?? null,
+      });
+      return single ? [single] : [];
+    } catch (err) {
+      if (!isEndpointMissingError(err)) throw err;
+      return [];
+    }
+  });
+}
+
+function httpStatus(err: unknown): number | null {
+  const e = err as { response?: { status?: unknown }; status?: unknown } | null;
+  const s = e?.response?.status ?? e?.status;
+  return typeof s === 'number' ? s : null;
+}
+
+/** 404/501 = endpoint not yet deployed → fallback. Others rethrow. */
+function isEndpointMissingError(err: unknown): boolean {
+  const s = httpStatus(err);
+  return s === 404 || s === 501;
 }

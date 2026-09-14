@@ -27,6 +27,11 @@ fi
 PG_DUMP="$1"
 REDIS_RDB="${2:-}"
 [ -f "$PG_DUMP" ] || { echo "[restore] ERROR: dump not found: $PG_DUMP" >&2; exit 1; }
+[ -s "$PG_DUMP" ] || { echo "[restore] ERROR: dump is empty: $PG_DUMP" >&2; exit 1; }
+if ! command -v pg_restore >/dev/null 2>&1; then
+  echo "[restore] ERROR: pg_restore not found (install postgresql-client)" >&2
+  exit 1
+fi
 
 # --- Postgres restore --------------------------------------------------------
 DATABASE_URL="${DATABASE_URL:-}"

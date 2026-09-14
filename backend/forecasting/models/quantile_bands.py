@@ -70,9 +70,25 @@ def return_quantiles(
     lret = log_returns(prices).dropna()
     out: dict[int, ForecastResult] = {}
     for horizon in horizons:
-        horizon = int(horizon)
+        try:
+            horizon = int(horizon)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("horizons must be >= 1") from exc
         if horizon < 1:
             raise ValueError("horizons must be >= 1")
+        # Short-circuit thin history before the rolling-sum (same error the
+        # post-compute gate would raise, without O(n) work).
+        try:
+            need = int(min_obs) + horizon  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            need = 30 + horizon
+        if len(lret) < need:
+            # Fall through to the exact gate below so the message stays
+            # byte-identical (len(sums) based); only skip when provably thin.
+            if len(lret) < horizon:
+                raise ValueError(
+                    f"horizon {horizon}: only 0 trailing windows, "
+                    f"need >= {min_obs}")
         sums = lret.rolling(horizon, min_periods=horizon).sum().dropna()
         if len(sums) < min_obs:
             raise ValueError(
@@ -102,22 +118,29 @@ def volatility_regime(
     data_version: str = "unspecified",
 ) -> ForecastResult:
     """Bucket current trailing volatility vs its own history."""
-    if int(trailing_days) < 2:
+    try:
+        trailing = int(trailing_days)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("trailing_days must be >= 2") from exc
+    if trailing < 2:
         raise ValueError("trailing_days must be >= 2")
     if not 0.0 < low_q < high_q < 1.0:
         raise ValueError("require 0 < low_q < high_q < 1")
     prices = _clean_close(close)
-    vols = (log_returns(prices).rolling(int(trailing_days),
-                                        min_periods=int(trailing_days)).std(ddof=1)
+    vols = (log_returns(prices).rolling(trailing,
+                                        min_periods=trailing).std(ddof=1)
             * np.sqrt(float(annualization))).dropna()
     if len(vols) < 2:
         raise ValueError("not enough history for a volatility regime")
-    lo, hi = float(np.quantile(vols.to_numpy(), low_q)), float(
-        np.quantile(vols.to_numpy(), high_q))
+    # Single-pass quantiles (one sort, identical values to two calls).
+    lo, hi = (float(v) for v in np.quantile(vols.to_numpy(), [low_q, high_q]))
     latest = float(vols.iloc[-1])
+    # Guard non-finite vol (never leaks NaN/inf; finite history implies finite).
+    if not (latest == latest and latest not in (float("inf"), float("-inf"))):
+        raise ValueError("trailing volatility is non-finite")
     regime = "low" if latest <= lo else ("high" if latest >= hi else "normal")
     return ForecastResult(
-        TARGET_VOL_REGIME, int(trailing_days),
+        TARGET_VOL_REGIME, trailing,
         {"regime": regime, "trailing_vol": latest,
          "low_threshold": lo, "high_threshold": hi},
         FORMULA_REGIME, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
@@ -134,19 +157,27 @@ def drawdown_probability(
     data_version: str = "unspecified",
 ) -> ForecastResult:
     """Historical breach frequency of a forward-h drawdown threshold."""
-    if int(horizon_days) < 1:
+    try:
+        horizon = int(horizon_days)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("horizon_days must be >= 1") from exc
+    if horizon < 1:
         raise ValueError("horizon_days must be >= 1")
-    if not 0.0 < float(threshold) < 1.0:
+    try:
+        thresh = float(threshold)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("threshold must be in (0, 1)") from exc
+    if not 0.0 < thresh < 1.0:
         raise ValueError("threshold must be in (0, 1)")
     prices = _clean_close(close)
-    forwards = future_drawdown(prices, int(horizon_days)).dropna()
+    forwards = future_drawdown(prices, horizon).dropna()
     if len(forwards) < min_obs:
         raise ValueError(f"only {len(forwards)} observable windows, need >= {min_obs}")
-    breaches = forwards <= -float(threshold)
+    breaches = forwards <= -thresh
     proba = float(breaches.mean())
     return ForecastResult(
-        TARGET_DRAWDOWN, int(horizon_days),
-        {"probability": proba, "threshold": float(threshold),
+        TARGET_DRAWDOWN, horizon,
+        {"probability": proba, "threshold": thresh,
          "n_windows": int(len(forwards)),
          "n_breaches": int(breaches.sum())},
         FORMULA_DRAWDOWN, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,

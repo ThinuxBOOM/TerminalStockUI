@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import {
   api,
+  coalesceInflight,
   getQuote,
   getScreener,
+  normalizeSymbolParam,
   ProvenanceSchema,
   SUPPORTED_MARKET_MICS,
   type Provenance,
@@ -370,14 +372,16 @@ async function enrichWithQuotes(rows: ScreenerRow[]): Promise<void> {
   const bySymbol = new Map<string, { change_pct: unknown; market_state: unknown }>();
   settled.forEach((s, i) => {
     if (s.status !== 'fulfilled') return;
-    bySymbol.set(targets[i].symbol.toUpperCase(), {
+    // Case-insensitive dedupe key (trim, strip spaces, UPPER) so
+    // `aapl`/`AAPL`/`a apl` enrich the same row instead of missing.
+    bySymbol.set(normalizeSymbolParam(targets[i].symbol), {
       change_pct: s.value.change_pct,
       market_state: s.value.market_state,
     });
   });
   for (const row of rows) {
     if (numOrNull(row.change_pct) !== null) continue;
-    const hit = bySymbol.get(row.symbol.toUpperCase());
+    const hit = bySymbol.get(normalizeSymbolParam(row.symbol));
     if (!hit) continue;
     const rec = row as unknown as Record<string, unknown>;
     if (numOrNull(hit.change_pct) !== null) rec.change_pct = Number(hit.change_pct);
@@ -388,7 +392,7 @@ async function enrichWithQuotes(rows: ScreenerRow[]): Promise<void> {
 }
 
 async function getMarketLiquidityFallback(mic: string): Promise<MarketBreadth> {
-  const upper = mic.trim().toUpperCase();
+  const upper = String(mic ?? '').trim().toUpperCase();
   const screen = await getScreener({ market: upper, minDirection: 0, limit: 50 });
   const rows = [...screen.results];
   await enrichWithQuotes(rows);
@@ -433,15 +437,19 @@ async function getMarketsOverviewFallback(): Promise<MarketsOverview> {
  * Falls back to client-side screener fan-out when the endpoint is not
  * deployed (404/501). Rethrows other errors so the page can render its
  * error state. Never crashes on unparseable payloads (tolerant parse).
+ * Identical concurrent calls share one in-flight promise (complements
+ * the TanStack ['markets-overview'] key for divergent call sites).
  */
 export async function getMarketsOverview(): Promise<MarketsOverview> {
-  try {
-    const { data } = await api.get('/api/markets/overview', { timeout: 60000 });
-    return normalizeMarketsOverview(data);
-  } catch (err) {
-    if (!isEndpointMissingError(err)) throw err;
-    return getMarketsOverviewFallback();
-  }
+  return coalesceInflight('markets-overview', async () => {
+    try {
+      const { data } = await api.get('/api/markets/overview', { timeout: 60000 });
+      return normalizeMarketsOverview(data);
+    } catch (err) {
+      if (!isEndpointMissingError(err)) throw err;
+      return getMarketsOverviewFallback();
+    }
+  });
 }
 
 /**
@@ -449,14 +457,16 @@ export async function getMarketsOverview(): Promise<MarketsOverview> {
  * Same 404/501 → screener-fallback contract as the overview.
  */
 export async function getMarketLiquidity(mic: string): Promise<MarketBreadth> {
-  const upper = mic.trim().toUpperCase();
-  try {
-    const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
-      timeout: 60000,
-    });
-    return normalizeMarketBreadth(data, upper);
-  } catch (err) {
-    if (!isEndpointMissingError(err)) throw err;
-    return getMarketLiquidityFallback(upper);
-  }
+  const upper = String(mic ?? '').trim().toUpperCase();
+  return coalesceInflight(`market-liquidity:${upper}`, async () => {
+    try {
+      const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
+        timeout: 60000,
+      });
+      return normalizeMarketBreadth(data, upper);
+    } catch (err) {
+      if (!isEndpointMissingError(err)) throw err;
+      return getMarketLiquidityFallback(upper);
+    }
+  });
 }

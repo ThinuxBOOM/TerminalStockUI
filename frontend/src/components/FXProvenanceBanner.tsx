@@ -53,6 +53,7 @@ export default function FXProvenanceBanner({
   }
 
   const fresh = isFreshFxProvenance(provenance);
+  const missing = provenance.missing_fields ?? [];
   const border = fresh ? 'border-term-border' : 'border-term-amber';
   const tone = fresh ? 'text-term-muted' : 'text-term-amber';
 
@@ -74,8 +75,8 @@ export default function FXProvenanceBanner({
         Q:<b className="text-term-cyan">{provenance.quality_grade}</b>
       </span>
       {provenance.fallback_used && <span className="ml-2 text-term-amber">fallback</span>}
-      {provenance.missing_fields.length > 0 && (
-        <span className="ml-2 text-term-red">missing: {provenance.missing_fields.join(',')}</span>
+      {missing.length > 0 && (
+        <span className="ml-2 text-term-red">missing: {missing.join(',')}</span>
       )}
       {!fresh && (
         <span className="ml-2 font-bold">

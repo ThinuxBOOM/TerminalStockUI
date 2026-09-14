@@ -70,7 +70,7 @@ function MarketCard({ m }: { m: MarketBreadth }) {
   const unchW = total > 0 ? Math.max(0, 100 - advW - decW) : 0;
   const stale = isStaleLiquidity(m.provenance);
   const avg = formatSignedPct(m.avg_change_pct);
-  const stateEntries = Object.entries(m.market_state_counts);
+  const stateEntries = Object.entries(m.market_state_counts ?? {});
 
   return (
     <article

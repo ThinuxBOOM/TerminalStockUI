@@ -15,14 +15,24 @@ def search_instruments(
     market: str | None = None,
     limit: int = 10,
 ) -> list[Instrument]:
-    q = (query or "").strip().upper()
+    q = str(query or "").strip().upper()
     if not q:
         return []
-    limit = max(1, min(int(limit or 10), 50))
+    try:
+        limit = max(1, min(int(limit or 10), 50))
+    except (TypeError, ValueError):
+        limit = 10
 
-    pool = list(instruments)
+    pool = list(instruments or [])
     if market:
-        pool = [i for i in pool if i.exchange_mic == market.upper()]
+        try:
+            market_up = str(market).strip().upper()
+        except Exception:
+            market_up = ""
+        if market_up:
+            pool = [i for i in pool if getattr(i, "exchange_mic", "") == market_up]
+        else:
+            pool = []
 
     scored: list[tuple[int, Instrument]] = []
     for inst in pool:

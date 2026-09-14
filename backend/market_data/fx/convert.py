@@ -16,6 +16,7 @@ explicit ``rates`` table (direct, inverse, or USD/EUR/CNY triangle path).
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from datetime import datetime, timezone
 from typing import Mapping
@@ -145,7 +146,11 @@ def _split_pair(key: object) -> tuple[str, str] | None:
 
 def _build_graph(rates: Mapping) -> dict[str, list[tuple[str, float]]]:
     graph: dict[str, list[tuple[str, float]]] = {}
-    for raw_key, raw_value in dict(rates).items():
+    try:
+        entries = dict(rates).items()  # type: ignore[arg-type]
+    except (TypeError, ValueError, AttributeError):
+        return graph
+    for raw_key, raw_value in entries:
         pair = _split_pair(raw_key)
         if pair is None:
             continue
@@ -153,7 +158,7 @@ def _build_graph(rates: Mapping) -> dict[str, list[tuple[str, float]]]:
             rate = float(raw_value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
-        if rate <= 0:
+        if not math.isfinite(rate) or rate <= 0:
             continue
         base, quote = pair
         graph.setdefault(base, []).append((quote, rate))
@@ -176,21 +181,30 @@ def convert(amount: float, from_ccy: str, to_ccy: str, rates: Mapping) -> float:
         value = float(amount)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"convert: invalid amount {amount!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"convert: invalid amount {amount!r}")
     frm = (from_ccy or "").strip().upper()
     to = (to_ccy or "").strip().upper()
     if not frm or not to:
         raise ValueError("convert: from_ccy and to_ccy are required")
     if frm == to:
         return value
+    if not isinstance(rates, Mapping):
+        raise ValueError("convert: rates table is required")
     graph = _build_graph(rates)
     best: dict[str, float] = {frm: 1.0}
     queue: deque[str] = deque([frm])
     while queue:
         node = queue.popleft()
         if node == to:
-            return value * best[node]
+            out = value * best[node]
+            if not math.isfinite(out):
+                raise ValueError("convert: conversion overflows finite range")
+            return out
         for nxt, edge in graph.get(node, []):
             candidate = best[node] * edge
+            if not math.isfinite(candidate):
+                continue
             if nxt not in best:
                 best[nxt] = candidate
                 queue.append(nxt)
@@ -231,9 +245,37 @@ def rank_cross_market(
                 "converted": None, "target_ccy": target,
             })
             continue
+        # JSON safety: any non-finite price (float/Decimal/numpy NaN/inf)
+        # sorts last with price/converted None instead of leaking NaN.
+        try:
+            _probe = float(price)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            _probe = None
+        if _probe is not None and not math.isfinite(_probe):
+            ranked.append({
+                "symbol": symbol, "price": None, "currency": ccy,
+                "converted": None, "target_ccy": target,
+            })
+            continue
+        if isinstance(price, bool):
+            # bool is an int subclass; 0/1 share prices are degenerate but
+            # finite — let convert() handle them without special-casing.
+            pass
+        try:
+            converted = convert(price, ccy, target, rates)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"rank: invalid price for {symbol!r}: {exc}") from exc
+        if not math.isfinite(float(converted)):
+            ranked.append({
+                "symbol": symbol, "price": price, "currency": ccy,
+                "converted": None, "target_ccy": target,
+            })
+            continue
         ranked.append({
             "symbol": symbol, "price": price, "currency": ccy,
-            "converted": convert(price, ccy, target, rates),
+            "converted": converted,
             "target_ccy": target,
         })
     ranked.sort(key=lambda r: (r["converted"] is None, -(r["converted"] or 0.0)))

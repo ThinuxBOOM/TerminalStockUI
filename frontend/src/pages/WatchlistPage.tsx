@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import useWatchlist from '../hooks/useWatchlist';
 import {
@@ -21,6 +21,9 @@ import ProvenanceBadge from '../components/ProvenanceBadge';
  *  (key onemarket.watchlist.v1, default [AAPL,MSFT,600519.SS,ASML.AS]). */
 
 const GATE_MESSAGE = 'Cross-market comparison unavailable — FX provenance missing';
+
+/** Caps: the watchlist never mounts more than one page of rows. */
+const MAX_WATCHLIST_ROWS = 100;
 
 function normalizeSymbolInput(v: string): string {
   return v.trim().toUpperCase().replace(/\s+/g, '');
@@ -65,6 +68,32 @@ export default function WatchlistPage() {
   const fxFresh = rankQuery.data ? isFreshFxProvenance(fxProvenance) : false;
   // Gate: never render ranked/converted numbers without fresh FX provenance.
   const gated = rankQuery.isError || !rankQuery.data || !fxFresh;
+
+  // Caps: never mount more than one page of rows; indices stay aligned
+  // because the visible slice is always a prefix of `symbols`.
+  const visibleSymbols = useMemo(
+    () => symbols.slice(0, MAX_WATCHLIST_ROWS),
+    [symbols],
+  );
+  const symbolsOverflow = symbols.length > visibleSymbols.length;
+  // Sorted copy memoized so the table doesn't re-sort on every keystroke
+  // in the add-symbol field.
+  const rankedRows = useMemo(() => {
+    const list = rankQuery.data?.ranking ?? [];
+    return [...list].sort((a, b) => {
+      const av = a.converted_price ?? null;
+      const bv = b.converted_price ?? null;
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return bv - av;
+    });
+  }, [rankQuery.data]);
+  const visibleRanked = useMemo(
+    () => rankedRows.slice(0, MAX_WATCHLIST_ROWS),
+    [rankedRows],
+  );
+  const rankedOverflow = rankedRows.length > visibleRanked.length;
 
   function addSymbol() {
     const sym = normalizeSymbolInput(draft);
@@ -196,7 +225,12 @@ export default function WatchlistPage() {
     }
     return (
       <ul className="term-panel divide-y divide-term-border">
-        {symbols.map((sym, i) => {
+        {symbolsOverflow && (
+          <li className="p-2 text-[11px] text-term-muted" role="status">
+            showing first {visibleSymbols.length} of {symbols.length} — remove symbols to narrow the list.
+          </li>
+        )}
+        {visibleSymbols.map((sym, i) => {
           const q: Quote | null = rows[i] ?? null;
           if (!q) {
             return (
@@ -253,9 +287,12 @@ export default function WatchlistPage() {
   }
 
   function renderRanked() {
+    // Loading first: on first load `data` is undefined while the rank
+    // request is in flight (the gate above already covers that case, but
+    // a refetch with stale data must still surface progress).
+    if (rankQuery.isLoading && !rankQuery.data) return <Loading label={`ranking in ${targetCcy}…`} />;
     const data = rankQuery.data;
     if (!data) return null;
-    if (rankQuery.isLoading) return <Loading label={`ranking in ${targetCcy}…`} />;
     // Defensive: this branch only renders when fxFresh holds. If the flag
     // ever flips (stale cache win), fall back to the gate — never rank
     // without fresh FX.
@@ -266,16 +303,14 @@ export default function WatchlistPage() {
         </div>
       );
     }
-    const rows = [...data.ranking].sort((a, b) => {
-      const av = a.converted_price ?? null;
-      const bv = b.converted_price ?? null;
-      if (av === null && bv === null) return 0;
-      if (av === null) return 1;
-      if (bv === null) return -1;
-      return bv - av;
-    });
+    const rows = visibleRanked;
     return (
       <div className="term-panel overflow-x-auto">
+        {rankedOverflow && (
+          <p className="p-2 text-[11px] text-term-muted" role="status">
+            showing first {visibleRanked.length} of {rankedRows.length} — remove symbols to narrow the list.
+          </p>
+        )}
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-term-border text-left text-xs text-term-muted">

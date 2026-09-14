@@ -53,8 +53,14 @@ def quote(
     """GET /api/market_data/quote?symbol=AAPL"""
     try:
         return _enrich_market_state(svc.get_quote(symbol, market))
+    except HTTPException:
+        raise
     except ProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"quote failed: {exc}") from exc
 
 
 @router.get("/bars", response_model=BarsResponse)
@@ -64,7 +70,16 @@ def bars(
     limit: int = Query(default=30, ge=1, le=250),
     svc: MarketDataService = Depends(get_market_service),
 ):
-    return svc.get_bars(symbol, timeframe, limit)
+    try:
+        return svc.get_bars(symbol, timeframe, limit)
+    except HTTPException:
+        raise
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"bars failed: {exc}") from exc
 
 
 @securities_router.get("/{instrument_id}/quote", response_model=QuoteResponse)
@@ -73,10 +88,24 @@ def security_quote(
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
-    inst = registry.get_by_id(instrument_id)
+    try:
+        inst = registry.get_by_id(instrument_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument lookup failed: {exc}") from exc
     if inst is None:
         raise HTTPException(status_code=404, detail="unknown instrument_id")
-    return _enrich_market_state(svc.get_quote(inst.provider_symbol or inst.exchange_symbol, inst.exchange_mic))
+    try:
+        return _enrich_market_state(svc.get_quote(inst.provider_symbol or inst.exchange_symbol, inst.exchange_mic))
+    except HTTPException:
+        raise
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"quote failed: {exc}") from exc
 
 
 @securities_router.get("/{instrument_id}/bars", response_model=BarsResponse)
@@ -87,9 +116,23 @@ def security_bars(
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
-    inst = registry.get_by_id(instrument_id)
+    try:
+        inst = registry.get_by_id(instrument_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"instrument lookup failed: {exc}") from exc
     if inst is None:
         raise HTTPException(status_code=404, detail="unknown instrument_id")
-    out = svc.get_bars(inst.provider_symbol or inst.exchange_symbol, timeframe, limit)
+    try:
+        out = svc.get_bars(inst.provider_symbol or inst.exchange_symbol, timeframe, limit)
+    except HTTPException:
+        raise
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"bars failed: {exc}") from exc
     out["instrument_id"] = instrument_id
     return out

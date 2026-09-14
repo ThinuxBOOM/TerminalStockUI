@@ -56,25 +56,36 @@ def _combine_provenance(entries: list[dict]) -> dict:
     stamps: list[datetime] = []
     for entry in entries:
         try:
-            stamps.append(datetime.fromisoformat(str(entry["as_of"]).replace("Z", "+00:00")))
-        except (KeyError, ValueError):
+            if not isinstance(entry, dict):
+                raise ValueError("bad provenance entry")
+            raw = entry.get("as_of")
+            stamp = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            stamps.append(stamp)
+        except Exception:
             stamps.append(_utcnow())
     oldest = min(stamps)
     if oldest.tzinfo is None:
         oldest = oldest.replace(tzinfo=timezone.utc)
-    sources = sorted({str(e.get("source", "unknown")) for e in entries})
-    fallback = any(bool(e.get("fallback_used")) for e in entries)
-    missing = sorted({m for e in entries for m in (e.get("missing_fields") or [])})
-    grade, _ = grade_quality(
-        delay_minutes=max(int(e.get("delay_minutes", 15) or 0) for e in entries),
-        age_minutes=max(0.0, (_utcnow() - oldest).total_seconds() / 60),
-        missing_fields=missing,
-        fallback_used=fallback,
-        reconciled=False,
-    )
+    try:
+        sources = sorted({str(e.get("source", "unknown")) for e in entries if isinstance(e, dict)})
+        fallback = any(bool(e.get("fallback_used")) for e in entries if isinstance(e, dict))
+        missing = sorted({m for e in entries if isinstance(e, dict) for m in (e.get("missing_fields") or [])})
+        delays = [int(e.get("delay_minutes", 15) or 0) for e in entries if isinstance(e, dict)]
+        max_delay = max(delays) if delays else 15
+        grade, _ = grade_quality(
+            delay_minutes=max_delay,
+            age_minutes=max(0.0, (_utcnow() - oldest).total_seconds() / 60),
+            missing_fields=missing,
+            fallback_used=fallback,
+            reconciled=False,
+        )
+    except Exception:
+        sources, fallback, missing, max_delay, grade = ["markets"], False, [], 15, "B"
     return build_provenance(
         "+".join(sources), as_of=oldest,
-        delay_minutes=max(int(e.get("delay_minutes", 15) or 0) for e in entries),
+        delay_minutes=max_delay,
         quality_grade=grade, fallback_used=fallback, missing_fields=missing,
     ).model_dump(mode="json")
 
@@ -114,33 +125,44 @@ def _validate_mic(mic: str) -> str:
 
 
 def _as_float(value: object) -> float | None:
+    import math as _math
+
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)  # type: ignore[arg-type]
+        number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+    if not _math.isfinite(number):
+        return None
+    return number
 
 
 def _range_pct_from_quote(quote: dict, bars: dict | None) -> float | None:
+    import math as _math
+
     high = _as_float(quote.get("high"))
     low = _as_float(quote.get("low"))
     price = _as_float(quote.get("price"))
     if high is not None and low is not None and price not in (None, 0.0):
         try:
-            return float((high - low) / abs(float(price)) * 100.0)
-        except (TypeError, ValueError, ZeroDivisionError):
+            candidate = float((high - low) / abs(float(price)) * 100.0)
+            if _math.isfinite(candidate):
+                return candidate
+        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
             pass
     # Fallback: latest bar high/low/close (best-effort, never raises).
     try:
         rows = (bars or {}).get("bars", []) or []
         if rows:
-            last = rows[-1]
+            last = rows[-1] if isinstance(rows[-1], dict) else {}
             b_high = _as_float(last.get("high"))
             b_low = _as_float(last.get("low"))
             b_close = _as_float(last.get("close")) or price
             if b_high is not None and b_low is not None and b_close not in (None, 0.0):
-                return float((b_high - b_low) / abs(float(b_close)) * 100.0)
+                candidate = float((b_high - b_low) / abs(float(b_close)) * 100.0)
+                if _math.isfinite(candidate):
+                    return candidate
     except Exception:
         pass
     return None
@@ -148,8 +170,12 @@ def _range_pct_from_quote(quote: dict, bars: dict | None) -> float | None:
 
 def _collect_row(inst, svc: MarketDataService) -> dict:
     """Quote (+ best-effort bars) for one registry instrument. May raise."""
-    symbol_key = inst.provider_symbol or inst.exchange_symbol
-    quote = svc.get_quote(symbol_key, inst.exchange_mic)
+    symbol_key = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None)
+    if not symbol_key:
+        raise ValueError("missing symbol")
+    quote = svc.get_quote(symbol_key, getattr(inst, "exchange_mic", None))
+    if not isinstance(quote, dict):
+        raise ValueError("quote unavailable")
     try:
         bars = svc.get_bars(symbol_key, timeframe="1d", limit=5)
     except Exception:
@@ -160,21 +186,34 @@ def _collect_row(inst, svc: MarketDataService) -> dict:
     volume: int | None = None
     if raw_vol is not None and not isinstance(raw_vol, bool):
         try:
-            volume = int(float(raw_vol))
-        except (TypeError, ValueError):
+            import math as _math
+
+            vol_f = float(raw_vol)
+            if _math.isfinite(vol_f):
+                volume = int(vol_f)
+        except (TypeError, ValueError, OverflowError):
             volume = None
     turnover: float | None = None
     if price is not None and volume is not None:
         try:
-            turnover = float(price) * float(volume)
-        except (TypeError, ValueError):
+            import math as _math
+
+            candidate = float(price) * float(volume)
+            turnover = candidate if _math.isfinite(candidate) else None
+        except (TypeError, ValueError, OverflowError):
             turnover = None
     provenance = quote.get("provenance")
+    try:
+        company = getattr(inst, "company_name", "")
+        mic_val = getattr(inst, "exchange_mic", None)
+        ccy_fallback = getattr(inst, "currency", "USD")
+    except Exception:
+        company, mic_val, ccy_fallback = "", None, "USD"
     return {
         "symbol": symbol_key,
-        "company_name": inst.company_name,
-        "exchange_mic": inst.exchange_mic,
-        "currency": quote.get("currency") or inst.currency,
+        "company_name": company,
+        "exchange_mic": mic_val,
+        "currency": quote.get("currency") or ccy_fallback,
         "price": price,
         "change_pct": change_pct,
         "volume": volume,
@@ -186,14 +225,41 @@ def _collect_row(inst, svc: MarketDataService) -> dict:
 
 
 def _aggregate(mic: str, universe_size: int, rows: list[dict]) -> dict:
-    changes = [r["change_pct"] for r in rows if r.get("change_pct") is not None]
-    ranges = [r["range_pct"] for r in rows if r.get("range_pct") is not None]
-    volumes = [r["volume"] for r in rows if r.get("volume") is not None]
-    turnovers = [r["turnover"] for r in rows if r.get("turnover") is not None]
+    import math as _math
+
+    changes = [r["change_pct"] for r in rows if isinstance(r.get("change_pct"), (int, float)) and _math.isfinite(r["change_pct"])]
+    ranges = [r["range_pct"] for r in rows if isinstance(r.get("range_pct"), (int, float)) and _math.isfinite(r["range_pct"])]
+    volumes = [r["volume"] for r in rows if isinstance(r.get("volume"), int)]
+    turnovers = [r["turnover"] for r in rows if isinstance(r.get("turnover"), (int, float)) and _math.isfinite(r["turnover"])]
     states: dict[str, int] = {}
     for r in rows:
-        key = str(r.get("market_state") or "unknown")
+        try:
+            key = str(r.get("market_state") or "unknown")
+        except Exception:
+            key = "unknown"
         states[key] = states.get(key, 0) + 1
+    try:
+        avg_change = float(sum(changes) / len(changes)) if changes else None
+        if avg_change is not None and not _math.isfinite(avg_change):
+            avg_change = None
+    except Exception:
+        avg_change = None
+    try:
+        total_volume = int(sum(volumes)) if volumes else 0
+    except Exception:
+        total_volume = 0
+    try:
+        total_turnover = float(sum(turnovers)) if turnovers else 0.0
+        if not _math.isfinite(total_turnover):
+            total_turnover = 0.0
+    except Exception:
+        total_turnover = 0.0
+    try:
+        avg_range = float(sum(ranges) / len(ranges)) if ranges else None
+        if avg_range is not None and not _math.isfinite(avg_range):
+            avg_range = None
+    except Exception:
+        avg_range = None
     return {
         "mic": mic,
         "symbols_total": int(universe_size),
@@ -201,10 +267,10 @@ def _aggregate(mic: str, universe_size: int, rows: list[dict]) -> dict:
         "advancers": sum(1 for c in changes if c > 0),
         "decliners": sum(1 for c in changes if c < 0),
         "unchanged": sum(1 for c in changes if c == 0),
-        "avg_change_pct": (float(sum(changes) / len(changes)) if changes else None),
-        "total_volume": int(sum(volumes)) if volumes else 0,
-        "total_turnover": float(sum(turnovers)) if turnovers else 0.0,
-        "avg_range_pct": (float(sum(ranges) / len(ranges)) if ranges else None),
+        "avg_change_pct": avg_change,
+        "total_volume": total_volume,
+        "total_turnover": total_turnover,
+        "avg_range_pct": avg_range,
         "market_state_counts": states,
         "provenance": _combine_provenance(
             [r["provenance"] for r in rows if isinstance(r.get("provenance"), dict)]
@@ -219,12 +285,23 @@ def _scan_mic(
     svc: MarketDataService,
     skipped: list[dict],
 ) -> tuple[list[dict], int]:
-    universe = [i for i in registry.all() if i.exchange_mic == mic]
+    try:
+        universe = [i for i in registry.all() if getattr(i, "exchange_mic", None) == mic]
+    except Exception as exc:
+        skipped.append({"symbol": "_universe", "mic": mic, "reason": f"{type(exc).__name__}: {exc}"})
+        return [], 0
     rows: list[dict] = []
     for inst in universe:
-        symbol_key = inst.provider_symbol or inst.exchange_symbol
+        try:
+            symbol_key = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
+        except Exception:
+            skipped.append({"symbol": "UNKNOWN", "mic": mic, "reason": "bad registry entry"})
+            continue
         try:
             rows.append(_collect_row(inst, svc))
+        except HTTPException:
+            # Never let one bad symbol abort the batch; degrade to skipped.
+            skipped.append({"symbol": symbol_key, "mic": mic, "reason": "HTTPException"})
         except Exception as exc:  # per-symbol degrade, never 500
             skipped.append({
                 "symbol": symbol_key,

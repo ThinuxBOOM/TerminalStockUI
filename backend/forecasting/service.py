@@ -22,6 +22,7 @@ the bars provenance envelope (caller-supplied override wins in tests).
 from __future__ import annotations
 
 import hashlib
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -40,7 +41,6 @@ from backend.forecasting.features.sse import (
 )
 from backend.forecasting.features.euronext import (
     EUX_FEATURE_VERSION,
-    build_euronext_features,
 )
 from backend.forecasting.models.historical_drift import HistoricalDriftBaseline
 from backend.forecasting.models.logistic import LogisticDirectionModel
@@ -76,8 +76,20 @@ VOLATILITY_PENALTY_REGIMES = frozenset({"high", "elevated", "extreme"})
 FULL_ENSEMBLE_MIN_MODELS = 3
 SSE_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{SSE_DRIFT_VERSION}"
 EUX_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{EUX_DRIFT_VERSION}"
+#: Bound on the in-memory record mirror (prevents unbounded growth on
+#: long-lived processes; oldest rows are dropped, newest preserved).
+MAX_RECORDS = 500
 EURONEXT_SUFFIXES = (".PA", ".AS", ".BR")
 EURONEXT_MICS = ("XPAR-", "XAMS-", "XBRU-")
+
+
+def _finite_or_none(value: object) -> float | None:
+    """Return ``float(value)`` when finite, else None (JSON-safe sanitize)."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _is_sse(symbol: str, bars: dict) -> bool:
@@ -206,29 +218,53 @@ class ForecastService:
 
     # -- internals ------------------------------------------------------
     def _load(self, symbol: str) -> tuple[pd.DataFrame, dict]:
+        # Harden: validate symbol early (ValueError, never AttributeError)
+        # and coerce malformed bar rows to ValueError (never KeyError).
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
         bars = self.market.get_bars(symbol.strip().upper(), timeframe="1d", limit=BAR_LIMIT)
         rows = bars.get("bars", [])
         if len(rows) < 100:
             raise ValueError(f"insufficient history for {symbol!r}: {len(rows)} bars")
-        frame = pd.DataFrame(
-            {
-                "open": [r["open"] for r in rows],
-                "high": [r["high"] for r in rows],
-                "low": [r["low"] for r in rows],
-                "close": [r["close"] for r in rows],
-                "volume": [float(r["volume"] or 0) for r in rows],
-            },
-            index=pd.to_datetime([r["ts"] for r in rows]),
-        )
+        try:
+            opens = [r["open"] for r in rows]
+            highs = [r["high"] for r in rows]
+            lows = [r["low"] for r in rows]
+            closes = [r["close"] for r in rows]
+            volumes = [float((r.get("volume") if isinstance(r, dict) else None) or 0) for r in rows]
+            stamps = [(r.get("ts") if isinstance(r, dict) else None) for r in rows]
+            index = pd.to_datetime(stamps)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed bars for {symbol!r}: {exc}") from exc
+        except Exception as exc:
+            raise ValueError(f"malformed bars for {symbol!r}: {type(exc).__name__}") from exc
+        try:
+            frame = pd.DataFrame(
+                {
+                    "open": opens,
+                    "high": highs,
+                    "low": lows,
+                    "close": closes,
+                    "volume": volumes,
+                },
+                index=index,
+            )
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"malformed bars for {symbol!r}: {exc}") from exc
         return frame, bars
 
     # -- public ---------------------------------------------------------
     def forecast(
         self, symbol: str, horizon: int, as_of: str | None = None
     ) -> dict:
-        horizon = int(horizon)
+        try:
+            horizon = int(horizon)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon!r}") from exc
         if horizon not in FORECAST_HORIZONS:
             raise ValueError(f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
         ohlcv, bars = self._load(symbol)
         provenance = dict(bars.get("provenance", {}))
         stamp = as_of or str(provenance.get("as_of"))
@@ -274,8 +310,11 @@ class ForecastService:
         except (ValueError, ImportError):
             pass  # single-class / too-few-rows / sklearn missing: drift+momentum
         members = sorted(probas)
-        us_direction = float(sum(probas.values()) / len(probas))
-        us_spread = float(max(probas.values()) - min(probas.values())) if probas else 0.0
+        if probas:
+            us_direction = float(sum(probas.values()) / len(probas))
+            us_spread = float(max(probas.values()) - min(probas.values()))
+        else:  # defensive: fits below always seed >= 2 members; never empty
+            us_direction, us_spread = 0.5, 0.0
 
         # -- return range / regime / drawdown ----------------------------
         band = return_quantiles(
@@ -371,10 +410,9 @@ class ForecastService:
                 "upper_q": float(us_range["upper_q"]),
                 "n_windows": int(us_range["n_windows"]),
             }
-            try:
-                build_euronext_features(ohlcv)
-            except ValueError:
-                pass
+            # NOTE: the EUX feature frame is version-stamped via
+            # EUX_FEATURE_VERSION above; its values are not consumed by the
+            # drift blend, so no second feature build is needed here.
             confidence = _confidence(
                 spread,
                 len(probas),
@@ -400,6 +438,24 @@ class ForecastService:
             feature_version = FEATURE_VERSION
             model_members = list(ENSEMBLE_MEMBERS)
 
+        # -- JSON safety: non-finite floats are invalid JSON (NaN/inf) ----
+        # Finite inputs pass through bit-identical; only pathological model
+        # outputs (e.g. exp() overflow on extreme synthetic drift) map to
+        # None instead of leaking NaN/inf to the wire/DB.
+        _clean_direction = _finite_or_none(direction)
+        if _clean_direction is None:
+            raise ValueError("non-finite direction probability")
+        direction = _clean_direction
+        dd_prob = _finite_or_none(dd_prob)
+        for _bound in ("low", "mid", "high"):
+            expected_range[_bound] = _finite_or_none(expected_range.get(_bound))
+        for _name, _value in list(probas.items()):
+            _clean_member = _finite_or_none(_value)
+            # JSON safety: non-finite members sanitize to None (never NaN/inf).
+            # Reachable only on pathological model output; direction already
+            # validated finite above, so this never changes valid ensembles.
+            probas[_name] = _clean_member
+
         instrument_id = bars.get("instrument_id") or f"stub-{symbol.strip().upper()}"
         target_date = _target_date(stamp, horizon)
         record = {
@@ -423,6 +479,8 @@ class ForecastService:
             "created_at": stamp,
         }
         self.records.append(record)
+        if len(self.records) > MAX_RECORDS:
+            del self.records[: len(self.records) - MAX_RECORDS]
 
         return {
             "symbol": symbol.strip().upper(),

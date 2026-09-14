@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -46,6 +46,7 @@ function qualityReason(r: { quality?: unknown }): string {
 }
 
 /** Timeout-aware error copy: a full live scan takes ~30s cold. */
+const MAX_SKIPPED_SHOWN = 10;
 function screenerErrorDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : 'Backend unreachable. Check VITE_API_BASE_URL.';
   if (
@@ -82,9 +83,17 @@ export default function ScreenerPage() {
   });
 
   const data = screen.data;
-  const rows = data?.results ?? [];
-  const skippedCount = data?.skipped.length ?? 0;
-  const anyFallback = rows.some((r) => r.provenance.fallback_used);
+  const rows = useMemo(() => data?.results ?? [], [data]);
+  const skippedCount = data?.skipped?.length ?? 0;
+  const skippedSymbols = useMemo(
+    () => (data?.skipped ?? []).slice(0, MAX_SKIPPED_SHOWN).map((s) => s.symbol),
+    [data],
+  );
+  const skippedOverflow = skippedCount > skippedSymbols.length;
+  const anyFallback = useMemo(
+    () => rows.some((r) => r.provenance?.fallback_used === true),
+    [rows],
+  );
 
   return (
     <div>
@@ -219,7 +228,7 @@ export default function ScreenerPage() {
                   </thead>
                   <tbody>
                     {rows.map((r, idx) => (
-                      <tr key={`${r.symbol}-${r.exchange_mic}`} className="border-b border-term-border">
+                      <tr key={`${r.symbol}-${r.exchange_mic}-${idx}`} className="border-b border-term-border">
                         <td className="p-2 text-term-muted">{idx + 1}</td>
                         <td className="p-2">
                           <Link
@@ -237,7 +246,11 @@ export default function ScreenerPage() {
                           <CurrencyValue value={r.price} currency={r.currency} />
                         </td>
                         <td className="p-2">
-                          <b>{(r.direction_probability * 100).toFixed(1)}%</b>
+                          <b>
+                            {Number.isFinite(r.direction_probability)
+                              ? `${(r.direction_probability * 100).toFixed(1)}%`
+                              : '—'}
+                          </b>
                         </td>
                         <td className="p-2 text-xs">{r.confidence}</td>
                         <td
@@ -260,7 +273,7 @@ export default function ScreenerPage() {
                   {data.disclosure || 'Not investment advice.'}
                   {skippedCount > 0 && (
                     <span className="ml-2">
-                      Skipped: {data.skipped.map((s) => s.symbol).join(', ')}.
+                      Skipped: {skippedSymbols.join(', ')}{skippedOverflow ? ` +${skippedCount - skippedSymbols.length} more` : ''}.
                     </span>
                   )}
                 </p>

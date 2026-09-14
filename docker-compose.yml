@@ -4,7 +4,8 @@ services:
     container_name: onemarket-postgres
     restart: unless-stopped
     env_file:
-      - ./infra/docker/.env
+      - path: ./infra/docker/.env
+        required: false
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-onemarket}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onemarket_dev}
@@ -43,11 +44,13 @@ services:
     container_name: onemarket-backend
     restart: unless-stopped
     env_file:
-      - ./infra/docker/.env
+      - path: ./infra/docker/.env
+        required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://onemarket:onemarket_dev@postgres:5432/onemarket}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
+      CRON_SECRET: ${CRON_SECRET:-}
       APP_ENV: ${APP_ENV:-development}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
@@ -57,18 +60,22 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      # Bounded probe: 3s socket timeout so a refused/slow /health never hangs
+      # the 15s interval and flaps the frontend depends_on gate. Exits 0 only
+      # on HTTP 200; connection errors exit non-zero (unhealthy) via the shell.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)\""]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 40s
 
   frontend:
     build: ./frontend
     container_name: onemarket-frontend
     restart: unless-stopped
     env_file:
-      - ./infra/docker/.env
+      - path: ./infra/docker/.env
+        required: false
     environment:
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
     ports:
@@ -77,11 +84,14 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5173 >/dev/null 2>&1 || exit 1"]
+      # vite preview takes ~60s on first boot (npm build + preview). wget with
+      # a 3s fetch timeout avoids hanging the interval; longer start_period
+      # stops the flap where compose marks the frontend unhealthy mid-build.
+      test: ["CMD-SHELL", "wget -T 3 -qO- http://127.0.0.1:5173 >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 90s
 
 volumes:
   pgdata:

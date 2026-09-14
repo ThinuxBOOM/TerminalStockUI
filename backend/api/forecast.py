@@ -270,8 +270,21 @@ def get_forecast(
         )
     try:
         result = svc.forecast(symbol, int(horizon))
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        try:
+            from backend.market_data.providers.base import ProviderError as _PE
+
+            if isinstance(exc, _PE):
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"forecast failed: {exc}") from exc
     # Flatten the record mirror out of the wire payload (kept in result["record"]).
     payload = {k: v for k, v in result.items() if k != "record"}
     # Display fields the terminal UI renders (derived, never invented):

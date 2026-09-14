@@ -95,11 +95,17 @@ def _coerce_float(value: object) -> float | None:
     try:
         if value is None:
             return None
+        if isinstance(value, bool):
+            return float(value)
         f = float(value)  # type: ignore[arg-type]
         if f != f:  # NaN
             return None
+        import math as _math
+
+        if not _math.isfinite(f):  # inf -> None (JSON-safe, never leaks)
+            return None
         return f
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -107,11 +113,17 @@ def _coerce_int(value: object) -> int | None:
     try:
         if value is None:
             return None
+        if isinstance(value, bool):
+            return int(value)
         f = float(value)  # type: ignore[arg-type]
         if f != f:
             return None
+        import math as _math
+
+        if not _math.isfinite(f):
+            return None
         return int(f)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

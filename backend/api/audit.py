@@ -140,26 +140,54 @@ def log_ai_opinion(
 
 
 def _forecast_to_out(f: Forecast, symbol: Optional[str] = None) -> dict:
-    low = float(f.expected_ret_low) if f.expected_ret_low is not None else None
-    high = float(f.expected_ret_high) if f.expected_ret_high is not None else None
+    try:
+        low = float(f.expected_ret_low) if f.expected_ret_low is not None else None
+    except (TypeError, ValueError):
+        low = None
+    try:
+        high = float(f.expected_ret_high) if f.expected_ret_high is not None else None
+    except (TypeError, ValueError):
+        high = None
+    try:
+        direction = float(f.direction_prob) if f.direction_prob is not None else None
+    except (TypeError, ValueError):
+        direction = None
+    try:
+        drawdown = float(f.drawdown_prob) if f.drawdown_prob is not None else None
+    except (TypeError, ValueError):
+        drawdown = None
+    try:
+        ai_weight = float(f.ai_weight) if f.ai_weight is not None else 0.0
+    except (TypeError, ValueError):
+        ai_weight = 0.0
+    try:
+        target = f.target_date.isoformat() if f.target_date is not None else None
+    except Exception:
+        target = str(f.target_date) if f.target_date is not None else None
+    try:
+        provenance = f.provenance or {}
+        if not isinstance(provenance, dict):
+            provenance = {}
+    except Exception:
+        provenance = {}
     return {
         "forecast_id": str(f.forecast_id),
         "instrument_id": str(f.instrument_id),
         "symbol": symbol,
         "horizon_days": f.horizon_days,
-        "target_date": f.target_date.isoformat() if f.target_date is not None else None,
-        "direction_probability": float(f.direction_prob) if f.direction_prob is not None else None,
+        "target_date": target,
+        "direction_probability": direction,
         "expected_return_range": [low, high] if low is not None and high is not None else None,
         "volatility_regime": f.volatility_regime,
-        "drawdown_probability": float(f.drawdown_prob) if f.drawdown_prob is not None else None,
+        "drawdown_probability": drawdown,
         "confidence": f.confidence,
         "model_version": f.model_version,
         "feature_version": f.feature_version,
         "data_version": f.data_version,
         "ai_provider": f.ai_provider,
         "ai_model": f.ai_model,
-        "ai_weight": float(f.ai_weight) if f.ai_weight is not None else 0.0,
-        "provenance": f.provenance or {},
+        "ai_weight": ai_weight,
+        "provenance": provenance,
         "created_at": _iso_or_none(f.created_at),
     }
 
@@ -200,6 +228,22 @@ def list_forecasts(
     db: Session = Depends(get_db),
 ) -> dict:
     """Versioned forecast log. Every row carries model/feature/data versions + timestamp."""
+    from fastapi import HTTPException as _HTTPException
+
+    if horizon_days is not None:
+        try:
+            horizon_int = int(horizon_days)
+        except (TypeError, ValueError):
+            raise _HTTPException(
+                status_code=422,
+                detail=f"horizon_days must be one of [5, 21, 63], got {horizon_days}",
+            ) from None
+        if horizon_int not in (5, 21, 63):
+            raise _HTTPException(
+                status_code=422,
+                detail=f"horizon_days must be one of [5, 21, 63], got {horizon_days}",
+            )
+        horizon_days = horizon_int
     try:
         stmt = select(Forecast, Instrument).join(
             Instrument, Forecast.instrument_id == Instrument.instrument_id, isouter=True
@@ -218,7 +262,16 @@ def list_forecasts(
             stmt = stmt.where(Forecast.horizon_days == horizon_days)
         stmt = stmt.order_by(Forecast.created_at.desc()).limit(limit).offset(offset)
         rows = db.execute(stmt).all()
-        out = [_forecast_to_out(f, symbol=(inst.exchange_symbol if inst is not None else None)) for f, inst in rows]
+        out: list[dict] = []
+        for f, inst in rows:
+            try:
+                sym = inst.exchange_symbol if inst is not None else None
+            except Exception:
+                sym = None
+            try:
+                out.append(_forecast_to_out(f, symbol=sym))
+            except Exception:
+                continue
         return {"forecasts": out, "count": len(out), "limit": limit, "offset": offset, "disclosure": DISCLOSURE}
     except Exception:
         # No tables yet (fresh dev DB without migrations) → empty log, not 500.
@@ -240,9 +293,18 @@ def list_ai_decisions(
             .order_by(AuditLog.id.desc())
         )
         rows = db.execute(stmt).scalars().all()
-        decisions = [_ai_row_to_out(r) for r in rows]
+        decisions: list[dict] = []
+        for r in rows:
+            try:
+                decisions.append(_ai_row_to_out(r))
+            except Exception:
+                continue
         if provider:
-            decisions = [d for d in decisions if (d.get("provider") or "").lower() == provider.lower()]
+            try:
+                needle = (provider or "").lower()
+            except Exception:
+                needle = ""
+            decisions = [d for d in decisions if str(d.get("provider") or "").lower() == needle]
         total = len(decisions)
         page = decisions[offset: offset + limit]
         return {"decisions": page, "count": len(page), "total": total, "limit": limit, "offset": offset, "disclosure": DISCLOSURE}

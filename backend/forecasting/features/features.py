@@ -34,6 +34,8 @@ def validate_ohlcv(frame: Any) -> pd.DataFrame:
     """
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("ohlcv input must be a pandas DataFrame")
+    if len(frame) == 0:
+        raise ValueError("ohlcv frame is empty")
     missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
     if missing:
         raise ValueError(f"ohlcv missing columns: {missing}")
@@ -116,10 +118,14 @@ def build_features(
 
 def future_return(close: pd.Series, horizon_days: int) -> pd.Series:
     """Forward simple return close_{t+h}/close_t - 1 (training labels only)."""
-    if int(horizon_days) < 1:
+    try:
+        horizon = int(horizon_days)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("horizon_days must be >= 1") from exc
+    if horizon < 1:
         raise ValueError("horizon_days must be >= 1")
     close = pd.Series(close, dtype=float)
-    return close.shift(-int(horizon_days)) / close - 1.0
+    return close.shift(-horizon) / close - 1.0
 
 
 def direction_label(close: pd.Series, horizon_days: int) -> pd.Series:
@@ -136,10 +142,22 @@ def future_drawdown(close: pd.Series, horizon_days: int) -> pd.Series:
 
     Training/evaluation helper only. O(n*h); fine for baseline scale.
     """
-    if int(horizon_days) < 1:
+    try:
+        horizon = int(horizon_days)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("horizon_days must be >= 1") from exc
+    if horizon < 1:
         raise ValueError("horizon_days must be >= 1")
+    idx = pd.Series(close).index
+    # Short-circuit thin/empty history: same all-NaN shape the loop would
+    # produce, without O(n*h) work.
+    try:
+        n = len(idx)
+    except TypeError:
+        n = 0
+    if n < 2:
+        return pd.Series(np.full(n, np.nan), index=idx)
     prices = pd.Series(close, dtype=float).to_numpy()
-    horizon = int(horizon_days)
     out = np.full(len(prices), np.nan)
     for i in range(len(prices)):
         window = prices[i:i + horizon + 1]

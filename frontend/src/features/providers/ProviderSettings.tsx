@@ -35,6 +35,9 @@ const PROFILE_DEFAULT_MODEL: Record<AIProfile, string> = {
   Report: 'gemini-3.7-flash',
 };
 
+/** Cap: the performance table never mounts more than one page of rows. */
+const MAX_PERF_ROWS = 100;
+
 export default function ProviderSettings() {
   const [provider, setProvider] = useState<ProviderValue>('gemini');
   const [model, setModel] = useState('gemini-3.7-flash');
@@ -139,15 +142,28 @@ export default function ProviderSettings() {
             autoComplete="off"
           />
           <div className="mt-3 flex gap-2">
-            <button className="term-btn" disabled={!apiKey || save.isPending} onClick={() => save.mutate()}>
+            <button className="term-btn" type="button" disabled={!apiKey || save.isPending} onClick={() => save.mutate()}>
               {save.isPending ? 'SAVING…' : 'SAVE KEY'}
             </button>
-            <button className="term-btn-ghost" disabled={test.isPending} onClick={() => test.mutate()}>
+            <button className="term-btn-ghost" type="button" disabled={test.isPending} onClick={() => test.mutate()}>
               {test.isPending ? 'TESTING…' : '⟳ HEALTH TEST'}
             </button>
           </div>
           {save.isSuccess && <p className="mt-2 text-xs text-term-green">Key stored (server confirms receipt only).</p>}
-          {save.isError && <p className="mt-2 text-xs text-term-red">Save failed — backend unreachable or rejected.</p>}
+          {save.isError && <p className="mt-2 text-xs text-term-red" role="alert">Save failed — backend unreachable or rejected.</p>}
+          {keyStatus.isLoading && (
+            <p className="mt-2 text-xs text-term-muted" role="status">loading key status…</p>
+          )}
+          {keyStatus.isError && (
+            <p className="mt-2 text-xs text-term-amber" role="status">
+              ⚠ key status unavailable ({keyStatus.error instanceof Error ? keyStatus.error.message : 'backend unreachable'}) — keys can still be saved.
+            </p>
+          )}
+          {!keyStatus.isLoading && !keyStatus.isError && (!keyStatus.data || keyStatus.data.length === 0) && (
+            <p className="mt-2 text-xs text-term-muted" role="status">
+              No provider keys configured yet.
+            </p>
+          )}
           {keyStatus.data && keyStatus.data.length > 0 && (
             <ul className="mt-2 space-y-1 text-xs" aria-label="Configured providers">
               {keyStatus.data.map((k) => (
@@ -199,12 +215,21 @@ export default function ProviderSettings() {
             />
             <button
               className="term-btn-ghost"
+              type="button"
               disabled={saveBudget.isPending}
               onClick={() => saveBudget.mutate()}
             >
               {saveBudget.isPending ? 'SAVING…' : 'SAVE BUDGET'}
             </button>
           </div>
+          {savedBudgets.isLoading && (
+            <p className="mt-1 text-xs text-term-muted" role="status">loading saved budgets…</p>
+          )}
+          {savedBudgets.isError && (
+            <p className="mt-1 text-xs text-term-amber" role="status">
+              ⚠ saved budgets unavailable ({savedBudgets.error instanceof Error ? savedBudgets.error.message : 'backend unreachable'}).
+            </p>
+          )}
           {saveBudget.isSuccess && <p className="mt-1 text-xs text-term-green">Budget saved.</p>}
           {savedBudgets.data && savedBudgets.data[provider] !== undefined && (
             <p className="mt-1 text-xs text-term-muted">
@@ -248,6 +273,7 @@ export default function ProviderSettings() {
           <p className="term-label">Historical provider performance · by exchange + horizon</p>
           <button
             className="term-btn-ghost text-xs"
+            type="button"
             disabled={perf.isFetching}
             onClick={() => perf.refetch()}
           >
@@ -274,6 +300,11 @@ export default function ProviderSettings() {
         )}
         {perf.data && perf.data.length > 0 && (
           <div className="mt-2 overflow-x-auto">
+            {perf.data.length > MAX_PERF_ROWS && (
+              <p className="mb-1 text-[11px] text-term-muted" role="status">
+                showing first {MAX_PERF_ROWS} of {perf.data.length} — refresh narrows to the latest window.
+              </p>
+            )}
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-left text-term-muted">
@@ -288,7 +319,7 @@ export default function ProviderSettings() {
                 </tr>
               </thead>
               <tbody>
-                {perf.data.map((row, i) => (
+                {perf.data.slice(0, MAX_PERF_ROWS).map((row, i) => (
                   <tr key={`${row.provider}-${row.model}-${row.exchange}-${row.horizon_days}-${i}`} className="border-t border-term-border">
                     <td className="py-1 pr-2">{row.provider}</td>
                     <td className="py-1 pr-2 text-term-muted">{row.model || '—'}</td>

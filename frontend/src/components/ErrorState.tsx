@@ -21,7 +21,7 @@ export default function ErrorState({
       <p className="text-sm font-bold text-term-red">✕ {title}</p>
       {detail && <p className="mt-1 text-xs text-term-muted">{detail}</p>}
       {onRetry && (
-        <button className="term-btn-ghost mt-3" onClick={onRetry}>
+        <button className="term-btn-ghost mt-3" type="button" onClick={onRetry}>
           Retry
         </button>
       )}

@@ -18,7 +18,7 @@ REDACTED = "[REDACTED]"
 # Keys that must never appear in plaintext in logs / audit payloads.
 _SENSITIVE_KEYS = ("api_key", "apikey", "secret", "token", "password", "authorization", "cookie", "set-cookie")
 _SENSITIVE_RE = re.compile(
-    r"(?i)(api[_-]?key|secret|token|password|authorization)\s*[:=]\s*['\"]?([^'\"\s,}]+)['\"]?"
+    r"(?i)(api[_-]?key|secret|token|password|authorization|cookie|set-cookie|private)\s*[:=]\s*['\"]?([^'\"\s,}]+)['\"]?"
 )
 
 
@@ -69,13 +69,26 @@ class EncryptedSecretStore:
 
     Swap the dict backend for Vault/KMS later; interface stays identical.
     Keys are namespaced per provider, e.g. ('gemini', 'api_key').
+    Bounded to ``MAX_ENTRIES`` keys (oldest-inserted evicted) so long-lived
+    processes cannot grow the in-memory vault without bound.
     """
+
+    MAX_ENTRIES = 64
 
     def __init__(self) -> None:
         self._vault: dict[tuple[str, str], str] = {}
 
     def put(self, provider: str, name: str, plaintext: str) -> None:
-        self._vault[(provider, name)] = encrypt_secret(plaintext)
+        key = (provider, name)
+        # Refresh insertion order on overwrite (deterministic eviction).
+        if key in self._vault:
+            self._vault.pop(key, None)
+        self._vault[key] = encrypt_secret(plaintext)
+        while len(self._vault) > self.MAX_ENTRIES:
+            try:
+                self._vault.pop(next(iter(self._vault)), None)
+            except Exception:
+                break
 
     def get(self, provider: str, name: str) -> str:
         try:
@@ -95,19 +108,35 @@ class EncryptedSecretStore:
 
 
 def redact_mapping(payload: dict) -> dict:
-    """Return a copy with sensitive values replaced by [REDACTED]."""
+    """Return a copy with sensitive values replaced by [REDACTED].
+
+    Keys matching the sensitive set (or containing one as a substring)
+    are redacted wholesale; string values elsewhere are additionally
+    passed through :func:`redact_string` so embedded ``key=value``
+    fragments cannot leak via free-text fields.
+    """
+    if not isinstance(payload, dict):
+        return {}
     clean: dict = {}
     for key, value in (payload or {}).items():
         if isinstance(value, dict):
             clean[key] = redact_mapping(value)
-        elif isinstance(value, list):
-            clean[key] = [redact_mapping(v) if isinstance(v, dict) else v for v in value]
+        elif isinstance(value, (list, tuple, set)):
+            clean[key] = [
+                redact_mapping(v) if isinstance(v, dict)
+                else (redact_string(v) if isinstance(v, str) else v)
+                for v in list(value)
+            ]
         elif key.lower() in _SENSITIVE_KEYS or any(s in key.lower() for s in _SENSITIVE_KEYS):
             clean[key] = REDACTED
+        elif isinstance(value, str):
+            clean[key] = redact_string(value)
         else:
             clean[key] = value
     return clean
 
 
 def redact_string(text: str) -> str:
+    if not isinstance(text, str):
+        return text  # type: ignore[return-value]
     return _SENSITIVE_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", text or "")

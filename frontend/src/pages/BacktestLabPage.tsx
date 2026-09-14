@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
@@ -22,6 +22,10 @@ import ErrorState, { StaleBanner } from '../components/ErrorState';
  * Backtest Lab: lightweight walk-forward performance + calibration only (v1).
  * Shows failures as well as successes; never a large backtesting suite.
  */
+/** Cap: the persisted-history table never mounts more than one page of runs. */
+const MAX_HISTORY_ROWS = 20;
+/** Cap: reliability tables never mount more than one page of bins. */
+const MAX_RELIABILITY_ROWS = 20;
 export default function BacktestLabPage() {
   const [searchParams] = useSearchParams();
   const [symbol, setSymbol] = useState(
@@ -52,7 +56,18 @@ export default function BacktestLabPage() {
     staleTime: 30_000,
     retry: false,
   });
-  const recent = getRecentBacktests();
+  // localStorage read memoized so every keystroke in the symbol field
+  // doesn't re-parse the recent list; refreshes after each run.
+  // NOTE: mutation results expose `submittedAt` (not `dataUpdatedAt`).
+  const recent = useMemo(
+    () => getRecentBacktests(),
+    [lab.submittedAt, lab.isSuccess],
+  );
+  const historyRows = useMemo(() => historyQ.data ?? [], [historyQ.data]);
+  const visibleHistory = useMemo(
+    () => historyRows.slice(0, MAX_HISTORY_ROWS),
+    [historyRows],
+  );
 
   function toggle(h: number) {
     setHorizons((prev) => (prev.includes(h) ? prev.filter((x) => x !== h) : [...prev, h].sort()));
@@ -122,11 +137,15 @@ export default function BacktestLabPage() {
               ))}
             </div>
           </div>
-          <button className="term-btn" disabled={lab.isPending} onClick={run}>
+          <button className="term-btn" type="button" disabled={lab.isPending} onClick={run}>
             {lab.isPending ? 'RUNNING…' : '▶ RUN BACKTEST'}
           </button>
         </div>
-        {formError && <p className="mt-2 text-xs text-term-red">{formError}</p>}
+        {formError && (
+          <p className="mt-2 text-xs text-term-red" role="alert">
+            {formError}
+          </p>
+        )}
         <p className="mt-2 text-[11px] text-term-muted">
           Walk-forward only, time-ordered splits, corporate-action adjusted prices. Brier score
           (0 = perfect, 0.25 = coin-flip) and ECE (lower = better calibrated).
@@ -234,13 +253,18 @@ export default function BacktestLabPage() {
               ⚠ run history unavailable — backend /api/backtest/{trimmedSymbol || '…'} unreachable.
             </p>
           )}
-          {!historyQ.isLoading && !historyQ.isError && (historyQ.data ?? []).length === 0 && (
+          {!historyQ.isLoading && !historyQ.isError && historyRows.length === 0 && (
             <p className="mt-1 text-xs text-term-muted">
               No persisted runs for {trimmedSymbol || 'this symbol'} yet — run a backtest above.
             </p>
           )}
-          {(historyQ.data ?? []).length > 0 && (
+          {historyRows.length > 0 && (
             <div className="mt-2 overflow-x-auto">
+              {historyRows.length > visibleHistory.length && (
+                <p className="mb-1 text-[11px] text-term-muted" role="status">
+                  showing first {visibleHistory.length} of {historyRows.length} runs.
+                </p>
+              )}
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-left text-term-muted">
@@ -253,15 +277,16 @@ export default function BacktestLabPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(historyQ.data ?? []).map((run) => {
-                    const keys = Object.keys(run.metrics);
+                  {visibleHistory.map((run, i) => {
+                    const keys = Object.keys(run.metrics ?? {});
                     const first = keys.length > 0 ? run.metrics[keys[0]] : undefined;
+                    const horizons = run.horizons ?? [];
                     return (
-                      <tr key={run.run_id} className="border-t border-term-border">
-                        <td className="py-1 pr-2 font-mono text-[11px]">{run.run_id.slice(0, 8)}</td>
+                      <tr key={run.run_id ?? `run-${i}`} className="border-t border-term-border">
+                        <td className="py-1 pr-2 font-mono text-[11px]">{String(run.run_id ?? '').slice(0, 8) || '—'}</td>
                         <td className="py-1 pr-2 text-term-muted">{run.as_of ?? '—'}</td>
                         <td className="py-1 pr-2">
-                          {run.horizons.length > 0 ? run.horizons.map((h) => `${h}d`).join(', ') : '—'}
+                          {horizons.length > 0 ? horizons.map((h) => `${h}d`).join(', ') : '—'}
                         </td>
                         <td className="py-1 pr-2">
                           {first?.brier === null || first?.brier === undefined
@@ -288,36 +313,46 @@ export default function BacktestLabPage() {
 }
 
 function LabResults({ r }: { r: Backtest }) {
-  const stale = r.provenance.fallback_used || r.provenance.delay_minutes > 30;
-  const verdicts: { ok: boolean; text: string }[] = [];
-  if (r.brier === null || r.brier === undefined) {
-    verdicts.push({ ok: false, text: 'Brier score unavailable — too few resolved windows.' });
-  } else if (r.brier <= 0.25) {
-    verdicts.push({ ok: true, text: `Brier ${r.brier.toFixed(4)} beats the coin-flip baseline (0.25).` });
-  } else {
-    verdicts.push({ ok: false, text: `Brier ${r.brier.toFixed(4)} is worse than coin-flip (0.25) — model adds no skill here.` });
-  }
-  if (r.ece === null || r.ece === undefined) {
-    verdicts.push({ ok: false, text: 'ECE unavailable.' });
-  } else if (r.ece <= 0.05) {
-    verdicts.push({ ok: true, text: `ECE ${r.ece.toFixed(4)} — well calibrated.` });
-  } else if (r.ece <= 0.1) {
-    verdicts.push({ ok: true, text: `ECE ${r.ece.toFixed(4)} — roughly calibrated.` });
-  } else {
-    verdicts.push({ ok: false, text: `ECE ${r.ece.toFixed(4)} — poorly calibrated, treat probabilities with skepticism.` });
-  }
-  const emptyBins = r.reliability.filter(
-    (b) => !(typeof b.mean_predicted === 'number' && Number.isFinite(b.mean_predicted)),
-  ).length;
-  if (emptyBins > 0) {
-    verdicts.push({ ok: false, text: `${emptyBins} calibration bin(s) empty — thin history at those probability levels.` });
-  }
-  for (const f of r.failures) verdicts.push({ ok: false, text: f });
+  const stale =
+    r.provenance?.fallback_used === true || (r.provenance?.delay_minutes ?? 0) > 30;
+  const reliability = useMemo(() => r.reliability ?? [], [r]);
+  const failures = useMemo(() => r.failures ?? [], [r]);
+  const visibleBins = useMemo(
+    () => reliability.slice(0, MAX_RELIABILITY_ROWS),
+    [reliability],
+  );
+  const verdicts: { ok: boolean; text: string }[] = useMemo(() => {
+    const out: { ok: boolean; text: string }[] = [];
+    if (r.brier === null || r.brier === undefined) {
+      out.push({ ok: false, text: 'Brier score unavailable — too few resolved windows.' });
+    } else if (r.brier <= 0.25) {
+      out.push({ ok: true, text: `Brier ${r.brier.toFixed(4)} beats the coin-flip baseline (0.25).` });
+    } else {
+      out.push({ ok: false, text: `Brier ${r.brier.toFixed(4)} is worse than coin-flip (0.25) — model adds no skill here.` });
+    }
+    if (r.ece === null || r.ece === undefined) {
+      out.push({ ok: false, text: 'ECE unavailable.' });
+    } else if (r.ece <= 0.05) {
+      out.push({ ok: true, text: `ECE ${r.ece.toFixed(4)} — well calibrated.` });
+    } else if (r.ece <= 0.1) {
+      out.push({ ok: true, text: `ECE ${r.ece.toFixed(4)} — roughly calibrated.` });
+    } else {
+      out.push({ ok: false, text: `ECE ${r.ece.toFixed(4)} — poorly calibrated, treat probabilities with skepticism.` });
+    }
+    const emptyBins = reliability.filter(
+      (b) => !(typeof b?.mean_predicted === 'number' && Number.isFinite(b.mean_predicted)),
+    ).length;
+    if (emptyBins > 0) {
+      out.push({ ok: false, text: `${emptyBins} calibration bin(s) empty — thin history at those probability levels.` });
+    }
+    for (const f of failures) out.push({ ok: false, text: f });
+    return out;
+  }, [r, reliability, failures]);
 
   return (
     <div className="space-y-4">
       {stale && (
-        <StaleBanner detail={`backtest via ${r.provenance.source}, delay ${r.provenance.delay_minutes}m`} />
+        <StaleBanner detail={`backtest via ${r.provenance?.source ?? 'unknown'}, delay ${r.provenance?.delay_minutes ?? '—'}m`} />
       )}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="term-panel p-4">
@@ -347,7 +382,7 @@ function LabResults({ r }: { r: Backtest }) {
             <span className="ml-1 text-xs font-normal text-term-muted">windows</span>
           </p>
           <p className="mt-1 text-xs text-term-muted">
-            horizons: {r.horizons.length > 0 ? r.horizons.map((h) => `${h}d`).join(', ') : '—'}
+            horizons: {(r.horizons ?? []).length > 0 ? (r.horizons ?? []).map((h) => `${h}d`).join(', ') : '—'}
           </p>
           <div className="mt-1">
             <ProvenanceBadge p={r.provenance} />
@@ -356,8 +391,13 @@ function LabResults({ r }: { r: Backtest }) {
       </section>
 
       <section className="term-panel p-4">
-        <CalibrationChart rows={r.reliability} title="Reliability diagram" />
+        <CalibrationChart rows={reliability} title="Reliability diagram" />
         <div className="mt-2 overflow-x-auto">
+          {reliability.length > visibleBins.length && (
+            <p className="mb-1 text-[11px] text-term-muted" role="status">
+              showing first {visibleBins.length} of {reliability.length} bins.
+            </p>
+          )}
           <table className="w-full text-xs">
             <thead>
               <tr className="text-left text-term-muted">
@@ -368,26 +408,32 @@ function LabResults({ r }: { r: Backtest }) {
               </tr>
             </thead>
             <tbody>
-              {r.reliability.length === 0 && (
+              {reliability.length === 0 && (
                 <tr className="border-t border-term-border">
                   <td colSpan={4} className="py-2 text-term-muted">
                     No reliability rows returned.
                   </td>
                 </tr>
               )}
-              {r.reliability.map((b, i) => (
-                <tr key={i} className="border-t border-term-border">
+              {visibleBins.map((b, i) => (
+                <tr key={`${String(b?.bin_low ?? '?')}-${String(b?.bin_high ?? '?')}-${i}`} className="border-t border-term-border">
                   <td className="py-1 pr-2">
-                    {b.bin_low.toFixed(2)}–{b.bin_high.toFixed(2)}
+                    {typeof b?.bin_low === 'number' && Number.isFinite(b.bin_low)
+                      ? b.bin_low.toFixed(2)
+                      : '—'}
+                    –
+                    {typeof b?.bin_high === 'number' && Number.isFinite(b.bin_high)
+                      ? b.bin_high.toFixed(2)
+                      : '—'}
                   </td>
-                  <td className="py-1 pr-2">{b.count}</td>
+                  <td className="py-1 pr-2">{b?.count ?? '—'}</td>
                   <td className="py-1 pr-2">
-                    {typeof b.mean_predicted === 'number' && Number.isFinite(b.mean_predicted)
+                    {typeof b?.mean_predicted === 'number' && Number.isFinite(b.mean_predicted)
                       ? b.mean_predicted.toFixed(3)
                       : '—'}
                   </td>
                   <td className="py-1 pr-2">
-                    {typeof b.fraction_positive === 'number' && Number.isFinite(b.fraction_positive)
+                    {typeof b?.fraction_positive === 'number' && Number.isFinite(b.fraction_positive)
                       ? b.fraction_positive.toFixed(3)
                       : '—'}
                   </td>

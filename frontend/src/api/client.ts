@@ -145,6 +145,45 @@ export const api: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
+/* ------------------- frontend data-layer hardening ------------------- */
+/** Canonical symbol normalization: trim, strip inner whitespace, UPPER. */
+export function normalizeSymbolParam(v: unknown): string {
+  return String(v ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+}
+
+function httpStatus(err: unknown): number | null {
+  const e = err as { response?: { status?: unknown }; status?: unknown } | null;
+  const s = e?.response?.status ?? e?.status;
+  return typeof s === 'number' ? s : null;
+}
+
+/** 404/501 = endpoint not yet deployed → legacy fallback. Others rethrow. */
+function isEndpointMissingError(err: unknown): boolean {
+  const s = httpStatus(err);
+  return s === 404 || s === 501;
+}
+
+/**
+ * Coalesce identical in-flight requests: concurrent callers with the same
+ * key share one network promise (deleted on settle, so sequential calls
+ * still refetch). Complements TanStack query-key sharing for call sites
+ * that use divergent keys for the same resource.
+ */
+const inflight = new Map<string, Promise<never>>();
+
+export function coalesceInflight<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const hit = inflight.get(key) as Promise<T> | undefined;
+  if (hit) return hit;
+  const p = fn().finally(() => {
+    if (inflight.get(key) === (p as Promise<never>)) inflight.delete(key);
+  }) as Promise<T>;
+  inflight.set(key, p as Promise<never>);
+  return p;
+}
+
 /** Normalize backend quote shapes → canonical Quote (handles `provenance` or `meta.provenance`). */
 function normalizeQuote(raw: unknown): Quote {
   const r = raw as Record<string, unknown>;
@@ -234,12 +273,17 @@ export function normalizeHealthProviders(raw: unknown): Record<string, unknown>[
 }
 
 export async function getHealth(): Promise<Health> {
-  const { data } = await api.get('/health');
-  const raw = (data ?? {}) as Record<string, unknown>;
-  if (Array.isArray(raw.providers)) {
-    raw.providers = normalizeHealthProviders(raw.providers);
-  }
-  return HealthSchema.passthrough().parse(data);
+  return coalesceInflight('health', async () => {
+    const { data } = await api.get('/health');
+    const raw = (data ?? {}) as Record<string, unknown>;
+    if (Array.isArray(raw.providers)) {
+      raw.providers = normalizeHealthProviders(raw.providers);
+    }
+    // Tolerant: providers rows are normalized above; a missing/invalid
+    // status still parses via passthrough defaults where possible.
+    // Transport errors rethrow so ErrorState shows.
+    return HealthSchema.passthrough().parse(data);
+  });
 }
 
 /** Tolerant instrument normalization: accepts backend InstrumentOut (no `symbol`) as well as legacy shapes. */
@@ -273,25 +317,43 @@ export async function searchInstruments(
   query: string,
   market?: string | null,
 ): Promise<Instrument[]> {
-  const mic = (market ?? '').trim().toUpperCase();
+  const q = String(query ?? '').trim();
+  // Blank query → [] without network (avoids fan-out on empty input).
+  if (!q) return [];
+  const mic = String(market ?? '').trim().toUpperCase();
   const params: Record<string, string> =
-    mic && mic !== 'ALL' ? { q: query, market: mic } : { q: query };
-  const { data } = await api.get('/api/instruments/search', { params });
-  const list = Array.isArray(data) ? data : (data?.results ?? data?.items ?? []);
-  return (list as unknown[]).map(normalizeInstrument);
+    mic && mic !== 'ALL' ? { q, market: mic } : { q };
+  return coalesceInflight(`search:${q.toLowerCase()}:${mic || 'ALL'}`, async () => {
+    const { data } = await api.get('/api/instruments/search', { params });
+    const list = Array.isArray(data) ? data : (data?.results ?? data?.items ?? []);
+    // Tolerant: skip single bad rows instead of failing the whole search
+    // on backend shape drift.
+    const out: Instrument[] = [];
+    for (const row of list as unknown[]) {
+      try {
+        out.push(normalizeInstrument(row));
+      } catch {
+        continue;
+      }
+    }
+    return out;
+  });
 }
 
 export async function getQuote(
   symbol: string,
   market?: string | null,
 ): Promise<Quote> {
-  const mic = (market ?? '').trim().toUpperCase();
-  const params: Record<string, string> = { symbol };
+  const sym = normalizeSymbolParam(symbol);
+  const mic = String(market ?? '').trim().toUpperCase();
+  const params: Record<string, string> = { symbol: sym };
   if (mic && mic !== 'ALL') params.market = mic;
   // Conversion authority stays with /api/fx/* — no target_ccy is sent
   // (the backend ignores it; sending it only pollutes logs).
-  const { data } = await api.get('/api/market_data/quote', { params });
-  return normalizeQuote(data);
+  return coalesceInflight(`quote:${sym}:${mic || 'ALL'}`, async () => {
+    const { data } = await api.get('/api/market_data/quote', { params });
+    return normalizeQuote(data);
+  });
 }
 
 /** Freshness derivation used by FreshnessBadge. */
@@ -480,22 +542,34 @@ function normalizeForecast(raw: unknown, symbol: string, horizon: number): Forec
 
 /** GET /api/forecast/{symbol}?horizon=21 (path-style, backend contract).
  *  Falls back to legacy query-style /api/forecast?symbol=&horizon= so older
- *  backends keep working. Same signature, same Forecast return. */
+ *  backends keep working. Same signature, same Forecast return.
+ *  Only 404/501 trigger the legacy fallback; other errors rethrow so
+ *  ErrorState shows. Own timeout 60s (ensemble + cold serverless). */
+export const FORECAST_TIMEOUT_MS = 60000;
+
 export async function getForecast(symbol: string, horizon = 21): Promise<Forecast> {
-  const sym = String(symbol ?? '').trim();
-  try {
-    const { data } = await api.get(`/api/forecast/${encodeURIComponent(sym)}`, {
-      params: { horizon },
-    });
-    return normalizeForecast(data, sym, horizon);
-  } catch (pathErr) {
+  const sym = normalizeSymbolParam(symbol);
+  const h = horizon;
+  return coalesceInflight(`forecast:${sym}:${h}`, async () => {
     try {
-      const { data } = await api.get('/api/forecast', { params: { symbol: sym, horizon } });
-      return normalizeForecast(data, sym, horizon);
-    } catch {
-      throw pathErr;
+      const { data } = await api.get(`/api/forecast/${encodeURIComponent(sym)}`, {
+        params: { horizon: h },
+        timeout: FORECAST_TIMEOUT_MS,
+      });
+      return normalizeForecast(data, sym, h);
+    } catch (pathErr) {
+      if (!isEndpointMissingError(pathErr)) throw pathErr;
+      try {
+        const { data } = await api.get('/api/forecast', {
+          params: { symbol: sym, horizon: h },
+          timeout: FORECAST_TIMEOUT_MS,
+        });
+        return normalizeForecast(data, sym, h);
+      } catch {
+        throw pathErr;
+      }
     }
-  }
+  });
 }
 
 /* ------------------------------ analytics -------------------------- */
@@ -537,20 +611,32 @@ function normalizeAnalytics(raw: unknown, symbol: string): Analytics {
 
 /** GET /api/analytics/{symbol} (path-style, backend contract).
  *  Falls back to legacy query-style /api/analytics?symbol= so older
- *  backends keep working. Same signature, same Analytics return. */
+ *  backends keep working. Same signature, same Analytics return.
+ *  Only 404/501 trigger the legacy fallback; other errors rethrow.
+ *  Own timeout 60s (snapshot compute + cold serverless). */
+export const ANALYTICS_TIMEOUT_MS = 60000;
+
 export async function getAnalytics(symbol: string): Promise<Analytics> {
-  const sym = String(symbol ?? '').trim();
-  try {
-    const { data } = await api.get(`/api/analytics/${encodeURIComponent(sym)}`);
-    return normalizeAnalytics(data, sym);
-  } catch (pathErr) {
+  const sym = normalizeSymbolParam(symbol);
+  return coalesceInflight(`analytics:${sym}`, async () => {
     try {
-      const { data } = await api.get('/api/analytics', { params: { symbol: sym } });
+      const { data } = await api.get(`/api/analytics/${encodeURIComponent(sym)}`, {
+        timeout: ANALYTICS_TIMEOUT_MS,
+      });
       return normalizeAnalytics(data, sym);
-    } catch {
-      throw pathErr;
+    } catch (pathErr) {
+      if (!isEndpointMissingError(pathErr)) throw pathErr;
+      try {
+        const { data } = await api.get('/api/analytics', {
+          params: { symbol: sym },
+          timeout: ANALYTICS_TIMEOUT_MS,
+        });
+        return normalizeAnalytics(data, sym);
+      } catch {
+        throw pathErr;
+      }
     }
-  }
+  });
 }
 
 /* ------------------------------- backtest -------------------------- */
@@ -611,26 +697,32 @@ export const BACKTEST_TIMEOUT_MS = 60000;
 export const RANK_TIMEOUT_MS = 60000;
 
 export async function runBacktest(symbol: string, horizons: number[]): Promise<Backtest> {
-  const sym = String(symbol ?? '').trim();
-  try {
-    const { data } = await api.post(
-      '/api/backtest/run',
-      { symbol: sym, horizons },
-      { timeout: BACKTEST_TIMEOUT_MS },
-    );
-    return normalizeBacktest(flattenBacktestRun(data, sym, horizons), sym, horizons);
-  } catch (runErr) {
+  const sym = normalizeSymbolParam(symbol);
+  const h = Array.isArray(horizons) ? [...horizons] : horizons;
+  return coalesceInflight(`backtest:${sym}:${JSON.stringify(h)}`, async () => {
     try {
       const { data } = await api.post(
-        '/api/backtest',
-        { symbol: sym, horizons },
+        '/api/backtest/run',
+        { symbol: sym, horizons: h },
         { timeout: BACKTEST_TIMEOUT_MS },
       );
-      return normalizeBacktest(flattenBacktestRun(data, sym, horizons), sym, horizons);
-    } catch {
-      throw runErr;
+      return normalizeBacktest(flattenBacktestRun(data, sym, h), sym, h);
+    } catch (runErr) {
+      // Only 404/501 (endpoint not deployed) trigger the legacy fallback;
+      // other errors rethrow so ErrorState shows instead of a stale fallback.
+      if (!isEndpointMissingError(runErr)) throw runErr;
+      try {
+        const { data } = await api.post(
+          '/api/backtest',
+          { symbol: sym, horizons: h },
+          { timeout: BACKTEST_TIMEOUT_MS },
+        );
+        return normalizeBacktest(flattenBacktestRun(data, sym, h), sym, h);
+      } catch {
+        throw runErr;
+      }
     }
-  }
+  });
 }
 
 /** Map the /run per-horizon payload → flat Backtest shape (legacy passthrough). */
@@ -708,12 +800,15 @@ function normalizeAIOpinion(raw: unknown): AIOpinion {
 export const AI_TIMEOUT_MS = 60000;
 
 export async function postAIInsight(symbol: string, profile: AIProfile): Promise<AIOpinion> {
-  const { data } = await api.post(
-    '/api/ai/insight',
-    { symbol, profile },
-    { timeout: AI_TIMEOUT_MS },
-  );
-  return normalizeAIOpinion(data);
+  const sym = normalizeSymbolParam(symbol);
+  return coalesceInflight(`ai-insight:${sym}:${profile}`, async () => {
+    const { data } = await api.post(
+      '/api/ai/insight',
+      { symbol: sym, profile },
+      { timeout: AI_TIMEOUT_MS },
+    );
+    return normalizeAIOpinion(data);
+  });
 }
 
 /** Human message for AI request failures (timeout-aware). */
@@ -770,19 +865,23 @@ function normalizeAIPerformance(raw: unknown): AIPerformanceRow[] {
 }
 
 /** GET /api/ai/providers/performance — historical provider/model scores by exchange+horizon.
- *  Falls back to legacy GET /api/ai/performance. */
+ *  Falls back to legacy GET /api/ai/performance on 404/501 only; other
+ *  errors rethrow so ErrorState shows. */
 export async function getAIPerformance(): Promise<AIPerformanceRow[]> {
-  try {
-    const { data } = await api.get('/api/ai/providers/performance');
-    return normalizeAIPerformance(data);
-  } catch (pathErr) {
+  return coalesceInflight('ai-performance', async () => {
     try {
-      const { data } = await api.get('/api/ai/performance');
+      const { data } = await api.get('/api/ai/providers/performance');
       return normalizeAIPerformance(data);
-    } catch {
-      throw pathErr;
+    } catch (pathErr) {
+      if (!isEndpointMissingError(pathErr)) throw pathErr;
+      try {
+        const { data } = await api.get('/api/ai/performance');
+        return normalizeAIPerformance(data);
+      } catch {
+        throw pathErr;
+      }
     }
-  }
+  });
 }
 
 /* ---------------------------- provider keys ------------------------ */
@@ -796,27 +895,31 @@ export type ProviderKeyStatus = {
 
 /** GET /api/providers/keys/status — config flags only, never key material. */
 export async function getProviderKeysStatus(): Promise<ProviderKeyStatus[]> {
-  const { data } = await api.get('/api/providers/keys/status');
-  const list = (data as Record<string, unknown>)?.providers;
-  if (!Array.isArray(list)) return [];
-  return (list as Record<string, unknown>[]).map((p) => ({
-    provider: String(p.provider ?? ''),
-    model: typeof p.model === 'string' ? p.model : '',
-    configured: p.configured === true,
-    updated_at: typeof p.updated_at === 'string' ? p.updated_at : null,
-  }));
+  return coalesceInflight('provider-keys-status', async () => {
+    const { data } = await api.get('/api/providers/keys/status');
+    const list = (data as Record<string, unknown>)?.providers;
+    if (!Array.isArray(list)) return [];
+    return (list as Record<string, unknown>[]).map((p) => ({
+      provider: String(p.provider ?? ''),
+      model: typeof p.model === 'string' ? p.model : '',
+      configured: p.configured === true,
+      updated_at: typeof p.updated_at === 'string' ? p.updated_at : null,
+    }));
+  });
 }
 
 /** GET /api/providers/budget — saved monthly caps per provider. */
 export async function getProviderBudgets(): Promise<Record<string, number>> {
-  const { data } = await api.get('/api/providers/budget');
-  const budgets = (data as Record<string, unknown>)?.budgets;
-  if (!budgets || typeof budgets !== 'object') return {};
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(budgets as Record<string, unknown>)) {
-    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
-  }
-  return out;
+  return coalesceInflight('provider-budgets', async () => {
+    const { data } = await api.get('/api/providers/budget');
+    const budgets = (data as Record<string, unknown>)?.budgets;
+    if (!budgets || typeof budgets !== 'object') return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(budgets as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  });
 }
 
 /* ---------------------------- provider health ---------------------- */
@@ -872,31 +975,38 @@ export function normalizeAIHealthTest(raw: unknown, provider: string): ProviderH
  * /api/ai/providers/health/test — answers whether THIS provider has a
  * usable key. Fallback: the market-data probe (quote plumbing only; can
  * never validate an AI key). Never sends or returns API keys.
+ * Only 404/501 or an unrecognizable primary shape trigger the fallback;
+ * other primary errors rethrow so ErrorState shows (a market-data probe
+ * can never validate an AI key, so masking a 500 with "probe recorded"
+ * would be dishonest).
  */
 export async function testProviderHealth(
   provider: string,
 ): Promise<ProviderHealthTest> {
+  const prov = String(provider ?? '').trim();
   try {
-    const { data } = await api.post('/api/ai/providers/health/test', { provider });
-    const parsed = normalizeAIHealthTest(data, provider);
+    const { data } = await api.post('/api/ai/providers/health/test', { provider: prov });
+    const parsed = normalizeAIHealthTest(data, prov);
     if (parsed) return parsed;
-  } catch {
-    /* fall through to the market-data probe below */
+    // Unrecognizable shape = version mismatch → fall through to probe below.
+  } catch (err) {
+    if (!isEndpointMissingError(err)) throw err;
+    /* 404/501 → fall through to the market-data probe below */
   }
   const { data } = await api.post(
     '/api/providers/health/test',
-    { provider },
-    { params: { provider } },
+    { provider: prov },
+    { params: { provider: prov } },
   );
   const d = (data ?? {}) as Record<string, unknown>;
   if (typeof d.ok === 'boolean')
-    return { ok: d.ok as boolean, latency_ms: d.latency_ms as number | undefined, message: d.message as string | undefined, provider };
+    return { ok: d.ok as boolean, latency_ms: d.latency_ms as number | undefined, message: d.message as string | undefined, provider: prov };
   const total = Number(d.total_calls ?? 0);
   return {
     ok: (d.circuit as string | undefined) !== 'open',
     latency_ms: d.latency_p50_ms !== undefined ? Number(d.latency_p50_ms) : undefined,
     message: total > 0 ? `probe recorded (${total} total calls)` : 'probe recorded',
-    provider: (d.provider as string | undefined) ?? provider,
+    provider: (d.provider as string | undefined) ?? prov,
   };
 }
 
@@ -1058,8 +1168,10 @@ function normalizeFXRate(raw: unknown, base: string, quote: string): FXRate {
 export async function getFXRate(base: string, quote: string): Promise<FXRate> {
   const b = ccy(base, 'EUR');
   const q = ccy(quote, 'USD');
-  const { data } = await api.get('/api/fx/rate', { params: { base: b, quote: q } });
-  return normalizeFXRate(data, b, q);
+  return coalesceInflight(`fx-rate:${b}:${q}`, async () => {
+    const { data } = await api.get('/api/fx/rate', { params: { base: b, quote: q } });
+    return normalizeFXRate(data, b, q);
+  });
 }
 
 function normalizeConvert(
@@ -1096,12 +1208,15 @@ export async function convertFX(
 ): Promise<FXConvertResult> {
   const f = ccy(from, 'EUR');
   const t = ccy(to, 'USD');
-  const { data } = await api.post('/api/fx/convert', {
-    amount,
-    from: f,
-    to: t,
+  const amt = Number(amount);
+  return coalesceInflight(`fx-convert:${amt}:${f}:${t}`, async () => {
+    const { data } = await api.post('/api/fx/convert', {
+      amount,
+      from: f,
+      to: t,
+    });
+    return normalizeConvert(data, amount, f, t);
   });
-  return normalizeConvert(data, amount, f, t);
 }
 
 function normalizeRankedRow(raw: unknown, targetCcy: string): RankedRow {
@@ -1167,9 +1282,16 @@ export function normalizeRank(
           : Array.isArray(r.rows)
             ? r.rows
             : [];
-  const ranking = (listRaw as unknown[]).map((row) =>
-    normalizeRankedRow(row, targetCcy),
-  );
+  // Tolerant: skip single bad rows instead of failing the whole rank
+  // on backend shape drift (one malformed row must not void the rest).
+  const ranking: RankedRow[] = [];
+  for (const row of listRaw as unknown[]) {
+    try {
+      ranking.push(normalizeRankedRow(row, targetCcy));
+    } catch {
+      continue;
+    }
+  }
   const fxRaw =
     (r.fx_provenance as unknown) ??
     (r.fxProvenance as unknown) ??
@@ -1201,22 +1323,34 @@ export function normalizeRank(
  * `FX_PROVENANCE_MISSING` the error is rethrown untouched so the
  * Watchlist can render "Cross-market comparison unavailable — FX
  * provenance missing" instead of ranked numbers.
+ * Symbols are normalized case-insensitively (trim, strip spaces, UPPER)
+ * and deduped preserving first-seen order, so `aapl`/`AAPL` share one
+ * request instead of fanning out twice. Gate errors rethrow untouched.
  */
 export async function rankCrossMarket(
   symbols: string[],
   targetCcy: string,
 ): Promise<RankResponse> {
   const target = ccy(targetCcy, 'USD');
-  const clean = symbols.map((s) => String(s ?? '').trim()).filter(Boolean);
-  const { data } = await api.post(
-    '/api/fx/rank',
-    {
-      symbols: clean,
-      target_ccy: target,
-    },
-    { timeout: RANK_TIMEOUT_MS },
-  );
-  return normalizeRank(data, clean, target);
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const s of symbols ?? []) {
+    const norm = normalizeSymbolParam(s);
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    clean.push(norm);
+  }
+  return coalesceInflight(`fx-rank:${clean.join(',')}:${target}`, async () => {
+    const { data } = await api.post(
+      '/api/fx/rank',
+      {
+        symbols: clean,
+        target_ccy: target,
+      },
+      { timeout: RANK_TIMEOUT_MS },
+    );
+    return normalizeRank(data, clean, target);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1249,39 +1383,41 @@ function numOrUndef(v: unknown): number | undefined {
  * Callers treat throw → stale fallback (cached /health values).
  */
 export async function getProvidersHealth(): Promise<ProviderHealthSummary[]> {
-  const { data } = await api.get('/api/providers/health');
-  const raw = (data ?? {}) as Record<string, unknown>;
-  const list = Array.isArray(data)
-    ? (data as unknown[])
-    : Array.isArray(raw.providers)
-      ? (raw.providers as unknown[])
-      : [];
-  return (list as Record<string, unknown>[]).map((row) => {
-    const name = String(
-      row.provider ?? row.name ?? row.id ?? 'unknown',
-    );
-    const circuit =
-      typeof row.circuit === 'string' ? (row.circuit as string) : undefined;
-    const latencyP50 = numOrUndef(row.latency_p50_ms ?? row.latency_ms);
-    const status =
-      typeof row.status === 'string'
-        ? (row.status as string)
-        : circuit === 'open'
-          ? 'open'
-          : 'ok';
-    return {
-      name,
-      status,
-      latency_ms: latencyP50 ?? numOrUndef(row.latency_p95_ms),
-      latency_p50_ms: numOrUndef(row.latency_p50_ms),
-      latency_p95_ms: numOrUndef(row.latency_p95_ms),
-      error_rate_1h: numOrUndef(row.error_rate_1h),
-      calls_1h: numOrUndef(row.calls_1h),
-      total_calls: numOrUndef(row.total_calls),
-      circuit,
-      last_check:
-        typeof row.last_check === 'string' ? (row.last_check as string) : undefined,
-    };
+  return coalesceInflight('providers-health', async () => {
+    const { data } = await api.get('/api/providers/health');
+    const raw = (data ?? {}) as Record<string, unknown>;
+    const list = Array.isArray(data)
+      ? (data as unknown[])
+      : Array.isArray(raw.providers)
+        ? (raw.providers as unknown[])
+        : [];
+    return (list as Record<string, unknown>[]).map((row) => {
+      const name = String(
+        row.provider ?? row.name ?? row.id ?? 'unknown',
+      );
+      const circuit =
+        typeof row.circuit === 'string' ? (row.circuit as string) : undefined;
+      const latencyP50 = numOrUndef(row.latency_p50_ms ?? row.latency_ms);
+      const status =
+        typeof row.status === 'string'
+          ? (row.status as string)
+          : circuit === 'open'
+            ? 'open'
+            : 'ok';
+      return {
+        name,
+        status,
+        latency_ms: latencyP50 ?? numOrUndef(row.latency_p95_ms),
+        latency_p50_ms: numOrUndef(row.latency_p50_ms),
+        latency_p95_ms: numOrUndef(row.latency_p95_ms),
+        error_rate_1h: numOrUndef(row.error_rate_1h),
+        calls_1h: numOrUndef(row.calls_1h),
+        total_calls: numOrUndef(row.total_calls),
+        circuit,
+        last_check:
+          typeof row.last_check === 'string' ? (row.last_check as string) : undefined,
+      };
+    });
   });
 }
 
@@ -1312,7 +1448,8 @@ export type AuditForecastsResult = {
  */
 export async function getAuditForecasts(limit = 5): Promise<AuditForecastsResult> {
   const n = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 5;
-  const { data } = await api.get('/api/audit/forecasts', { params: { limit: n } });
+  return coalesceInflight(`audit-forecasts:${n}`, async () => {
+    const { data } = await api.get('/api/audit/forecasts', { params: { limit: n } });
   const raw = (data ?? {}) as Record<string, unknown>;
   const listRaw = Array.isArray(data)
     ? (data as unknown[])
@@ -1354,6 +1491,7 @@ export async function getAuditForecasts(limit = 5): Promise<AuditForecastsResult
         ? (raw.disclosure as string)
         : 'Not investment advice. For informational purposes only.',
   };
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1460,7 +1598,17 @@ function normalizeScreener(raw: unknown, horizon: number): ScreenerResponse {
       : Array.isArray(r.items)
         ? r.items
         : [];
-  const results = (listRaw as unknown[]).map((row) => normalizeScreenerRow(row, horizon));
+  // Tolerant: skip single bad rows instead of failing the whole scan
+  // on backend shape drift (one row missing direction_probability must
+  // not void the other N-1 rows).
+  const results: ScreenerRow[] = [];
+  for (const row of listRaw as unknown[]) {
+    try {
+      results.push(normalizeScreenerRow(row, horizon));
+    } catch {
+      continue;
+    }
+  }
   const skippedRaw = Array.isArray(r.skipped) ? (r.skipped as unknown[]) : [];
   const skipped = skippedRaw.flatMap((s) => {
     const parsed = ScreenerSkippedSchema.safeParse(s);
@@ -1499,18 +1647,22 @@ export const SCREENER_TIMEOUT_MS = 60000;
 
 export async function getScreener(params: ScreenerParams = {}): Promise<ScreenerResponse> {
   const horizon = params.horizon ?? 21;
-  const mic = (params.market ?? '').trim().toUpperCase();
+  const mic = String(params.market ?? '').trim().toUpperCase();
+  const minDir = params.minDirection ?? 0.5;
+  const lim = params.limit ?? 20;
   const query: Record<string, string | number> = {
     horizon,
-    min_direction: params.minDirection ?? 0.5,
-    limit: params.limit ?? 20,
+    min_direction: minDir,
+    limit: lim,
   };
   if (mic && mic !== 'ALL') query.market = mic;
-  const { data } = await api.get('/api/screener', {
-    params: query,
-    timeout: SCREENER_TIMEOUT_MS,
+  return coalesceInflight(`screener:${mic || 'ALL'}:${horizon}:${minDir}:${lim}`, async () => {
+    const { data } = await api.get('/api/screener', {
+      params: query,
+      timeout: SCREENER_TIMEOUT_MS,
+    });
+    return normalizeScreener(data, horizon);
   });
-  return normalizeScreener(data, horizon);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1643,13 +1795,15 @@ export async function getBars(
   timeframe = '1d',
   limit = 90,
 ): Promise<BarsData> {
-  const sym = String(symbol ?? '').trim();
+  const sym = normalizeSymbolParam(symbol);
   const tf = String(timeframe ?? '1d').trim() || '1d';
   const n = Number.isFinite(Number(limit))
     ? Math.min(250, Math.max(1, Math.floor(Number(limit))))
     : 90;
-  const { data } = await api.get('/api/market_data/bars', {
-    params: { symbol: sym, timeframe: tf, limit: n },
+  return coalesceInflight(`bars:${sym}:${tf}:${n}`, async () => {
+    const { data } = await api.get('/api/market_data/bars', {
+      params: { symbol: sym, timeframe: tf, limit: n },
+    });
+    return normalizeBarsToCandles(data, sym, tf);
   });
-  return normalizeBarsToCandles(data, sym, tf);
 }

@@ -120,7 +120,21 @@ def _build_packet(symbol: str) -> EvidencePacket:
             {"quote_unavailable": True, "limitations": ["market data unavailable; AI opinion is low-confidence stub-grade"]},
             {"source": "unknown", "quality_grade": "F", "delay_minutes": 15, "fallback_used": True},
         )
+    try:
+        return _build_packet_from_quote(clean, quote)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("ai packet build failed for %s: %s", clean, redact_mapping({"error": str(exc)}))
+        raise HTTPException(status_code=502, detail=f"evidence packet failed: {exc}") from exc
+
+
+def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
+    if not isinstance(quote, dict):
+        raise ValueError("quote unavailable")
     provenance = quote.get("provenance") or {}
+    if not isinstance(provenance, dict):
+        provenance = {}
     price = quote.get("price")
     change_pct = quote.get("change_pct")
     deterministic: dict[str, Any] = {
@@ -170,7 +184,14 @@ def _build_packet(symbol: str) -> EvidencePacket:
 async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router)) -> dict[str, Any]:
     profile = _check_profile(body.profile)
     packet = _build_packet(body.symbol)
-    opinion, cached = await ai.get_insight(packet, profile=profile)
+    try:
+        opinion, cached = await ai.get_insight(packet, profile=profile)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai insight failed: {exc}") from exc
     logger.info("ai insight %s", redact_mapping({"symbol": packet.symbol, "profile": profile, "cached": cached}))
     return {
         "symbol": packet.symbol,
@@ -192,22 +213,44 @@ async def post_forecast_opinion(
 ) -> dict[str, Any]:
     profile = _check_profile(body.profile)
     horizon = _check_horizon(body.horizon)
-    if body.quant_prob is not None and not 0.0 <= float(body.quant_prob) <= 1.0:
+    try:
+        quant_check = float(body.quant_prob) if body.quant_prob is not None else None
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="quant_prob must be in [0, 1]") from exc
+    if quant_check is not None and not 0.0 <= quant_check <= 1.0:
         raise HTTPException(status_code=422, detail="quant_prob must be in [0, 1]")
     try:
         weight_preview = resolve_ai_weight(body.ai_weight, ai_enabled=body.ai_enabled)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai weight failed: {exc}") from exc
     packet = _build_packet(body.symbol)
-    opinion, cached = await ai.get_insight(packet, profile=profile, horizon=horizon)
+    try:
+        opinion, cached = await ai.get_insight(packet, profile=profile, horizon=horizon)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai insight failed: {exc}") from exc
     quant_prob = float(body.quant_prob) if body.quant_prob is not None else 0.5
-    blend = blend_forecast(
-        quant_prob, opinion, ai_weight=body.ai_weight, ai_enabled=body.ai_enabled
-    )
+    try:
+        blend = blend_forecast(
+            quant_prob, opinion, ai_weight=body.ai_weight, ai_enabled=body.ai_enabled
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai blend failed: {exc}") from exc
     logger.info(
         "ai forecast_opinion %s",
         redact_mapping({"symbol": packet.symbol, "horizon": horizon, "cached": cached}),
     )
+    try:
+        provenance = packet.freshness.model_dump(mode="json")
+    except Exception:
+        provenance = {}
     return {
         "symbol": packet.symbol,
         "profile": profile,
@@ -221,6 +264,7 @@ async def post_forecast_opinion(
         "packet_id": packet.packet_id,
         "evidence_hash": packet.evidence_hash,
         "cached": cached,
+        "provenance": provenance,
         "disclaimer": DISCLAIMER,
     }
 
@@ -232,7 +276,12 @@ def providers_performance(
 ) -> dict[str, Any]:
     if horizon is not None and horizon not in (5, 21, 63):
         raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
-    rows = ai.performance.summary(exchange=exchange, horizon=horizon)
+    try:
+        rows = ai.performance.summary(exchange=exchange, horizon=horizon)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"performance summary failed: {exc}") from exc
     return {"rows": redact_mapping({"rows": rows})["rows"], "disclaimer": DISCLAIMER}
 
 
@@ -240,10 +289,19 @@ def providers_performance(
 def providers_health_test(
     body: ProviderHealthTestBody | None = None, ai: AIRouter = Depends(get_ai_router)
 ) -> dict[str, Any]:
+    try:
+        providers_map = ai.providers
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"provider health failed: {exc}") from exc
     name = (body.provider if body and body.provider else "").strip().lower() or None
-    if name is not None and name not in ai.providers:
+    if name is not None and name not in providers_map:
         raise HTTPException(status_code=422, detail=f"unknown provider: {name!r}")
-    targets = [name] if name else sorted(ai.providers)
+    targets = [name] if name else sorted(providers_map)
     # health() exposes configuration only — never key material.
-    results = [redact_mapping(ai.providers[target].health()) for target in targets]
+    results: list[dict] = []
+    for target in targets:
+        try:
+            results.append(redact_mapping(providers_map[target].health()))
+        except Exception as exc:
+            results.append({"provider": target, "error": f"{type(exc).__name__}: {exc}"})
     return {"providers": results}

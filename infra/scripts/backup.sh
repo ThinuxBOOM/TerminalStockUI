@@ -33,6 +33,10 @@ if [ -n "$DATABASE_URL" ]; then
     postgresql*://*)
       # Strip the SQLAlchemy driver (+psycopg) for libpq tools.
       PGURL="$(printf '%s' "$DATABASE_URL" | sed -e 's#postgresql+psycopg://#postgresql://#' -e 's#postgresql+psycopg2://#postgresql://#')"
+      if ! command -v pg_dump >/dev/null 2>&1; then
+        echo "[backup] ERROR: pg_dump not found (install postgresql-client) — cannot dump $PGURL" >&2
+        exit 1
+      fi
       echo "[backup] pg_dump $PGURL -> $PG_DUMP"
       pg_dump --format=custom --file="$PG_DUMP" "$PGURL"
       ;;
@@ -45,6 +49,10 @@ else
   PGDATABASE="${POSTGRES_DB:-onemarket}"
   export PGHOST PGPORT PGUSER PGDATABASE
   if [ -n "${POSTGRES_PASSWORD:-}" ]; then export PGPASSWORD="$POSTGRES_PASSWORD"; fi
+  if ! command -v pg_dump >/dev/null 2>&1; then
+    echo "[backup] ERROR: pg_dump not found (install postgresql-client)" >&2
+    exit 1
+  fi
   echo "[backup] pg_dump $PGUSER@$PGHOST:$PGPORT/$PGDATABASE -> $PG_DUMP"
   pg_dump --format=custom --file="$PG_DUMP"
 fi
@@ -52,16 +60,28 @@ fi
 # --- Redis ------------------------------------------------------------------
 REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 if command -v redis-cli >/dev/null 2>&1; then
-  # Parse host/port from REDIS_URL (redis://[:pass@]host:port/db).
-  RURL="${REDIS_URL#redis://}"
+  # Parse host/port from REDIS_URL (redis:// or rediss://[:pass@]host:port/db).
+  # TLS (rediss://, e.g. Upstash) needs `redis-cli --tls`; plain redis-cli
+  # against a TLS endpoint fails fast with a clear message below.
+  case "$REDIS_URL" in
+    rediss://*) RURL="${REDIS_URL#rediss://}"; RTLS=1 ;;
+    redis://*) RURL="${REDIS_URL#redis://}"; RTLS=0 ;;
+    *) echo "[backup] WARN: REDIS_URL is not redis(s):// ($REDIS_URL); skipping Redis snapshot" >&2; RURL="" ;;
+  esac
   case "$RURL" in *@*) RURL="${RURL#*@}";; esac
   RHOST="${RURL%%:*}"; RREST="${RURL#*:}"
   RPORT="${RREST%%/*}"
   [ -z "$RHOST" ] && RHOST="localhost"
   [ -z "$RPORT" ] && RPORT="6379"
-  echo "[backup] redis BGSAVE $RHOST:$RPORT, then --rdb $REDIS_RDB"
-  redis-cli -h "$RHOST" -p "$RPORT" BGSAVE
-  redis-cli -h "$RHOST" -p "$RPORT" --rdb "$REDIS_RDB"
+  if [ -z "$RURL" ]; then
+    echo "[backup] skipping Redis snapshot (unparseable REDIS_URL)"
+  elif [ "${RTLS:-0}" = "1" ]; then
+    echo "[backup] WARN: REDIS_URL uses rediss:// (TLS, e.g. Upstash); local redis-cli snapshot skipped — managed Redis is backed up by the provider"
+  else
+    echo "[backup] redis BGSAVE $RHOST:$RPORT, then --rdb $REDIS_RDB"
+    redis-cli -h "$RHOST" -p "$RPORT" BGSAVE
+    redis-cli -h "$RHOST" -p "$RPORT" --rdb "$REDIS_RDB"
+  fi
 else
   echo "[backup] redis-cli not found; skipping Redis snapshot (compose persists AOF at redisdata)"
 fi
@@ -86,9 +106,12 @@ fi
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum $ARTIFACTS > "$SHA_FILE"
   sha256sum -c "$SHA_FILE"
-else
+elif command -v shasum >/dev/null 2>&1; then
   shasum -a 256 $ARTIFACTS > "$SHA_FILE"
   shasum -a 256 -c "$SHA_FILE"
+else
+  echo "[backup] ERROR: neither sha256sum nor shasum found — cannot checksum artifacts" >&2
+  exit 1
 fi
 echo "[backup] checksums OK -> $SHA_FILE"
 

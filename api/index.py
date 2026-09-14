@@ -17,7 +17,14 @@ _ROOT = os.path.dirname(_HERE)  # onemarket-analyzer/
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from backend.api.main import app  # noqa: E402
+try:
+    from backend.api.main import app  # noqa: E402
+except ImportError as exc:  # clear message instead of a bare traceback on Vercel
+    raise RuntimeError(
+        "api/index.py: cannot import backend.api.main.app — "
+        "expected repo root (%r) on sys.path with backend/api/main.py present. "
+        "Check Vercel Root Directory and that backend/ is committed." % (_ROOT,)
+    ) from exc
 
 try:
     from mangum import Mangum

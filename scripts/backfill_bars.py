@@ -45,7 +45,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from backend.market_data import ingest as ingest_module
+    try:
+        from backend.market_data import ingest as ingest_module
+    except ImportError as exc:
+        print(
+            json.dumps({
+                "ok": False,
+                "error": "ImportError: backend/market_data/ingest.py not importable "
+                         "(run from repo root; got %s: %s)" % (type(exc).__name__, exc),
+            }),
+            file=sys.stderr,
+        )
+        print(json.dumps({"ok": False, "error": "ImportError"}))
+        return 2
 
     if (args.symbols or "").strip():
         symbols = [
@@ -54,8 +66,32 @@ def main(argv: list[str] | None = None) -> int:
             if part.strip()
         ]
     else:
-        symbols = ingest_module.default_universe()
-    db_url = (args.database_url or "").strip() or os.getenv("DATABASE_URL", "")
+        try:
+            symbols = ingest_module.default_universe()
+        except Exception as exc:
+            print(
+                "backfill: ERROR: cannot resolve ingest universe "
+                "(INGEST_SYMBOLS env unreadable): %s: %s"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+            return 2
+    if not symbols:
+        print(
+            "backfill: ERROR: no symbols to ingest "
+            "(--symbols empty and INGEST_SYMBOLS/default universe empty)",
+            file=sys.stderr,
+        )
+        print(json.dumps({"ok": False, "error": "no-symbols", "symbols": 0, "bars": 0}))
+        return 2
+    db_url = (args.database_url or "").strip() or os.getenv("DATABASE_URL", "").strip()
+    if not db_url:
+        print(
+            "backfill: WARN: DATABASE_URL unset — using backend default "
+            "(sqlite ./onemarket.db for local dev). Set DATABASE_URL for "
+            "Postgres/Supabase.",
+            file=sys.stderr,
+        )
     try:
         ingested, errors = ingest_module.ingest_symbols(
             symbols, db_url=db_url or None
@@ -63,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # unexpected: batch wrapper already swallows per-symbol
         print(json.dumps({"ok": False, "error": type(exc).__name__}))
         return 1
+    # Idempotent: ingest_symbols merges on (instrument_id, timeframe, ts), so
+    # re-runs skip existing bars (update, never duplicate). Counts below are
+    # upserted-row counts, safe to compare across runs.
     summary = {
         "ok": not errors,
         "ingested": ingested,
@@ -71,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         "bars": sum(ingested.values()),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

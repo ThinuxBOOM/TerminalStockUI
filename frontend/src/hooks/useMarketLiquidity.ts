@@ -1,6 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { getMarketLiquidity, getMarketsOverview } from '../api/markets';
 
+/** Canonical TanStack keys for market breadth (shared to dedupe in-flight). */
+export const MARKETS_OVERVIEW_KEY = ['markets-overview'] as const;
+export function marketLiquidityKey(mic: string): readonly [string, string] {
+  return ['market-liquidity', String(mic ?? '').trim().toUpperCase()] as const;
+}
+
 /**
  * Homepage per-market liquidity+breadth query.
  * staleTime 30s + retry 1 (matches the app-wide QueryClient defaults).
@@ -10,7 +16,7 @@ import { getMarketLiquidity, getMarketsOverview } from '../api/markets';
  */
 export function useMarketLiquidity() {
   return useQuery({
-    queryKey: ['markets-overview'],
+    queryKey: [...MARKETS_OVERVIEW_KEY],
     queryFn: getMarketsOverview,
     staleTime: 30_000,
     retry: 1,
@@ -22,9 +28,9 @@ export function useMarketLiquidity() {
  * so the homepage never fires 6 detail fan-outs on load.
  */
 export function useMarketDetail(mic: string, enabled: boolean) {
-  const upper = mic.trim().toUpperCase();
+  const upper = String(mic ?? '').trim().toUpperCase();
   return useQuery({
-    queryKey: ['market-liquidity', upper],
+    queryKey: [...marketLiquidityKey(upper)],
     queryFn: () => getMarketLiquidity(upper),
     enabled,
     staleTime: 30_000,

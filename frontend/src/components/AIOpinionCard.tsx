@@ -36,7 +36,7 @@ export default function AIOpinionCard({
           never override — the deterministic forecast.
         </p>
         {onRequest && (
-          <button className="term-btn mt-3" disabled={requesting} onClick={onRequest}>
+          <button className="term-btn mt-3" type="button" disabled={requesting} onClick={onRequest}>
             {requesting ? 'REQUESTING…' : 'REQUEST AI OPINION'}
           </button>
         )}
@@ -45,16 +45,26 @@ export default function AIOpinionCard({
     );
   }
 
+  const prob = typeof opinion.probability === 'number' && Number.isFinite(opinion.probability)
+    ? opinion.probability
+    : null;
   const gap =
-    typeof deterministicProbability === 'number'
-      ? Math.abs(opinion.probability - deterministicProbability)
+    typeof deterministicProbability === 'number' &&
+    Number.isFinite(deterministicProbability) &&
+    prob !== null
+      ? Math.abs(prob - deterministicProbability)
       : null;
+  const opinionDir = String(opinion.direction ?? '').toLowerCase();
+  const detDir = String(deterministicDirection ?? '').toLowerCase();
   const dirMismatch =
-    deterministicDirection !== undefined &&
-    opinion.direction.toLowerCase() !== deterministicDirection.toLowerCase();
+    detDir !== '' && opinionDir !== '' && opinionDir !== detDir;
   const disagree = (gap !== null && gap > DISAGREE_TOL) || dirMismatch;
-  const noEvidence = opinion.evidence_ids.length === 0;
-  const prov = opinion.provenance ?? provenance;
+  const evidence = opinion.evidence_ids ?? [];
+  const catalysts = opinion.catalysts ?? [];
+  const risks = opinion.risks ?? [];
+  const limitations = opinion.limitations ?? [];
+  const noEvidence = evidence.length === 0;
+  const prov = opinion.provenance ?? provenance ?? null;
 
   return (
     <section className="term-panel p-4">
@@ -69,7 +79,7 @@ export default function AIOpinionCard({
         {(opinion as { stub?: unknown }).stub === true && (
           <span
             className="rounded border border-term-red px-2 py-0.5 text-[10px] font-bold tracking-widest text-term-red"
-            title={opinion.limitations[0] ?? 'No live model call was made'}
+            title={limitations[0] ?? 'No live model call was made'}
           >
             STUB — NO LIVE CALL
           </span>
@@ -83,7 +93,7 @@ export default function AIOpinionCard({
       </div>
 
       <p className="mt-2 text-sm">
-        Direction: <b className="text-term-text">{opinion.direction}</b> · horizon{' '}
+        Direction: <b className="text-term-text">{opinion.direction ?? '—'}</b> · horizon{' '}
         <b className="text-term-text">{opinion.time_horizon_days}d</b>
         {prov && (
           <span className="ml-2">
@@ -92,7 +102,7 @@ export default function AIOpinionCard({
         )}
       </p>
       <p className="mt-1 text-2xl font-bold">
-        {(opinion.probability * 100).toFixed(1)}%
+        {prob !== null ? `${(prob * 100).toFixed(1)}%` : 'unavailable'}
         <span className="ml-2 align-middle text-[10px] font-normal text-term-muted">
           AI-only figure — blended forecast moves at most 20% of the way toward it
         </span>
@@ -118,24 +128,24 @@ export default function AIOpinionCard({
       <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
         <div className="rounded border border-term-border p-2">
           <p className="font-bold text-term-green">Catalysts</p>
-          {opinion.catalysts.length === 0 ? (
+          {catalysts.length === 0 ? (
             <p className="text-term-muted">—</p>
           ) : (
             <ul className="list-disc pl-4 text-term-muted">
-              {opinion.catalysts.map((c) => (
-                <li key={c}>{c}</li>
+              {catalysts.map((c, i) => (
+                <li key={`${c}-${i}`}>{c}</li>
               ))}
             </ul>
           )}
         </div>
         <div className="rounded border border-term-border p-2">
           <p className="font-bold text-term-red">Risks</p>
-          {opinion.risks.length === 0 ? (
+          {risks.length === 0 ? (
             <p className="text-term-muted">—</p>
           ) : (
             <ul className="list-disc pl-4 text-term-muted">
-              {opinion.risks.map((c) => (
-                <li key={c}>{c}</li>
+              {risks.map((c, i) => (
+                <li key={`${c}-${i}`}>{c}</li>
               ))}
             </ul>
           )}
@@ -145,20 +155,20 @@ export default function AIOpinionCard({
       <div className="mt-2 text-xs">
         <p className="text-term-muted">
           Evidence:{' '}
-          {opinion.evidence_ids.length === 0 ? (
+          {evidence.length === 0 ? (
             <span className="text-term-red">none supplied</span>
           ) : (
-            opinion.evidence_ids.map((e) => (
-              <code key={e} className="mr-1 rounded bg-term-bg px-1 py-0.5 text-term-cyan">
+            evidence.map((e, i) => (
+              <code key={`${e}-${i}`} className="mr-1 rounded bg-term-bg px-1 py-0.5 text-term-cyan">
                 {e}
               </code>
             ))
           )}
         </p>
-        {opinion.limitations.length > 0 && (
+        {limitations.length > 0 && (
           <ul className="mt-1 list-disc pl-5 text-term-muted">
-            {opinion.limitations.map((l) => (
-              <li key={l}>{l}</li>
+            {limitations.map((l, i) => (
+              <li key={`${l}-${i}`}>{l}</li>
             ))}
           </ul>
         )}

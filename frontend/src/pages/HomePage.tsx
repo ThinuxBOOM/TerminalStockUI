@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -33,6 +33,10 @@ function normalizeSymbolInput(v: string): string {
   return v.trim().toUpperCase().replace(/\s+/g, '');
 }
 
+/** Caps: the home dashboard never mounts more than one page of rows. */
+const MAX_HOME_WATCHLIST = 50;
+const MAX_HOME_REPORTS = 20;
+
 function VenueRow({ label, symbol }: { label: string; symbol: string }) {
   const q = useQuery({
     queryKey: ['quote', symbol],
@@ -57,7 +61,9 @@ function VenueRow({ label, symbol }: { label: string; symbol: string }) {
         <span className="flex shrink-0 items-center gap-2">
           <MarketStateBadge state={q.data.market_state} provenance={q.data.provenance} />
           <span className="hidden text-[10px] text-term-muted lg:inline">
-            {q.data.provenance.delay_minutes}m
+            {typeof q.data.provenance?.delay_minutes === 'number'
+              ? `${q.data.provenance.delay_minutes}m`
+              : '—'}
           </span>
         </span>
       )}
@@ -72,7 +78,12 @@ function WatchlistRow({
   symbol: string;
   onRemove: (s: string) => void;
 }) {
-  const q = useQuery({ queryKey: ['quote', symbol], queryFn: () => getQuote(symbol), retry: false });
+  const q = useQuery({
+    queryKey: ['quote', symbol],
+    queryFn: () => getQuote(symbol),
+    retry: false,
+    staleTime: 30_000,
+  });
   if (q.isLoading)
     return (
       <li className="p-3 text-xs text-term-muted" role="status">
@@ -156,27 +167,35 @@ export default function HomePage() {
     setDraft('');
   }
 
-  function removeSymbol(sym: string) {
-    removeWatchSymbol(sym);
-  }
+  const removeSymbol = useCallback(
+    (sym: string) => {
+      removeWatchSymbol(sym);
+    },
+    [removeWatchSymbol],
+  );
 
   const degraded = health.isError || health.data?.status !== 'ok';
   const providerRows = providers.data ?? null;
-  const healthProviders = health.data?.providers ?? [];
-  const showProviders = providerRows ?? healthProviders.map((p) => ({
-    name: p.name,
-    status: p.status,
-    latency_ms: p.latency_ms,
-    latency_p50_ms: p.latency_ms,
-    latency_p95_ms: undefined,
-    error_rate_1h: undefined,
-    calls_1h: undefined,
-    total_calls: undefined,
-    circuit: undefined,
-    last_check: p.last_check,
-  }));
+  const healthProviders = useMemo(() => health.data?.providers ?? [], [health.data]);
+  const showProviders = useMemo(
+    () =>
+      providerRows ??
+      healthProviders.map((p) => ({
+        name: p.name,
+        status: p.status,
+        latency_ms: p.latency_ms,
+        latency_p50_ms: p.latency_ms,
+        latency_p95_ms: undefined,
+        error_rate_1h: undefined,
+        calls_1h: undefined,
+        total_calls: undefined,
+        circuit: undefined,
+        last_check: p.last_check,
+      })),
+    [providerRows, healthProviders],
+  );
 
-  const reports = research.data?.forecasts ?? [];
+  const reports = useMemo(() => research.data?.forecasts ?? [], [research.data]);
 
   return (
     <div className="grid max-w-full gap-4 md:grid-cols-3">
@@ -239,10 +258,18 @@ export default function HomePage() {
           </div>
         ) : (
           <ul className="mt-2 divide-y divide-term-border">
-            {watchlist.map((s) => (
+            {watchlist.slice(0, MAX_HOME_WATCHLIST).map((s) => (
               <WatchlistRow key={s} symbol={s} onRemove={removeSymbol} />
             ))}
           </ul>
+        )}
+        {watchlist.length > MAX_HOME_WATCHLIST && (
+          <p className="mt-1 text-[11px] text-term-muted" role="status">
+            showing first {MAX_HOME_WATCHLIST} of {watchlist.length} —{' '}
+            <Link to="/watchlist" className="text-term-green">
+              open full watchlist →
+            </Link>
+          </p>
         )}
       </section>
 
@@ -328,18 +355,24 @@ export default function HomePage() {
           )}
           {!research.isLoading && !research.isError && reports.length > 0 && (
             <ul className="mt-2 space-y-1 text-xs">
-              {reports.map((r, i) => (
+              {reports.slice(0, MAX_HOME_REPORTS).map((r, i) => (
                 <li
-                  key={r.forecast_id ?? `${r.symbol}-${i}`}
+                  key={r.forecast_id ?? `${r.symbol ?? 'unknown'}-${i}`}
                   className="flex items-center justify-between gap-2 border-b border-term-border pb-1"
                 >
-                  <Link
-                    to={`/security/${encodeURIComponent(r.symbol ?? '')}`}
-                    className="min-w-0 truncate font-bold text-term-green hover:underline"
-                  >
-                    {r.symbol ?? '—'}
-                    {r.horizon_days ? ` · ${r.horizon_days}d` : ''}
-                  </Link>
+                  {r.symbol ? (
+                    <Link
+                      to={`/security/${encodeURIComponent(r.symbol)}`}
+                      className="min-w-0 truncate font-bold text-term-green hover:underline"
+                    >
+                      {r.symbol}
+                      {r.horizon_days ? ` · ${r.horizon_days}d` : ''}
+                    </Link>
+                  ) : (
+                    <span className="min-w-0 truncate text-term-muted">
+                      —{r.horizon_days ? ` · ${r.horizon_days}d` : ''}
+                    </span>
+                  )}
                   <span className="shrink-0 text-term-muted">
                     {typeof r.direction_probability === 'number'
                       ? `${(r.direction_probability * 100).toFixed(0)}%`

@@ -25,7 +25,15 @@ import sys
 from pathlib import Path
 
 REQUIRED_TABLES = ("instruments", "price_bars", "forecasts", "audit_logs")
-REQUIRED_ENV_KEYS = ("DATABASE_URL", "SECRET_KEY", "VITE_API_BASE_URL", "REDIS_URL")
+# Every key the code actually reads: backend/db/session.py (DATABASE_URL,
+# APP_ENV), backend/cache.py (REDIS_URL/UPSTASH_REDIS_URL), backend/security
+# (SECRET_KEY), backend/api/cron.py (CRON_SECRET), frontend/src/api (VITE_*).
+REQUIRED_ENV_KEYS = ("DATABASE_URL", "SECRET_KEY", "CRON_SECRET", "APP_ENV",
+                     "VITE_API_BASE_URL", "REDIS_URL")
+# Backend cron routes served by backend/api/cron.py (GET /api/cron/*).
+# Vercel covers ingest+calibrate only: Hobby plans cap cron slots at two,
+# so /api/cron/evaluate runs via GitHub Actions (.github/workflows/alerts.yml).
+EXPECTED_VERCEL_CRON_PATHS = ("/api/cron/ingest", "/api/cron/calibrate")
 
 
 def repo_root(explicit: str | None) -> Path:
@@ -164,10 +172,65 @@ def check_vercel_json(root: Path, rep: Report) -> None:
         except json.JSONDecodeError as exc:
             rep.add("FAIL", "vercel.json parses", ["%s: %s" % (rel, exc)])
             return
-        rep.add("PASS", "vercel.json present + valid JSON", ["%s parses (%d keys)" % (rel, len(data))])
+        detail = ["%s parses (%d keys)" % (rel, len(data))]
+        problems: list[str] = []
+        # Rewrites must route /api/* and /health to the serverless entry.
+        # Accepted destinations: "/api" (directory-index resolution to
+        # api/index.py, the deployed scheme per docs/API_CONTRACT.md) or
+        # "/api/index.py" (explicit file target). Either reaches the Mangum
+        # app; only a missing route is a failure.
+        rewrites = data.get("rewrites", [])
+        if isinstance(rewrites, list) and rewrites:
+            dests = {str(r.get("destination", "")) for r in rewrites
+                     if isinstance(r, dict)}
+            srcs = {str(r.get("source", "")) for r in rewrites
+                    if isinstance(r, dict)}
+            ok_dests = {"/api", "/api/index.py"}
+            if "/api/(.*)" in srcs or "/api/:path*" in srcs:
+                if not (dests & ok_dests):
+                    problems.append(
+                        "rewrite /api/(.*) must target /api or /api/index.py "
+                        "(got destinations: %s)" % sorted(dests))
+            if "/health" in srcs and not (dests & ok_dests):
+                problems.append("rewrite /health must target /api or /api/index.py")
+            detail.append("rewrites: %s -> %s" % (sorted(srcs), sorted(dests)))
+        # Vercel crons must cover ingest+calibrate. /api/cron/evaluate is
+        # intentionally NOT a Vercel cron (Hobby 2-slot cap) — it runs via
+        # GitHub Actions, checked separately below.
+        crons = data.get("crons", [])
+        if isinstance(crons, list) and crons:
+            paths = {str(c.get("path", "")) for c in crons if isinstance(c, dict)}
+            missing_crons = [p for p in EXPECTED_VERCEL_CRON_PATHS if p not in paths]
+            if missing_crons:
+                problems.append(
+                    "crons missing backend routes: " + ", ".join(missing_crons)
+                    + " (vercel.json must declare "
+                    + ", ".join(EXPECTED_VERCEL_CRON_PATHS) + ")")
+            detail.append("crons: " + ", ".join(sorted(paths)))
+        if problems:
+            rep.add("FAIL", "vercel.json rewrites/crons match backend",
+                    detail + ["mismatch: " + p for p in problems])
+        else:
+            rep.add("PASS", "vercel.json present + valid JSON", detail)
+        check_alerts_workflow(root, rep)
         return
     rep.add("SKIP", "vercel.json (dashboard import is normative; file pending Vercel agent)",
             ["no vercel.json at root or frontend/; build/output configured in dashboard per docs §3"])
+
+
+def check_alerts_workflow(root: Path, rep: Report) -> None:
+    """GitHub Actions must cover /api/cron/evaluate (not a Vercel cron)."""
+    text = read_text(root, ".github/workflows/alerts.yml")
+    if text is None:
+        rep.add("FAIL", "alerts workflow covers /api/cron/evaluate",
+                ["missing .github/workflows/alerts.yml"])
+        return
+    if "/api/cron/evaluate" in text and "schedule" in text:
+        rep.add("PASS", "alerts workflow covers /api/cron/evaluate",
+                ["GitHub Actions schedules evaluate (Vercel Hobby cap: 2 crons)"])
+    else:
+        rep.add("FAIL", "alerts workflow covers /api/cron/evaluate",
+                ["alerts.yml must schedule /api/cron/evaluate"])
 
 
 def check_api_entry(root: Path, rep: Report) -> None:
@@ -177,11 +240,22 @@ def check_api_entry(root: Path, rep: Report) -> None:
         rep.add("SKIP", "api/index.py (pending backend/Vercel agent)",
                 ["absent; Vercel rewrite /api/(.*) target documented in docs §3"])
         return
-    if re.search(r"from\s+backend\.|import\s+backend\b|backend\.app|api\.main|FastAPI", text):
-        rep.add("PASS", "api/index.py imports backend app", ["entry wires the FastAPI app"])
-    else:
+    has_import = bool(re.search(
+        r"from\s+backend\.|import\s+backend\b|backend\.app|api\.main|FastAPI", text))
+    has_handler = "handler" in text and "Mangum" in text
+    has_lifespan_off = 'lifespan="off"' in text or "lifespan='off'" in text
+    if not has_import:
         rep.add("FAIL", "api/index.py imports backend app",
                 ["no backend import / FastAPI app reference found"])
+    elif not (has_handler and has_lifespan_off):
+        rep.add("FAIL", "api/index.py Mangum handler",
+                ["handler present: %s, lifespan='off': %s (api/index.py must "
+                 "expose handler = Mangum(app, lifespan='off'))"
+                 % (has_handler, has_lifespan_off)])
+    else:
+        rep.add("PASS", "api/index.py imports backend app",
+                ["entry wires the FastAPI app",
+                 "handler = Mangum(app, lifespan='off')"])
 
 
 def check_migration_tables(root: Path, rep: Report) -> None:
@@ -236,27 +310,54 @@ def check_frontend_dist(root: Path, rep: Report) -> None:
 
 
 def check_env_example(root: Path, rep: Report) -> None:
-    """REQUIRED: env example documents DATABASE_URL/SECRET_KEY/VITE_API_BASE_URL/REDIS."""
-    text = read_text(root, "infra/docker/.env.example")
-    if text is None:
+    """REQUIRED: env examples document every key the code reads.
+
+    backend keys (infra/docker/.env.example): DATABASE_URL, REDIS_URL,
+    SECRET_KEY, CRON_SECRET, APP_ENV. frontend key (frontend/.env.example):
+    VITE_API_BASE_URL (+ APP_ENV mirror). Missing files/keys FAIL with the
+    exact path so operators know where to add them (never crash).
+    """
+    infra_text = read_text(root, "infra/docker/.env.example")
+    if infra_text is None:
         rep.add("FAIL", "env example present", ["missing: infra/docker/.env.example"])
         return
-    missing = [k for k in REQUIRED_ENV_KEYS if k not in text]
+    infra_need = ("DATABASE_URL", "REDIS_URL", "SECRET_KEY", "CRON_SECRET", "APP_ENV")
+    missing_infra = [k for k in infra_need if k not in infra_text]
+    front_text = read_text(root, "frontend/.env.example")
+    if front_text is None:
+        rep.add("FAIL", "env example present", ["missing: frontend/.env.example"])
+        return
+    missing_front = [k for k in ("VITE_API_BASE_URL", "APP_ENV") if k not in front_text]
+    missing = (["infra/docker/.env.example: " + ", ".join(missing_infra)]
+               if missing_infra else []) + \
+              (["frontend/.env.example: " + ", ".join(missing_front)]
+               if missing_front else [])
     if missing:
-        rep.add("FAIL", "env example keys", ["missing keys: " + ", ".join(missing)])
+        rep.add("FAIL", "env example keys", ["missing keys: " + "; ".join(missing)])
     else:
         rep.add("PASS", "env example keys present",
-                ["keys: " + ", ".join(REQUIRED_ENV_KEYS),
+                ["infra/docker/.env.example: " + ", ".join(infra_need),
+                 "frontend/.env.example: VITE_API_BASE_URL, APP_ENV",
                  "AI placeholders: " + ", ".join(k for k in
                   ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY")
-                  if k in text)])
+                  if k in infra_text)])
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OneMarket deploy preflight (stdlib-only).")
     parser.add_argument("--root", default=None, help="repo root (default: parent of scripts/)")
     args = parser.parse_args(argv)
-    root = repo_root(args.root)
+    try:
+        root = repo_root(args.root)
+    except Exception as exc:
+        print("FAIL: cannot resolve repo root (%s: %s)" % (type(exc).__name__, exc))
+        return 2
+    if not root.is_dir():
+        print("FAIL: repo root not found: %s (pass --root <path>)" % root)
+        return 2
+    if not (root / "backend").is_dir() or not (root / "frontend").is_dir():
+        print("FAIL: expected backend/ and frontend/ under root %s" % root)
+        return 2
 
     rep = Report()
     check_ci_yaml(root, rep)

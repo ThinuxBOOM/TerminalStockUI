@@ -22,10 +22,19 @@ from .models import Base
 
 _engine = None
 _SessionLocal = None
+#: Engines for explicit URLs (ingest/tests), keyed by URL so repeated calls
+#: with the same URL reuse one engine instead of creating a new pool per
+#: call. Cleared by reset_engine() alongside the default cached engine.
+_engines_by_url: dict[str, object] = {}
+#: Session factories for explicit URLs (same caching rationale as engines:
+#: avoid per-call sessionmaker construction; cleared by reset_engine()).
+_session_factories_by_url: dict[str, object] = {}
 
 
 def database_url() -> str:
-    return os.getenv("DATABASE_URL", "sqlite:///./onemarket.db")
+    raw = os.getenv("DATABASE_URL", "")
+    text = (raw or "").strip()
+    return text or "sqlite:///./onemarket.db"
 
 
 def _is_serverless_postgres(url: str) -> bool:
@@ -84,7 +93,11 @@ def _create_engine(url: str):
 def get_engine(url: str | None = None):
     global _engine
     if url is not None:
-        return _create_engine(url)
+        cached = _engines_by_url.get(url)
+        if cached is None:
+            cached = _create_engine(url)
+            _engines_by_url[url] = cached
+        return cached
     if _engine is None:
         _engine = _create_engine(database_url())
     return _engine
@@ -95,12 +108,21 @@ def reset_engine() -> None:
     global _engine, _SessionLocal
     _engine = None
     _SessionLocal = None
+    _engines_by_url.clear()
+    _session_factories_by_url.clear()
 
 
 def get_session_factory(url: str | None = None):
     global _SessionLocal
     if url is not None:
-        return sessionmaker(bind=get_engine(url), autoflush=False, expire_on_commit=False)
+        # Normalize empty/whitespace URLs to the default (avoids
+        # create_engine("") crashes) and reuse cached factories.
+        key = (url or "").strip() or database_url()
+        cached = _session_factories_by_url.get(key)
+        if cached is None:
+            cached = sessionmaker(bind=get_engine(key), autoflush=False, expire_on_commit=False)
+            _session_factories_by_url[key] = cached
+        return cached
     if _SessionLocal is None:
         _SessionLocal = sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False)
     return _SessionLocal

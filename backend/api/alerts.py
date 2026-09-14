@@ -106,16 +106,28 @@ def _iso_or_none(value: Any) -> str | None:
 
 
 def _alert_to_out(row: Alert) -> dict:
+    try:
+        threshold = float(row.threshold) if row.threshold is not None else None
+    except (TypeError, ValueError):
+        threshold = None
+    try:
+        horizon = int(row.horizon_days)
+    except (TypeError, ValueError):
+        horizon = 21
+    try:
+        cooldown = int(row.cooldown_hours)
+    except (TypeError, ValueError):
+        cooldown = 24
     return {
         "alert_id": str(row.alert_id),
         "symbol": row.symbol,
         "exchange_mic": row.exchange_mic,
         "condition": row.condition,
-        "threshold": float(row.threshold) if row.threshold is not None else None,
-        "horizon_days": int(row.horizon_days),
+        "threshold": threshold,
+        "horizon_days": horizon,
         "target_ccy": row.target_ccy,
         "is_active": bool(row.is_active),
-        "cooldown_hours": int(row.cooldown_hours),
+        "cooldown_hours": cooldown,
         "last_fired_at": _iso_or_none(row.last_fired_at),
         "created_at": _iso_or_none(row.created_at),
     }
@@ -258,7 +270,12 @@ def create_alert(
 ) -> dict:
     """Create one alert rule (symbol must resolve via the registry)."""
     _ensure_tables()
-    instrument, _, _ = registry.resolve(body.symbol)
+    try:
+        instrument, _, _ = registry.resolve(body.symbol)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"symbol resolve failed: {exc}") from exc
     if instrument is None:
         raise HTTPException(
             status_code=422, detail=f"unknown symbol {body.symbol!r}"
@@ -274,8 +291,20 @@ def create_alert(
         cooldown_hours=24,
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
+    try:
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"alert create failed: {exc}") from exc
+    try:
+        db.refresh(row)
+    except Exception:
+        pass
     return {
         "alert": _alert_to_out(row),
         "provenance": _alert_provenance(False),
@@ -299,14 +328,24 @@ def list_alerts(
             query = query.filter(Alert.is_active.is_(True))
         rows = query.all()
     except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return {
             "alerts": [], "count": 0,
             "provenance": _alert_provenance(True),
             "disclosure": DISCLOSURE,
         }
+    out: list[dict] = []
+    for r in rows:
+        try:
+            out.append(_alert_to_out(r))
+        except Exception:
+            continue
     return {
-        "alerts": [_alert_to_out(r) for r in rows],
-        "count": len(rows),
+        "alerts": out,
+        "count": len(out),
         "provenance": _alert_provenance(False),
         "disclosure": DISCLOSURE,
     }
@@ -336,8 +375,20 @@ def update_alert(
         row.threshold = float(body.threshold)
     if body.cooldown_hours is not None:
         row.cooldown_hours = int(body.cooldown_hours)
-    db.commit()
-    db.refresh(row)
+    try:
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"alert update failed: {exc}") from exc
+    try:
+        db.refresh(row)
+    except Exception:
+        pass
     return {
         "alert": _alert_to_out(row),
         "provenance": _alert_provenance(False),
@@ -357,12 +408,14 @@ def delete_alert(alert_id: str, db: Session = Depends(get_db)) -> Response:
         ).delete(synchronize_session=False)
         db.delete(row)
         db.commit()
-    except Exception:
+    except HTTPException:
+        raise
+    except Exception as exc:
         try:
             db.rollback()
         except Exception:
             pass
-        raise
+        raise HTTPException(status_code=502, detail=f"alert delete failed: {exc}") from exc
     return Response(status_code=204)
 
 

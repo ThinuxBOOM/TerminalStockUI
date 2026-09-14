@@ -13,6 +13,7 @@ fetch/DB failures are reported per symbol, never raised.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import date, datetime, timezone
 
@@ -70,6 +71,8 @@ def _fnum(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     if number != number:  # NaN / pandas NA guard without importing pandas
+        return None
+    if not math.isfinite(number):  # inf leaks into the DB/JSON otherwise
         return None
     return number
 

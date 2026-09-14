@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -44,7 +45,12 @@ function eventsFromAnalytics(a: Analytics | null): BriefEvent[] {
 }
 
 export default function SecurityBrief({ symbol }: { symbol: string }) {
-  const quote = useQuery({ queryKey: ['quote', symbol], queryFn: () => getQuote(symbol) });
+  const quote = useQuery({
+    queryKey: ['quote', symbol],
+    queryFn: () => getQuote(symbol),
+    retry: false,
+    staleTime: 30_000,
+  });
   const forecastQ = useQuery({
     queryKey: ['forecast', symbol, 21],
     queryFn: () => getForecast(symbol, 21),
@@ -68,7 +74,7 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
   // explicit unavailable state — never a seeded placeholder figure.
   const forecast: Forecast | null = forecastQ.data ?? null;
   const analytics: Analytics | null = analyticsQ.data ?? null;
-  const events = eventsFromAnalytics(analytics);
+  const events = useMemo(() => eventsFromAnalytics(analytics), [analytics]);
 
   if (quote.isLoading)
     return (
@@ -97,15 +103,22 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
   if (!q)
     return (
       <div className="max-w-full">
-        <Skeleton label={`loading ${symbol}…`} lines={6} />
+        <ErrorState
+          title="Security Brief unavailable"
+          detail={`No quote payload for ${symbol} — the quote endpoint returned empty.`}
+          onRetry={() => {
+            void quote.refetch();
+            void forecastQ.refetch();
+          }}
+        />
         <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
       </div>
     );
-  const stale = q.provenance.fallback_used || q.provenance.delay_minutes > 30;
+  const stale = q.provenance?.fallback_used === true || (q.provenance?.delay_minutes ?? 0) > 30;
 
   return (
     <div className="max-w-full">
-      {stale && <StaleBanner detail={`quote via ${q.provenance.source}, delay ${q.provenance.delay_minutes}m`} />}
+      {stale && <StaleBanner detail={`quote via ${q.provenance?.source ?? 'unknown'}, delay ${q.provenance?.delay_minutes ?? '—'}m`} />}
       {forecastQ.isError && (
         <StaleBanner detail={`forecast endpoint unreachable (${forecastQ.error instanceof Error ? forecastQ.error.message : 'unknown error'}) — forecast unavailable, no placeholder numbers shown`} />
       )}
@@ -122,7 +135,7 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
             {q.symbol}{' '}
             <span className="text-sm font-normal text-term-muted">
               <CurrencyValue value={q.price} currency={q.currency ?? 'USD'} />
-              {q.change_pct !== undefined && q.change_pct !== null && (
+              {typeof q.change_pct === 'number' && Number.isFinite(q.change_pct) && (
                 <span className={q.change_pct >= 0 ? 'text-term-green' : 'text-term-red'}>
                   {' '}
                   ({q.change_pct >= 0 ? '+' : ''}
@@ -196,9 +209,9 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
           )}
           {!analyticsQ.isLoading && events.length > 0 && (
             <ul className="mt-2 space-y-2 text-sm">
-              {events.map((e) => (
+              {events.map((e, i) => (
                 <li
-                  key={`${e.date}-${e.title}`}
+                  key={`${e.date}-${e.title}-${i}`}
                   className="flex justify-between gap-2 border-b border-term-border pb-1"
                 >
                   <span className="min-w-0">{e.title}</span>
@@ -255,8 +268,10 @@ function ForecastCard({
   currency: string;
   forecast: Forecast;
 }) {
-  const whyText = f.why.length > 0 ? f.why.join(' + ') : 'unavailable';
-  const riskText = f.risks.length > 0 ? f.risks.join(' + ') : 'unavailable';
+  const why = f.why ?? [];
+  const risks = f.risks ?? [];
+  const whyText = why.length > 0 ? why.join(' + ') : 'unavailable';
+  const riskText = risks.length > 0 ? risks.join(' + ') : 'unavailable';
   return (
     <div className="mt-3 border-t border-term-border pt-3">
       <p className="term-label">
@@ -308,24 +323,24 @@ function ForecastCard({
       <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
         <div className="rounded border border-term-border p-2">
           <p className="font-bold text-term-green">▲ BULL — why</p>
-          {f.why.length === 0 ? (
+          {why.length === 0 ? (
             <p className="text-term-muted">unavailable</p>
           ) : (
             <ul className="list-disc pl-4 text-term-muted">
-              {f.why.map((b) => (
-                <li key={b}>{b}</li>
+              {why.map((b, i) => (
+                <li key={`${b}-${i}`}>{b}</li>
               ))}
             </ul>
           )}
         </div>
         <div className="rounded border border-term-border p-2">
           <p className="font-bold text-term-red">▼ BEAR — risks</p>
-          {f.risks.length === 0 ? (
+          {risks.length === 0 ? (
             <p className="text-term-muted">unavailable</p>
           ) : (
             <ul className="list-disc pl-4 text-term-muted">
-              {f.risks.map((b) => (
-                <li key={b}>{b}</li>
+              {risks.map((b, i) => (
+                <li key={`${b}-${i}`}>{b}</li>
               ))}
             </ul>
           )}
@@ -398,8 +413,9 @@ function AnalyticsSnapshot({
   );
 }
 
-function SnapshotCell({ title, data }: { title: string; data: Record<string, unknown> }) {
-  const entries = Object.entries(data).slice(0, 4);
+function SnapshotCell({ title, data }: { title: string; data: Record<string, unknown> | null | undefined }) {
+  const all = Object.entries(data ?? {});
+  const entries = all.slice(0, 4);
   return (
     <div className="min-w-0 rounded border border-term-border p-2">
       <p className="font-bold">{title}</p>
@@ -412,6 +428,11 @@ function SnapshotCell({ title, data }: { title: string; data: Record<string, unk
               {k}: <b className="text-term-text">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</b>
             </li>
           ))}
+          {all.length > entries.length && (
+            <li className="text-[10px]" role="status">
+              +{all.length - entries.length} more
+            </li>
+          )}
         </ul>
       )}
     </div>

@@ -292,6 +292,7 @@ def _run_evaluate(market: MarketDataService, forecast: ForecastService) -> dict:
     ``errors`` keyed by alert_id; the batch itself never 500s. Returns
     ``{checked, fired, errors, provenance, disclosure}``.
     """
+    from backend.api.alerts import DISCLOSURE as _ALERTS_DISCLOSURE
     from backend.api.alerts import evaluate_due_alerts
     from backend.db.session import get_session_factory, init_db
 
@@ -308,6 +309,7 @@ def _run_evaluate(market: MarketDataService, forecast: ForecastService) -> dict:
             "fired": [],
             "errors": {"_batch": "db unavailable"},
             "provenance": _cron_provenance(True),
+            "disclosure": _ALERTS_DISCLOSURE,
         }
     try:
         return evaluate_due_alerts(db, market=market, forecast=forecast)
@@ -320,6 +322,7 @@ def _run_evaluate(market: MarketDataService, forecast: ForecastService) -> dict:
             "fired": [],
             "errors": {"_batch": "evaluate failed"},
             "provenance": _cron_provenance(True),
+            "disclosure": _ALERTS_DISCLOSURE,
         }
     finally:
         try:
@@ -342,11 +345,14 @@ def cron_evaluate_get(
         raise
     except Exception:
         logger.warning("cron evaluate batch failed")
+        from backend.api.alerts import DISCLOSURE as _ALERTS_DISCLOSURE
+
         return {
             "checked": 0,
             "fired": [],
             "errors": {"_batch": "evaluate failed"},
             "provenance": _cron_provenance(True),
+            "disclosure": _ALERTS_DISCLOSURE,
         }
 
 
@@ -364,9 +370,12 @@ def cron_evaluate_post(
         raise
     except Exception:
         logger.warning("cron evaluate batch failed")
+        from backend.api.alerts import DISCLOSURE as _ALERTS_DISCLOSURE
+
         return {
             "checked": 0,
             "fired": [],
             "errors": {"_batch": "evaluate failed"},
             "provenance": _cron_provenance(True),
+            "disclosure": _ALERTS_DISCLOSURE,
         }

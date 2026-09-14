@@ -28,9 +28,18 @@ def _check_tcp(url: str, default: str) -> str:
 @router.get("/health")
 def health() -> dict:
     """Contract shape: {status, postgres, redis, version} + providers summary."""
-    tracker = get_health_tracker()
-    providers = tracker.all_stats()
-    degraded = any(p.get("circuit") == "open" for p in providers)
+    try:
+        providers = get_health_tracker().all_stats()
+        if providers is None:
+            providers = []
+    except Exception:
+        providers = []
+    try:
+        degraded = any(
+            isinstance(p, dict) and p.get("circuit") == "open" for p in providers
+        )
+    except Exception:
+        degraded = False
     return {
         "status": "degraded" if degraded else "ok",
         "postgres": _check_tcp(os.getenv("DATABASE_URL", ""), "unknown"),

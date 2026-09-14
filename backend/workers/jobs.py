@@ -108,7 +108,9 @@ def _audit(db: Any, *, job: str, entity_id: str, payload: dict) -> None:
             payload=dict(payload or {}),
         )
     except Exception as exc:
-        logger.warning("audit append failed for job %s: %s", job, exc)
+        # Log the exception TYPE only: DB/audit messages can echo payload
+        # text, and payloads must never leak key material into logs.
+        logger.warning("audit append failed for job %s: %s", job, type(exc).__name__)
 
 
 def _log_result(result: dict) -> dict:
@@ -196,9 +198,21 @@ def evaluate_alerts(db: Any = None, **kwargs: Any) -> dict:
         _audit(db, job=job, entity_id="all",
                payload={"ok": False, "error": type(exc).__name__})
         return _log_result(result)
-    checked = int(outcome.get("checked") or 0)
-    fired_list = list(outcome.get("fired") or [])
-    errors = dict(outcome.get("errors") or {})
+    checked = 0
+    try:
+        checked = int(outcome.get("checked") or 0)  # type: ignore[union-attr]
+    except (TypeError, ValueError, AttributeError):
+        checked = 0
+    try:
+        raw_fired = outcome.get("fired") or []  # type: ignore[union-attr]
+        fired_list = list(raw_fired) if isinstance(raw_fired, (list, tuple)) else []
+    except (TypeError, ValueError, AttributeError):
+        fired_list = []
+    try:
+        raw_errors = outcome.get("errors") or {}  # type: ignore[union-attr]
+        errors = dict(raw_errors) if isinstance(raw_errors, dict) else {"_batch": "invalid-errors-shape"}
+    except (TypeError, ValueError, AttributeError):
+        errors = {}
     result = {
         "job": job, "ok": "_batch" not in errors,
         "alerts_checked": checked, "alerts_fired": len(fired_list),
@@ -273,7 +287,9 @@ def enqueue(job_name: str, *args: Any, **kwargs: Any) -> dict:
                 return {"job": job_name, "ok": True, "queued": True,
                         "rq_id": getattr(rq_job, "id", None)}
             except Exception as exc:
-                logger.warning("redis enqueue failed, falling back to in-process: %s", exc)
+                # Type only: broker errors can echo the Redis URL (credentials).
+                logger.warning("redis enqueue failed, falling back to in-process: %s",
+                               type(exc).__name__)
     return fn(*args, **kwargs)
 
 
@@ -281,7 +297,13 @@ def run_once(symbols: tuple[str, ...] = ("AAPL",), profile: str = "quick_insight
              db: Any = None) -> dict:
     """Run the full job set once in-memory (scheduler tick / smoke test)."""
     results: dict[str, Any] = {}
-    for sym in symbols:
+    try:
+        syms = tuple(symbols) if symbols else ("AAPL",)
+    except TypeError:
+        syms = ("AAPL",)
+    # Bound fan-out: scheduler ticks stay cheap even if callers pass huge lists.
+    syms = tuple(syms[:25]) or ("AAPL",)
+    for sym in syms:
         results[f"ingest_bars:{sym}"] = ingest_bars(sym, db=db)
         results[f"refresh_forecast:{sym}"] = refresh_forecast(sym, db=db)
         results[f"generate_report:{sym}:{profile}"] = generate_report(sym, profile, db=db)

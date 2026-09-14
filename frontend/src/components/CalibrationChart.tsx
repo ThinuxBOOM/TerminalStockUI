@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { ReliabilityRow } from '../api/client';
 
 type Props = {
@@ -25,14 +26,21 @@ export default function CalibrationChart({ rows, height = 190, title = 'Calibrat
 
   const finite = (v: number | null | undefined): v is number =>
     typeof v === 'number' && Number.isFinite(v);
-  const plotted = rows.filter((r) => finite(r.mean_predicted) && finite(r.fraction_positive));
-  const maxCount = Math.max(1, ...rows.map((r) => r.count));
+  const safeRows = rows ?? [];
+  const plotted = useMemo(
+    () => safeRows.filter((r) => r && finite(r.mean_predicted) && finite(r.fraction_positive)),
+    [safeRows],
+  );
+  const maxCount = useMemo(
+    () => Math.max(1, ...safeRows.map((r) => (typeof r?.count === 'number' && Number.isFinite(r.count) ? r.count : 0))),
+    [safeRows],
+  );
 
   return (
     <figure>
       {title && <figcaption className="term-label mb-1">{title}</figcaption>}
-      {rows.length === 0 ? (
-        <p className="text-xs text-term-muted">No calibration bins yet — run the Backtest Lab.</p>
+      {safeRows.length === 0 ? (
+        <p className="text-xs text-term-muted" role="status">No calibration bins yet — run the Backtest Lab.</p>
       ) : (
         <svg
           viewBox={`0 0 ${W} ${H}`}
@@ -70,19 +78,22 @@ export default function CalibrationChart({ rows, height = 190, title = 'Calibrat
             </g>
           ))}
           {/* empty bins as ticks */}
-          {rows.map((r, i) =>
-            !finite(r.mean_predicted) || !finite(r.fraction_positive) ? (
+          {safeRows.map((r, i) => {
+            if (!r || finite(r.mean_predicted) && finite(r.fraction_positive)) return null;
+            if (!finite(r.bin_low) || !finite(r.bin_high)) return null;
+            const mid = (r.bin_low + r.bin_high) / 2;
+            return (
               <line
                 key={`e${i}`}
-                x1={x((r.bin_low + r.bin_high) / 2)}
+                x1={x(mid)}
                 y1={H - padB}
-                x2={x((r.bin_low + r.bin_high) / 2)}
+                x2={x(mid)}
                 y2={H - padB + 5}
                 stroke="#ff5c5c"
                 strokeWidth={2}
               />
-            ) : null,
-          )}
+            );
+          })}
           {/* bins */}
           {plotted.map((r, i) => (
             <circle
@@ -96,7 +107,7 @@ export default function CalibrationChart({ rows, height = 190, title = 'Calibrat
               strokeWidth={1}
             >
               <title>
-                {`bin ${r.bin_low.toFixed(2)}–${r.bin_high.toFixed(2)} · n=${r.count} · pred=${(r.mean_predicted as number).toFixed(3)} · obs=${(r.fraction_positive as number).toFixed(3)}`}
+                {`bin ${finite(r.bin_low) ? r.bin_low.toFixed(2) : '—'}–${finite(r.bin_high) ? r.bin_high.toFixed(2) : '—'} · n=${r.count} · pred=${(r.mean_predicted as number).toFixed(3)} · obs=${(r.fraction_positive as number).toFixed(3)}`}
               </title>
             </circle>
           ))}

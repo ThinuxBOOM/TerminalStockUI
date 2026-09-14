@@ -26,6 +26,8 @@ services:
         sync: false # Supabase pooled :6543, e.g. postgresql://postgres.<REF>:<PW>@aws-0-<REGION>.pooler.supabase.com:6543/postgres
       - key: SECRET_KEY
         generateValue: true # openssl rand -hex 32 equivalent; rotating invalidates stored provider keys
+      - key: CRON_SECRET
+        sync: false # REQUIRED in prod: Bearer for GET/POST /api/cron/{ingest,calibrate,evaluate}; empty locally
       - key: REDIS_URL
         sync: false # OPTIONAL — leave empty for in-memory cache (no local disk). Or Upstash URL.
       - key: UPSTASH_REDIS_URL

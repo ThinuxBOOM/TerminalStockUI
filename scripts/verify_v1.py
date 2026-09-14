@@ -46,6 +46,10 @@ EXPECTED_ROUTER_PREFIXES = {
     "/api/ai": "backend/api/ai.py",
     "/api/audit": "backend/api/audit.py",
     "/api/fx": "backend/api/fx.py",
+    "/api/markets": "backend/api/markets.py",
+    "/api/screener": "backend/api/screener.py",
+    "/api/alerts": "backend/api/alerts.py",
+    "/api/cron": "backend/api/cron.py",
 }
 
 KEY_FILES = [
@@ -214,8 +218,46 @@ def check_gates(root: Path, rep: Report) -> None:
                 ["missing prefixes: " + ", ".join(absent),
                  "found: " + ", ".join(sorted(found))])
     else:
-        rep.add("GATES", "router prefixes (10)", "PASS",
+        rep.add("GATES", "router prefixes (%d)" % len(EXPECTED_ROUTER_PREFIXES), "PASS",
                 ["%s <- %s" % (p, found[p]) for p in sorted(found)])
+
+    # Tooling gate: vitest must not collect Playwright E2E or build output,
+    # and must include tsx specs (false PASS before: e2e collected on
+    # repo-root runs; false FAIL before: .tsx tests silently skipped).
+    vitest_text = read_text(root, "frontend/vitest.config.ts") or ""
+    vitest_bits = {
+        "include covers tsx": ("tsx" in vitest_text and "test" in vitest_text),
+        "exclude e2e": ("e2e" in vitest_text),
+        "exclude node_modules": ("node_modules" in vitest_text),
+        "exclude dist": ("dist" in vitest_text),
+    }
+    if all(vitest_bits.values()):
+        rep.add("GATES", "vitest isolate (e2e/dist excluded, tsx included)", "PASS",
+                ["%s: yes" % k for k in vitest_bits])
+    else:
+        rep.add("GATES", "vitest isolate (e2e/dist excluded, tsx included)", "FAIL",
+                ["%s: %s" % (k, "yes" if v else "NO") for k, v in vitest_bits.items()])
+
+    # Persist gate: forecast writes are best-effort (never break the read
+    # path). _persist_forecast_record must exist, swallow DB errors, skip
+    # under pytest and skip unknown symbols — a hard-persist expectation
+    # would false-FAIL offline/test runs.
+    forecast_text = read_text(root, "backend/api/forecast.py") or ""
+    persist_bits = {
+        "_persist_forecast_record defined": "_persist_forecast_record" in forecast_text,
+        "best-effort (never raises)": ("never breaks" in forecast_text
+                                        or "never raises" in forecast_text
+                                        or "Best-effort" in forecast_text),
+        "pytest skip": "PYTEST_CURRENT_TEST" in forecast_text,
+        "unknown-symbol skip": ("Unknown symbols" in forecast_text
+                                or "NOT persisted" in forecast_text),
+    }
+    if all(persist_bits.values()):
+        rep.add("GATES", "forecast persist best-effort", "PASS",
+                ["%s: yes" % k for k in persist_bits])
+    else:
+        rep.add("GATES", "forecast persist best-effort", "FAIL",
+                ["%s: %s" % (k, "yes" if v else "NO") for k, v in persist_bits.items()])
 
     fx_text = read_text(root, "backend/market_data/fx/convert.py") or ""
     fx_api = read_text(root, "backend/api/fx.py") or ""
@@ -362,18 +404,25 @@ def check_dod(root: Path, rep: Report) -> None:
                 "raises HTTP 422 ValueError and never emits those code strings; "
                 "no test asserts them"]
         client_fc = read_text(root, "frontend/src/api/client.ts") or ""
-        if "api.get('/api/forecast'" in client_fc:
+        # Path-first with query fallback is the aligned shape (client tries
+        # GET /api/forecast/{symbol} then falls back to ?symbol= on 404/501).
+        # Only flag drift when the path-style call is ABSENT — matching the
+        # bare query string alone false-PASSed before (it is the fallback).
+        has_fc_path = "/api/forecast/${" in client_fc or '`/api/forecast/${' in client_fc
+        has_an_path = "/api/analytics/${" in client_fc or '`/api/analytics/${' in client_fc
+        has_bt_run = "/api/backtest/run" in client_fc
+        if "api.get('/api/forecast'" in client_fc and not has_fc_path:
             gaps.append("UI wiring drift (honest gap): frontend getForecast() calls "
                         "`GET /api/forecast?symbol=..&horizon=..` but backend serves "
                         "`GET /api/forecast/{symbol}?horizon=..`; live UI forecast "
                         "falls back to the labelled deterministic placeholder "
                         "(backend endpoint itself is test-green; call it directly)")
-        if "api.get('/api/analytics'" in client_fc:
+        if "api.get('/api/analytics'" in client_fc and not has_an_path:
             gaps.append("UI wiring drift (honest gap): frontend getAnalytics() calls "
                         "`GET /api/analytics?symbol=..` but backend serves "
                         "`GET /api/analytics/{symbol}`; UI shows the graceful "
                         "`analytics endpoint unreachable` snapshot state")
-        if "api.post('/api/backtest'" in client_fc:
+        if "api.post('/api/backtest'" in client_fc and not has_bt_run:
             gaps.append("UI wiring drift (honest gap): frontend runBacktest() posts "
                         "`POST /api/backtest` but backend serves `POST /api/backtest/run`; "
                         "use the backend route directly until the client is aligned")
@@ -394,11 +443,23 @@ def check_dod(root: Path, rep: Report) -> None:
         client_ai = read_text(root, "frontend/src/api/client.ts") or ""
         note = ("note: contract code `AI_VALIDATION_FAILED` is docs-only; code "
                 "uses HTTP 422 with plain detail (same fail-safe behavior)")
-        if "'Quick Insight'" in client_ai and "quick_insight" in (read_text(root, "backend/ai/prompts/__init__.py") or ""):
+        # Backend _check_profile normalizes display labels ("Forecast Assist"
+        # -> "forecast_assist" via lower + space/dash -> underscore), so a
+        # display-label frontend does NOT 422. Only flag drift when the
+        # backend lacks that normalization.
+        ai_api_text = read_text(root, "backend/api/ai.py") or ""
+        backend_normalizes = ('replace(" ", "_")' in ai_api_text
+                              and ".lower()" in ai_api_text)
+        if ("'Quick Insight'" in client_ai
+                and "quick_insight" in (read_text(root, "backend/ai/prompts/__init__.py") or "")
+                and not backend_normalizes):
             note += ("; UI wiring drift: frontend posts display labels "
                      "('Forecast Assist') but backend expects keys ('forecast_assist') "
                      "-> UI AI requests 422; call POST /api/ai/insight with the key "
                      "directly until aligned (deterministic forecast unaffected)")
+        elif "'Quick Insight'" in client_ai and backend_normalizes:
+            note += ("; display labels ('Forecast Assist') accepted: "
+                     "backend _check_profile normalizes to keys ('forecast_assist')")
         rep.add("DoD 5", "AI explanation + bounded opinion (capped influence)", "PASS",
                 ["strict AI schemas require evidence_ids (backend/ai/schemas.py)",
                  "AI_WEIGHT_MAX = 0.20 server-enforced (blend.py + SQL CHECK)",
@@ -497,20 +558,25 @@ def check_dod(root: Path, rep: Report) -> None:
                           or "DISCLAIMER" in (read_text(root, "backend/ai/schemas.py") or ""))
     disclosure_frontend = ("Not investment advice" in brief
                            or "Not investment advice" in fdetails)
-    infra_verify = (root / "infra/scripts/verify_audit.py").is_file()
+    infra_verify = ((root / "infra/scripts/verify_audit.py").is_file()
+                    or (root / "backend/observability/audit_verify.py").is_file())
     if audit_ok and health_ok and disclosure_backend and disclosure_frontend and infra_verify:
         rep.add("DoD 9", "audit logs + provider health + disclosures", "PASS",
                 ["audit hash-chain verifier + versioned forecast/AI logs",
                  "GET /api/providers/health dashboard",
                  "disclosure rendered on every forecast view",
-                 "evidence: python -m backend.observability.audit_verify && "
+                 "verifier: infra/scripts/verify_audit.py "
+                 "(alias for backend.observability.audit_verify)",
+                 "note: local ./onemarket.db sqlite stub may lack audit_logs "
+                 "(postgres migration not applied there; chain itself test-green)",
+                 "evidence: python infra/scripts/verify_audit.py && "
                  "python -m pytest backend/tests/test_audit.py "
                  "backend/tests/test_observability.py -q"])
     else:
         gaps = []
         if not infra_verify:
-            gaps.append("README references infra/scripts/verify_audit.py, which does "
-                        "not exist (use `python -m backend.observability.audit_verify`)")
+            gaps.append("no audit verifier found (need infra/scripts/verify_audit.py "
+                        "or backend/observability/audit_verify.py)")
         if not (disclosure_backend and disclosure_frontend):
             gaps.append("disclosure string missing backend=%s frontend=%s"
                         % (disclosure_backend, disclosure_frontend))

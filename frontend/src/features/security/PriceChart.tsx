@@ -17,9 +17,27 @@ export type Candle = {
   close: number;
 };
 
-function toUTCTime(d: string): UTCTimestamp {
-  return Math.floor(new Date(d + 'T12:00:00Z').getTime() / 1000) as UTCTimestamp;
+function toUTCTime(d: string): UTCTimestamp | null {
+  const ms = new Date(`${d}T12:00:00Z`).getTime();
+  if (!Number.isFinite(ms)) return null;
+  return Math.floor(ms / 1000) as UTCTimestamp;
 }
+
+/** Drop malformed candles (null OHLC, bad time) so the chart lib never throws. */
+function isValidCandle(c: Candle): boolean {
+  return (
+    !!c &&
+    typeof c.time === 'string' &&
+    /^\d{4}-\d{2}-\d{2}/.test(c.time) &&
+    Number.isFinite(c.open) &&
+    Number.isFinite(c.high) &&
+    Number.isFinite(c.low) &&
+    Number.isFinite(c.close)
+  );
+}
+
+/** Stable empty reference — avoids a fresh `[]` each render busting the chart effect. */
+const EMPTY_CANDLES: Candle[] = [];
 
 /**
  * Deterministic placeholder series — loading shimmer ONLY.
@@ -67,9 +85,17 @@ export default function PriceChart({
   const ref = useRef<HTMLDivElement>(null);
   // Placeholder is memoized per symbol and used ONLY for the loading state.
   const placeholder = useMemo(() => seedCandles(symbol), [symbol]);
-  const live = data && data.length > 0 ? data : null;
+  // Sanitize once per payload so downstream length checks and the chart
+  // effect never see malformed rows.
+  const sanitized = useMemo(() => (data ?? []).filter(isValidCandle), [data]);
+  const live = sanitized.length > 0 ? sanitized : null;
   const showPlaceholder = !live && loading && !error;
-  const candles = live ?? (showPlaceholder ? placeholder : []);
+  // Memoized so the chart effect below only re-runs when the underlying
+  // candles actually change (a fresh `[]` literal each render would bust it).
+  const candles = useMemo(
+    () => live ?? (showPlaceholder ? placeholder : EMPTY_CANDLES),
+    [live, showPlaceholder, placeholder],
+  );
 
   useEffect(() => {
     if (!ref.current || candles.length === 0) return;
@@ -85,7 +111,17 @@ export default function PriceChart({
       wickDownColor: '#ff5c5c',
       borderVisible: false,
     });
-    series.setData(candles.map((c) => ({ ...c, time: toUTCTime(c.time) })));
+    const points: { time: UTCTimestamp; open: number; high: number; low: number; close: number }[] = [];
+    for (const c of candles) {
+      const t = toUTCTime(c.time);
+      if (t === null) continue;
+      points.push({ time: t, open: c.open, high: c.high, low: c.low, close: c.close });
+    }
+    if (points.length === 0) {
+      chart.remove();
+      return;
+    }
+    series.setData(points);
     chart.timeScale().fitContent();
     const ro = new ResizeObserver(() => {
       if (ref.current) chart.applyOptions({ width: ref.current.clientWidth });
@@ -120,7 +156,12 @@ export default function PriceChart({
 
   return (
     <div>
-      <div ref={ref} className="w-full" />
+      <div
+        ref={ref}
+        className="w-full"
+        role="img"
+        aria-label={`price chart for ${symbol}, ${candles.length} bars`}
+      />
       {showPlaceholder ? (
         <p className="mt-1 text-[10px] text-term-amber" role="status">
           loading live bars from /api/market_data/bars — placeholder wave, not market

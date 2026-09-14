@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
@@ -24,6 +24,11 @@ import { StaleBanner } from '../../components/ErrorState';
 
 const DISCLOSURE =
   'Not investment advice. Forecasts are measurable probabilities from the deterministic engine; AI opinions are bounded and capped at 20% influence.';
+
+/** Caps: calibration tables never mount more than one page of rows. */
+const MAX_CAL_TABLE_ROWS = 20;
+const MAX_CAL_TREND_ROWS = 10;
+const MAX_ANALYTICS_CELLS = 12;
 
 function fmtPct(p: number): string {
   return `${(p * 100).toFixed(1)}%`;
@@ -65,10 +70,15 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
   const latestMeta = calHistory[0] ?? null;
   const liveBins = f?.calibration ?? [];
   // Latest bins: live forecast first, history snapshot as fallback.
-  const chartRows = liveBins.length > 0 ? liveBins : (latestMeta?.reliability ?? []);
+  const chartRows = useMemo(
+    () => (liveBins.length > 0 ? liveBins : (latestMeta?.reliability ?? [])),
+    [liveBins, latestMeta],
+  );
   const hasAnyCalibration = chartRows.length > 0 || calHistory.length > 0;
-  const recentBacktest = getRecentBacktests().find(
-    (r) => r.symbol === symbol.trim().toUpperCase(),
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const recentBacktest = useMemo(
+    () => getRecentBacktests().find((r) => r.symbol === normalizedSymbol),
+    [normalizedSymbol, forecastQ.dataUpdatedAt],
   );
   const versions = (f?.versions ?? {}) as Record<string, unknown>;
   const inputs = (f?.inputs ?? {}) as Record<string, unknown>;
@@ -90,7 +100,9 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
         {FORECAST_HORIZONS.map((h) => (
           <button
             key={h}
+            type="button"
             className={h === horizon ? 'term-btn' : 'term-btn-ghost'}
+            aria-pressed={h === horizon}
             onClick={() => setHorizon(h)}
           >
             {h}d
@@ -162,24 +174,24 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
         <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
           <div className="rounded border border-term-border p-2">
             <p className="font-bold text-term-green">Why (bullish drivers)</p>
-            {f.why.length === 0 ? (
+            {(f.why ?? []).length === 0 ? (
               <p className="text-term-muted">unavailable</p>
             ) : (
               <ul className="list-disc pl-4 text-term-muted">
-                {f.why.map((w) => (
-                  <li key={w}>{w}</li>
+                {(f.why ?? []).map((w, i) => (
+                  <li key={`${w}-${i}`}>{w}</li>
                 ))}
               </ul>
             )}
           </div>
           <div className="rounded border border-term-border p-2">
             <p className="font-bold text-term-red">Risks (bearish drivers)</p>
-            {f.risks.length === 0 ? (
+            {(f.risks ?? []).length === 0 ? (
               <p className="text-term-muted">unavailable</p>
             ) : (
               <ul className="list-disc pl-4 text-term-muted">
-                {f.risks.map((w) => (
-                  <li key={w}>{w}</li>
+                {(f.risks ?? []).map((w, i) => (
+                  <li key={`${w}-${i}`}>{w}</li>
                 ))}
               </ul>
             )}
@@ -209,20 +221,23 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
           </div>
           <div className="rounded border border-term-border p-2">
             <p className="font-bold">Evidence IDs</p>
-            {f.evidence_ids.length === 0 ? (
+            {(f.evidence_ids ?? []).length === 0 ? (
               <p className="mt-1 text-term-muted">none</p>
             ) : (
               <p className="mt-1">
-                {f.evidence_ids.map((e) => (
-                  <code key={e} className="mr-1 rounded bg-term-bg px-1 py-0.5 text-term-cyan">
+                {(f.evidence_ids ?? []).slice(0, 24).map((e, i) => (
+                  <code key={`${e}-${i}`} className="mr-1 rounded bg-term-bg px-1 py-0.5 text-term-cyan">
                     {e}
                   </code>
                 ))}
+                {(f.evidence_ids ?? []).length > 24 && (
+                  <span className="text-term-muted">… +{(f.evidence_ids ?? []).length - 24} more</span>
+                )}
               </p>
             )}
             {f.inputs && (
               <ul className="mt-2 space-y-0.5 text-term-muted">
-                {Object.entries(f.inputs).map(([k, v]) => (
+                {Object.entries(f.inputs).slice(0, 12).map(([k, v]) => (
                   <li key={k}>
                     {k}: <span className="text-term-text">{String(v)}</span>
                   </li>
@@ -232,7 +247,13 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
           </div>
           <div className="rounded border border-term-border p-2">
             <p className="font-bold">Intervals (expected return)</p>
-            {f.intervals ? (
+            {f.intervals &&
+            typeof f.intervals.low === 'number' &&
+            typeof f.intervals.mid === 'number' &&
+            typeof f.intervals.high === 'number' &&
+            Number.isFinite(f.intervals.low) &&
+            Number.isFinite(f.intervals.mid) &&
+            Number.isFinite(f.intervals.high) ? (
               <p className="mt-1 text-term-muted">
                 low <b className="text-term-red">{(f.intervals.low * 100).toFixed(1)}%</b> · mid{' '}
                 <b className="text-term-text">{(f.intervals.mid * 100).toFixed(1)}%</b> · high{' '}
@@ -285,6 +306,11 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
         <CalibrationChart rows={chartRows} title={`Calibration history · ${f?.horizon_days ?? horizon}d`} />
         {chartRows.length > 0 ? (
           <div className="mt-2 overflow-x-auto">
+            {chartRows.length > MAX_CAL_TABLE_ROWS && (
+              <p className="mb-1 text-[11px] text-term-muted" role="status">
+                showing first {MAX_CAL_TABLE_ROWS} of {chartRows.length} bins.
+              </p>
+            )}
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-left text-term-muted">
@@ -295,10 +321,16 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
                 </tr>
               </thead>
               <tbody>
-                {chartRows.map((r, i) => (
-                  <tr key={i} className="border-t border-term-border">
+                {chartRows.slice(0, MAX_CAL_TABLE_ROWS).map((r, i) => (
+                  <tr key={`${r.bin_low}-${r.bin_high}-${i}`} className="border-t border-term-border">
                     <td className="py-1 pr-2">
-                      {r.bin_low.toFixed(2)}–{r.bin_high.toFixed(2)}
+                      {typeof r.bin_low === 'number' && Number.isFinite(r.bin_low)
+                        ? r.bin_low.toFixed(2)
+                        : '—'}
+                      –
+                      {typeof r.bin_high === 'number' && Number.isFinite(r.bin_high)
+                        ? r.bin_high.toFixed(2)
+                        : '—'}
                     </td>
                     <td className="py-1 pr-2">{r.count}</td>
                     <td className="py-1 pr-2">
@@ -330,13 +362,25 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
           </p>
         )}
         {calHistoryQ.isLoading && (
-          <p className="mt-2 text-[11px] text-term-muted">loading calibration history…</p>
+          <p className="mt-2 text-[11px] text-term-muted" role="status">loading calibration history…</p>
+        )}
+        {calHistoryQ.isError && (
+          <p className="mt-2 text-[11px] text-term-amber" role="alert">
+            ⚠ calibration history unavailable (
+            {calHistoryQ.error instanceof Error ? calHistoryQ.error.message : 'backend unreachable'}) —
+            live bins above unaffected.
+          </p>
         )}
         {calHistory.length > 0 && (
           <div className="mt-3">
             <p className="term-label">Calibration trend · past snapshots</p>
+            {calHistory.length > MAX_CAL_TREND_ROWS && (
+              <p className="mt-1 text-[11px] text-term-muted" role="status">
+                showing first {MAX_CAL_TREND_ROWS} of {calHistory.length} snapshots.
+              </p>
+            )}
             <div className="mt-1 space-y-1">
-              {calHistory.slice(0, 10).map((h, i) => {
+              {calHistory.slice(0, MAX_CAL_TREND_ROWS).map((h, i) => {
                 const b = h.brier ?? 0;
                 const e = h.ece ?? 0;
                 const bWidth = Math.min(100, Math.max(0, (b / 0.25) * 100));
@@ -429,10 +473,10 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
       {/* limitations + disclosure */}
       <section className="term-panel p-4">
         <p className="term-label">Limitations</p>
-        {f && f.limitations.length > 0 ? (
+        {f && (f.limitations ?? []).length > 0 ? (
           <ul className="mt-1 list-disc pl-5 text-sm text-term-muted">
-            {f.limitations.map((l) => (
-              <li key={l}>{l}</li>
+            {(f.limitations ?? []).map((l, i) => (
+              <li key={`${l}-${i}`}>{l}</li>
             ))}
           </ul>
         ) : (
@@ -462,6 +506,7 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
         </select>
         <button
           className="term-btn"
+          type="button"
           disabled={aiM.isPending}
           onClick={() => aiM.mutate()}
         >
@@ -487,22 +532,30 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
   );
 }
 
-function AnalyticsGrid({ title, data }: { title: string; data: Record<string, unknown> }) {
-  const entries = Object.entries(data);
+function AnalyticsGrid({ title, data }: { title: string; data: Record<string, unknown> | null | undefined }) {
+  const entries = Object.entries(data ?? {});
+  const visible = entries.slice(0, MAX_ANALYTICS_CELLS);
   return (
     <div className="mt-2">
       <p className="text-xs font-bold text-term-text">{title}</p>
       {entries.length === 0 ? (
         <p className="text-xs text-term-muted">unavailable</p>
       ) : (
-        <dl className="mt-1 grid grid-cols-2 gap-1 text-xs md:grid-cols-4">
-          {entries.slice(0, 12).map(([k, v]) => (
-            <div key={k} className="rounded border border-term-border px-2 py-1">
-              <dt className="text-term-muted">{k}</dt>
-              <dd className="font-bold">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
-            </div>
-          ))}
-        </dl>
+        <>
+          <dl className="mt-1 grid grid-cols-2 gap-1 text-xs md:grid-cols-4">
+            {visible.map(([k, v]) => (
+              <div key={k} className="rounded border border-term-border px-2 py-1">
+                <dt className="text-term-muted">{k}</dt>
+                <dd className="font-bold">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
+              </div>
+            ))}
+          </dl>
+          {entries.length > visible.length && (
+            <p className="mt-1 text-[10px] text-term-muted" role="status">
+              showing first {visible.length} of {entries.length} — +{entries.length - visible.length} more.
+            </p>
+          )}
+        </>
       )}
     </div>
   );

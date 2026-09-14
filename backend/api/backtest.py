@@ -79,20 +79,29 @@ class BacktestRunRequest(BaseModel):
 
 def _reliability_records(table: pd.DataFrame) -> list[dict]:
     out: list[dict] = []
-    for row in table.to_dict(orient="records"):
-        out.append(
-            {
-                "bin_low": float(row["bin_low"]),
-                "bin_high": float(row["bin_high"]),
-                "count": int(row["count"]),
-                "mean_predicted": None
-                if pd.isna(row["mean_predicted"])
-                else float(row["mean_predicted"]),
-                "fraction_positive": None
-                if pd.isna(row["fraction_positive"])
-                else float(row["fraction_positive"]),
-            }
-        )
+    try:
+        records = table.to_dict(orient="records")
+    except Exception:
+        return out
+    for row in records:
+        try:
+            if not isinstance(row, dict):
+                continue
+            out.append(
+                {
+                    "bin_low": float(row["bin_low"]),
+                    "bin_high": float(row["bin_high"]),
+                    "count": int(row["count"]),
+                    "mean_predicted": None
+                    if pd.isna(row["mean_predicted"])
+                    else float(row["mean_predicted"]),
+                    "fraction_positive": None
+                    if pd.isna(row["fraction_positive"])
+                    else float(row["fraction_positive"]),
+                }
+            )
+        except Exception:
+            continue
     return out
 
 
@@ -177,44 +186,81 @@ def _evaluate_horizon(
             detail=f"horizon {horizon}: no observable labels for these splits "
             "(increase limit / shrink horizon / gap)",
         )
-    table = reliability_table(y_true, y_prob, n_bins=n_bins)
+    try:
+        table = reliability_table(y_true, y_prob, n_bins=n_bins)
+        brier = float(brier_score(y_true, y_prob))
+        ece = float(calibration_error(y_true, y_prob, n_bins=n_bins))
+        reliability = _reliability_records(table)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"backtest scoring failed: {exc}") from exc
     return {
         "n_folds": int(n_folds_used),
         "n_points": int(len(y_true)),
-        "brier": float(brier_score(y_true, y_prob)),
+        "brier": brier,
         "brier_formula": "Brier = mean((p_i - y_i)^2); 0 = perfect, 0.25 = coin-flip baseline",
-        "ece": float(calibration_error(y_true, y_prob, n_bins=n_bins)),
+        "ece": ece,
         "ece_formula": "ECE = sum_b (|bin_b|/n * |mean_p_b - frac_pos_b|) over equal-width bins",
-        "reliability": _reliability_records(table),
+        "reliability": reliability,
     }
 
 
 def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
-    bars = market.get_bars(req.symbol, timeframe="1d", limit=req.limit)
-    rows = bars.get("bars", [])
-    frame = pd.DataFrame(
-        {
-            "open": [r["open"] for r in rows],
-            "high": [r["high"] for r in rows],
-            "low": [r["low"] for r in rows],
-            "close": [r["close"] for r in rows],
-            "volume": [float(r["volume"] or 0) for r in rows],
-        },
-        index=pd.to_datetime([r["ts"] for r in rows]),
-    )
-    features = build_features(frame)
+    try:
+        bars = market.get_bars(req.symbol, timeframe="1d", limit=req.limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from backend.market_data.providers.base import ProviderError as _PE
+
+        if isinstance(exc, _PE):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=f"backtest bars failed: {exc}") from exc
+    rows = bars.get("bars", []) if isinstance(bars, dict) else []
+    if not rows:
+        raise HTTPException(status_code=422, detail=f"insufficient history for {req.symbol!r}: 0 bars")
+    try:
+        frame = pd.DataFrame(
+            {
+                "open": [r["open"] for r in rows],
+                "high": [r["high"] for r in rows],
+                "low": [r["low"] for r in rows],
+                "close": [r["close"] for r in rows],
+                "volume": [float(r["volume"] or 0) for r in rows],
+            },
+            index=pd.to_datetime([r["ts"] for r in rows]),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"backtest frame failed: {exc}") from exc
+    try:
+        features = build_features(frame)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"backtest features failed: {exc}") from exc
     closes_feat = frame["close"].loc[features.index]
-    provenance = dict(bars.get("provenance", {}))
-    stamp = str(provenance.get("as_of"))
-    day = stamp[:10] if len(stamp) >= 10 else stamp
+    provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}
+    stamp = str(provenance.get("as_of", ""))
+    day = stamp[:10] if len(stamp) >= 10 else (stamp or "unknown")
     data_version = f"{provenance.get('source', 'unknown')}-bars-{day}"
     horizons = sorted(set(req.horizons))
-    results = {
-        str(h): _evaluate_horizon(
-            features, closes_feat, h, req.train_size, req.test_size, req.gap, req.n_bins
-        )
-        for h in horizons
-    }
+    results: dict[str, dict] = {}
+    for h in horizons:
+        try:
+            results[str(h)] = _evaluate_horizon(
+                features, closes_feat, h, req.train_size, req.test_size, req.gap, req.n_bins
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"backtest horizon {h} failed: {exc}") from exc
     material = "|".join(
         [req.symbol, ",".join(map(str, horizons)),
          str(req.train_size), str(req.test_size), str(req.gap), stamp]
@@ -266,9 +312,30 @@ def backtest_history(
     ``include_reliability=true`` adds the full reliability table per horizon
     (additive; default false keeps the lightweight summary shape).
     """
-    sym = symbol.strip().upper()
-    bars = market.get_bars(sym, timeframe="1d", limit=5)
-    provenance = dict(bars.get("provenance", {}))
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=422, detail="symbol must be a non-empty string")
+    try:
+        bars = market.get_bars(sym, timeframe="1d", limit=5)
+        provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}
+        if not provenance:
+            raise ValueError("empty provenance")
+    except HTTPException:
+        raise
+    except Exception:
+        try:
+            from datetime import datetime as _dt
+            from datetime import timezone as _tz
+
+            from backend.market_data.provenance import build_provenance as _bp
+
+            provenance = _bp(
+                "backtest", as_of=_dt.now(_tz.utc), delay_minutes=15,
+                quality_grade="B", fallback_used=True, missing_fields=[],
+            ).model_dump(mode="json")
+        except Exception:
+            provenance = {"source": "backtest", "as_of": "", "delay_minutes": 15,
+                          "quality_grade": "B", "fallback_used": True, "missing_fields": []}
     runs = _HISTORY.get(sym, [])
     summaries = []
     for r in runs:

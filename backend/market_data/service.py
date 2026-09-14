@@ -139,11 +139,20 @@ class MarketDataService:
 
     # -- quotes ---------------------------------------------------------
     def get_quote(self, symbol: str, market: str | None = None) -> dict:
-        instrument, candidates, ambiguous = self.registry.resolve(symbol, market)
-        provider_symbol = instrument.provider_symbol if instrument else symbol.strip().upper()
-        mic = instrument.exchange_mic if instrument else (
-            market.strip().upper() if market and market.strip() else "XNAS"
-        )
+        # Harden: coerce non-str/None symbols to str (avoids AttributeError
+        # on symbol.strip()); empty still flows to ProviderError via provider.
+        try:
+            symbol_text = str(symbol or "").strip()
+        except Exception:
+            symbol_text = ""
+        instrument, candidates, ambiguous = self.registry.resolve(symbol_text, market)
+        provider_symbol = instrument.provider_symbol if instrument else symbol_text.upper()
+        try:
+            mic = instrument.exchange_mic if instrument else (
+                str(market).strip().upper() if market and str(market).strip() else "XNAS"
+            )
+        except Exception:
+            mic = "XNAS"
 
         sse = _is_sse_request(mic, provider_symbol, market)
         if sse:
@@ -221,6 +230,10 @@ class MarketDataService:
         as_of = quote.get("as_of") or _utcnow()
         if not isinstance(as_of, datetime):
             as_of = _utcnow()
+        elif as_of.tzinfo is None:
+            # Naive provider timestamps are assumed UTC (avoids
+            # naive/aware subtraction crashes in the age math below).
+            as_of = as_of.replace(tzinfo=timezone.utc)
         if instrument is not None:
             mic = instrument.exchange_mic
         elif market and market.strip():
@@ -312,10 +325,17 @@ class MarketDataService:
         from backend.db.models import Instrument as DBInstrument, PriceBar
         from backend.db.session import get_session_factory
 
-        instrument, _, _ = self.registry.resolve(symbol)
+        try:
+            symbol_text = str(symbol or "").strip()
+        except Exception:
+            return None
+        instrument, _, _ = self.registry.resolve(symbol_text)
         if instrument is None:
             return None
-        n = max(1, min(int(limit), 250))
+        try:
+            n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            n = 30
         Session = get_session_factory()  # lazy per call; cached engine
         db = Session()
         try:
@@ -372,7 +392,9 @@ class MarketDataService:
                 })
             if not bars:
                 return None
-            source = max(set(sources), key=sources.count) if sources else "yfinance"
+            # Deterministic source pick: ties broken alphabetically so same
+            # inputs always yield the same provenance (set order is random).
+            source = max(sorted(set(sources)), key=sources.count) if sources else "yfinance"
             mic = instrument.exchange_mic if instrument else "XNAS"
             try:
                 expected = expected_delay_minutes(mic)
@@ -405,22 +427,30 @@ class MarketDataService:
                 pass
 
     def _stub_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
-        instrument, _, _ = self.registry.resolve(symbol)
-        provider_symbol = instrument.provider_symbol if instrument else symbol.strip().upper()
+        try:
+            symbol_text = str(symbol or "").strip()
+        except Exception:
+            symbol_text = ""
+        instrument, _, _ = self.registry.resolve(symbol_text)
+        provider_symbol = instrument.provider_symbol if instrument else symbol_text.upper()
+        try:
+            n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            n = 30
         seed = int(hashlib.sha256(provider_symbol.encode()).hexdigest(), 16) % (2**32)
         rng = random.Random(seed)
         base = 100.0 + (seed % 900)
         price = base
         rows: list[dict] = []
         day = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        for i in range(max(1, min(int(limit), 250))):
+        for i in range(n):
             drift = rng.uniform(-0.015, 0.015)
             o = price
             c = round(o * (1 + drift), 2)
             h = round(max(o, c) * (1 + rng.uniform(0, 0.008)), 2)
             low = round(min(o, c) * (1 - rng.uniform(0, 0.008)), 2)
             rows.append({
-                "ts": (day - timedelta(days=(limit - 1 - i))).isoformat(),
+                "ts": (day - timedelta(days=(n - 1 - i))).isoformat(),
                 "open": round(o, 2), "high": h, "low": low, "close": c,
                 "volume": rng.randint(100_000, 60_000_000),
                 "missing_fields": [],

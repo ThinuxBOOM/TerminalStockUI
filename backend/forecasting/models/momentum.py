@@ -57,21 +57,33 @@ class MomentumBaseline:
         data_version: str = "unspecified",
     ) -> ForecastResult:
         """Logistic map of the trailing risk-adjusted return."""
-        if int(horizon_days) < 1:
+        try:
+            horizon = int(horizon_days)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("horizon_days must be >= 1") from exc
+        if horizon < 1:
             raise ValueError("horizon_days must be >= 1")
         if self.trailing_return is None or self.trailing_vol is None:
             raise ValueError("model is not fitted; call fit() first")
-        denom = self.trailing_vol * math.sqrt(self.trailing_days)
-        if denom == 0:
-            proba = 1.0 if self.trailing_return > 0 else (
-                0.0 if self.trailing_return < 0 else 0.5)
+        # Guard non-finite fitted state (never leaks NaN/inf to the wire).
+        try:
+            tr = float(self.trailing_return)
+            tv = float(self.trailing_vol)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("model state is non-numeric") from exc
+        if not (math.isfinite(tr) and math.isfinite(tv)):
+            raise ValueError("model state must be finite")
+        denom = tv * math.sqrt(self.trailing_days)
+        if denom == 0 or not math.isfinite(denom):
+            proba = 1.0 if tr > 0 else (
+                0.0 if tr < 0 else 0.5)
         else:
             # Clip z: exp() overflows past ~709; |z| <= 50 already saturates
             # the sigmoid to 0/1 within float precision. Deterministic.
-            z = max(min(GAIN * self.trailing_return / denom, 50.0), -50.0)
+            z = max(min(GAIN * tr / denom, 50.0), -50.0)
             proba = 1.0 / (1.0 + math.exp(-z))
         return ForecastResult(
-            TARGET_DIRECTION, int(horizon_days), float(proba),
+            TARGET_DIRECTION, horizon, float(proba),
             FORMULA, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
             data_version, as_of,
         )

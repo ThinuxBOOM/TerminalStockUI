@@ -33,6 +33,7 @@ source, delay_minutes, missing_fields, fallback_used}``. Use
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 
@@ -166,7 +167,7 @@ class FXProvider:
                 if hist is None or len(hist) == 0:
                     raise ProviderError(NAME, f"no data for {symbol}")
                 close = float(hist["Close"].iloc[-1])
-                if not (close == close and close > 0):
+                if not (math.isfinite(close) and close > 0):
                     raise ProviderError(NAME, f"bad close for {symbol}")
             except ProviderError as exc:
                 last_exc = exc
@@ -201,10 +202,25 @@ class FXProvider:
         self.breaker = breaker or CircuitBreaker()
         self.limiter = limiter or RateLimiter()
         self.delay_minutes = delay_minutes
-        self.cache_ttl_s = cache_ttl_s
+        try:
+            ttl = int(cache_ttl_s)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            ttl = CACHE_TTL_S
+        try:
+            import math as _math
+
+            if not _math.isfinite(float(ttl)):
+                ttl = CACHE_TTL_S
+        except (TypeError, ValueError, OverflowError):
+            ttl = CACHE_TTL_S
+        self.cache_ttl_s = ttl
         self.stub_mode = stub_mode
         self._on_call = on_call  # health hook: fn(provider, latency_ms, ok)
         self._cache: dict[str, tuple[float, dict]] = {}
+        # Rate cache is bounded (live pairs are USD/EUR/CNY only); expired
+        # entries are purged first, then oldest-inserted, so the dict cannot
+        # grow without bound on long-lived processes.
+        self._cache_max_entries = 64
         # ECB reconciler table: (expires_at_monotonic, ecb_time_date, per_eur).
         # Only successful fetches are cached (failures abstain and retry on the
         # next live fetch); the entry is date-stamped so a date rollover is
@@ -231,6 +247,15 @@ class FXProvider:
 
     def _cache_put(self, key: str, payload: dict) -> None:
         self._cache[key] = (time.monotonic() + self.cache_ttl_s, dict(payload))
+        if len(self._cache) <= self._cache_max_entries:
+            return
+        now = time.monotonic()
+        for stale in [k for k, (exp, _) in self._cache.items() if now >= exp]:
+            self._cache.pop(stale, None)
+            if len(self._cache) <= self._cache_max_entries:
+                return
+        while len(self._cache) > self._cache_max_entries:
+            self._cache.pop(next(iter(self._cache)), None)
 
     def _stub_payload(self, base: str, quote: str) -> dict:
         rate = stub_rate(base, quote)
@@ -286,6 +311,8 @@ class FXProvider:
         try:
             if not (live_rate > 0):
                 return {"reconciled": False}
+            if not math.isfinite(live_rate):
+                return {"reconciled": False}
             table = self._get_ecb_table()
             if not table:
                 return {"reconciled": False}
@@ -329,7 +356,7 @@ class FXProvider:
             raise ProviderError(NAME, f"{type(exc).__name__}: {exc}") from exc
         try:
             rate = float((data.get("rates") or {})[quote])
-            if rate <= 0:
+            if not math.isfinite(rate) or rate <= 0:
                 raise ValueError("non-positive rate")
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError(NAME, f"unexpected frankfurter schema: {exc}") from exc
@@ -397,9 +424,20 @@ class FXProvider:
                 payload = self._stub_payload(b, q)
                 payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
                 return payload
+        try:
+            rate = float(raw["rate"])
+        except (KeyError, TypeError, ValueError):
+            rate = float("nan")
+        if not math.isfinite(rate) or rate <= 0:
+            # Malformed/non-finite upstream rate: degrade to the flagged
+            # stub instead of leaking NaN/inf (get_rate never raises here).
+            self.breaker.record_failure()
+            self._emit((time.perf_counter() - started) * 1000, False)
+            payload = self._stub_payload(b, q)
+            payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
+            return payload
         self.breaker.record_success()
         self._emit((time.perf_counter() - started) * 1000, True)
-        rate = float(raw["rate"])
         payload = {
             "pair": f"{b}/{q}",
             "base": b,

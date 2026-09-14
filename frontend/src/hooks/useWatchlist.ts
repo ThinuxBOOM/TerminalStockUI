@@ -51,7 +51,11 @@ function recordSource(symbol: string, source: WatchlistSource): void {
         map = parsed as Record<string, string>;
       }
     }
-    map[symbol.toUpperCase()] = String(source);
+    // Case-insensitive key (strip spaces, UPPER) so `aapl` and `AAPL`
+    // share one audit entry instead of forking.
+    const key = normalizeSymbol(symbol);
+    if (!key) return;
+    map[key] = String(source);
     localStorage.setItem(WATCHLIST_SOURCES_KEY, JSON.stringify(map));
   } catch {
     /* storage unavailable — audit map stays in-memory */
@@ -65,7 +69,16 @@ export function getWatchlistSources(): Record<string, string> {
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, string>;
+      // Normalize legacy keys case-insensitively; last write wins on
+      // collision. Valid (already UPPER, spaceless) maps pass through
+      // unchanged.
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        const nk = normalizeSymbol(k);
+        if (!nk) continue;
+        out[nk] = String(v);
+      }
+      return out;
     }
     return {};
   } catch {
@@ -96,14 +109,29 @@ export default function useWatchlist() {
   }, [symbols]);
 
   // Cross-tab sync: another tab's write updates this tab's state.
+  // Handles clear() (key null), removeItem (newValue null), and explicit
+  // writes. An explicit empty array (clear()) stays empty; a missing key
+  // (fresh/removed storage) resets to the shared defaults.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
-      if (e.key !== WATCHLIST_KEY) return;
+      if (e.key !== null && e.key !== WATCHLIST_KEY) return;
       try {
-        if (!e.newValue) return;
+        if (e.newValue === null || e.newValue === undefined) {
+          setSymbols([...DEFAULT_WATCHLIST]);
+          return;
+        }
         const parsed: unknown = JSON.parse(e.newValue);
         if (!Array.isArray(parsed)) return;
-        setSymbols(dedupeCaseInsensitive(parsed.map((s) => String(s ?? ''))));
+        const incoming = parsed.map((s) => String(s ?? ''));
+        // Preserve an explicit clear ([] stays []); only fall back to
+        // defaults when the payload carries no valid symbols but is not
+        // an explicit empty write.
+        if (incoming.length === 0) {
+          setSymbols([]);
+          return;
+        }
+        const clean = dedupeCaseInsensitive(incoming);
+        if (clean.length > 0) setSymbols(clean);
       } catch {
         /* ignore malformed cross-tab payloads */
       }

@@ -77,7 +77,11 @@ class HistoricalDriftBaseline:
         data_version: str = "unspecified",
     ) -> ForecastResult:
         """P(close_{t+h} > close_t) under constant-drift log-normal walk."""
-        if int(horizon_days) < 1:
+        try:
+            horizon = int(horizon_days)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("horizon_days must be >= 1") from exc
+        if horizon < 1:
             raise ValueError("horizon_days must be >= 1")
         mu, sigma = self._require_fit()
         horizon = int(horizon_days)
@@ -99,22 +103,39 @@ class HistoricalDriftBaseline:
         data_version: str = "unspecified",
     ) -> ForecastResult:
         """Symmetric z-band around the drift-implied forward return."""
-        if int(horizon_days) < 1:
+        try:
+            horizon = int(horizon_days)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("horizon_days must be >= 1") from exc
+        if horizon < 1:
             raise ValueError("horizon_days must be >= 1")
-        if not float(z) > 0:
+        try:
+            zf = float(z)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("z must be > 0") from exc
+        if not zf > 0:
             raise ValueError("z must be > 0")
         mu, sigma = self._require_fit()
-        horizon = int(horizon_days)
-        mid_log, half_log = mu * horizon, float(z) * sigma * math.sqrt(horizon)
+        mid_log, half_log = mu * horizon, zf * sigma * math.sqrt(horizon)
+        try:
+            low = float(math.exp(mid_log - half_log) - 1.0)
+            mid = float(math.exp(mid_log) - 1.0)
+            high = float(math.exp(mid_log + half_log) - 1.0)
+        except OverflowError as exc:
+            raise ValueError("drift return band overflows finite range") from exc
+        import math as _math2
+
+        if not (_math2.isfinite(low) and _math2.isfinite(mid) and _math2.isfinite(high)):
+            raise ValueError("drift return band overflows finite range")
         value = {
-            "low": float(math.exp(mid_log - half_log) - 1.0),
-            "mid": float(math.exp(mid_log) - 1.0),
-            "high": float(math.exp(mid_log + half_log) - 1.0),
-            "z": float(z),
+            "low": low,
+            "mid": mid,
+            "high": high,
+            "z": zf,
         }
         return ForecastResult(
             TARGET_RETURN_RANGE, horizon, value,
-            FORMULA_RANGE + f" with z={float(z)}",
+            FORMULA_RANGE + f" with z={zf}",
             MODEL_NAME, MODEL_VERSION, FEATURE_VERSION, data_version, as_of,
         )
 

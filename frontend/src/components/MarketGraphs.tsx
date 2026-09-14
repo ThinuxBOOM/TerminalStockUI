@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { MarketBreadth, MarketSymbolRow } from '../api/markets';
 
 const GREEN = '#3ddc84';
@@ -30,16 +31,29 @@ function finite(v: number | null | undefined): v is number {
  * Never ranks markets; both charts are independently scaled and labeled.
  */
 export function CrossMarketChart({ markets }: { markets: MarketBreadth[] }) {
+  const rows = useMemo(() => markets ?? [], [markets]);
   const W = 360;
   const rowH = 26;
   const padL = 64;
   const padR = 56;
   const padT = 8;
-  const H = padT + markets.length * rowH + 18;
-  const maxAbs =
-    Math.max(0.5, ...markets.map((m) => Math.abs(m.avg_change_pct ?? 0))) || 0.5;
-  const maxVol =
-    Math.max(1, ...markets.map((m) => m.total_volume ?? 0)) || 1;
+  const H = padT + rows.length * rowH + 18;
+  const maxAbs = useMemo(() => {
+    let m = 0.5;
+    for (const r of rows) {
+      const v = Math.abs(r?.avg_change_pct ?? 0);
+      if (Number.isFinite(v) && v > m) m = v;
+    }
+    return m;
+  }, [rows]);
+  const maxVol = useMemo(() => {
+    let m = 1;
+    for (const r of rows) {
+      const v = r?.total_volume ?? 0;
+      if (typeof v === 'number' && Number.isFinite(v) && v > m) m = v;
+    }
+    return m;
+  }, [rows]);
   const cx = padL + (W - padL - padR) / 2;
   const half = (W - padL - padR) / 2;
   const x = (v: number) => cx + (Math.max(-maxAbs, Math.min(maxAbs, v)) / maxAbs) * half;
@@ -52,12 +66,12 @@ export function CrossMarketChart({ markets }: { markets: MarketBreadth[] }) {
           viewBox={`0 0 ${W} ${H}`}
           className="w-full rounded border border-term-border bg-term-bg"
           role="img"
-          aria-label={`average change percent per market: ${markets
+          aria-label={`average change percent per market: ${rows
             .map((m) => `${m.mic} ${m.avg_change_pct?.toFixed(2) ?? 'unavailable'}%`)
             .join(', ')}`}
         >
           <line x1={cx} y1={padT} x2={cx} y2={H - 18} stroke={AXIS} />
-          {markets.map((m, i) => {
+          {rows.map((m, i) => {
             const y = padT + i * rowH;
             const v = m.avg_change_pct;
             const has = finite(v);
@@ -65,7 +79,7 @@ export function CrossMarketChart({ markets }: { markets: MarketBreadth[] }) {
             const bw = has ? Math.max(2, Math.abs(x(v as number) - cx)) : 0;
             const col = !has ? MUTED : (v as number) > 0 ? GREEN : (v as number) < 0 ? RED : MUTED;
             return (
-              <g key={m.mic}>
+              <g key={`${m.mic}-${i}`}>
                 <text x={padL - 6} y={y + 14} fill={MUTED} fontSize={10} textAnchor="end">
                   {m.mic}
                 </text>
@@ -91,11 +105,11 @@ export function CrossMarketChart({ markets }: { markets: MarketBreadth[] }) {
           viewBox={`0 0 ${W} ${H}`}
           className="w-full rounded border border-term-border bg-term-bg"
           role="img"
-          aria-label={`total volume per market: ${markets
+          aria-label={`total volume per market: ${rows
             .map((m) => `${m.mic} ${m.total_volume ?? 'unavailable'}`)
             .join(', ')}`}
         >
-          {markets.map((m, i) => {
+          {rows.map((m, i) => {
             const y = padT + i * rowH;
             const v = m.total_volume;
             const w =
@@ -103,7 +117,7 @@ export function CrossMarketChart({ markets }: { markets: MarketBreadth[] }) {
                 ? Math.max(2, ((v as number) / maxVol) * (W - padL - padR))
                 : 0;
             return (
-              <g key={m.mic}>
+              <g key={`${m.mic}-${i}`}>
                 <text x={padL - 6} y={y + 14} fill={MUTED} fontSize={10} textAnchor="end">
                   {m.mic}
                 </text>
@@ -132,18 +146,41 @@ export function CrossMarketChart({ markets }: { markets: MarketBreadth[] }) {
  * Rows come from GET /api/markets/{mic}/liquidity (or the screener fallback).
  */
 export function MarketDetailGraphs({ rows }: { rows: MarketSymbolRow[] }) {
+  const all = useMemo(() => (rows ?? []).filter((r) => r && typeof r.symbol === 'string' && r.symbol !== ''), [rows]);
+  // Cap: per-symbol SVG rows are bounded so an outsized screener fallback
+  // never renders hundreds of SVG nodes.
+  const MAX_DETAIL_ROWS = 30;
+  const capped = useMemo(() => all.slice(0, MAX_DETAIL_ROWS), [all]);
+  const cappedNote = all.length > capped.length ? `showing first ${capped.length} of ${all.length}` : null;
   const W = 360;
   const rowH = 24;
   const padL = 92;
   const padR = 58;
   const padT = 8;
-  const changes = rows.filter((r) => finite(r.change_pct));
-  const vols = rows.filter((r) => finite(r.volume) && (r.volume as number) > 0);
-  const sorted = [...rows].sort((a, b) => (b.change_pct ?? -Infinity) - (a.change_pct ?? -Infinity));
+  const changes = useMemo(() => capped.filter((r) => finite(r.change_pct)), [capped]);
+  const vols = useMemo(() => capped.filter((r) => finite(r.volume) && (r.volume as number) > 0), [capped]);
+  const sorted = useMemo(
+    () => [...capped].sort((a, b) => (b.change_pct ?? -Infinity) - (a.change_pct ?? -Infinity)),
+    [capped],
+  );
   const Hc = padT + Math.max(1, sorted.length) * rowH + 18;
-  const Hv = padT + Math.max(1, rows.length) * rowH + 18;
-  const maxAbs = Math.max(0.5, ...changes.map((r) => Math.abs(r.change_pct as number))) || 0.5;
-  const maxVol = Math.max(1, ...vols.map((r) => r.volume as number)) || 1;
+  const Hv = padT + Math.max(1, capped.length) * rowH + 18;
+  const maxAbs = useMemo(() => {
+    let m = 0.5;
+    for (const r of changes) {
+      const v = Math.abs(r.change_pct as number);
+      if (Number.isFinite(v) && v > m) m = v;
+    }
+    return m;
+  }, [changes]);
+  const maxVol = useMemo(() => {
+    let m = 1;
+    for (const r of vols) {
+      const v = r.volume as number;
+      if (Number.isFinite(v) && v > m) m = v;
+    }
+    return m;
+  }, [vols]);
   const cx = padL + (W - padL - padR) / 2;
   const half = (W - padL - padR) / 2;
   const x = (v: number) => cx + (Math.max(-maxAbs, Math.min(maxAbs, v)) / maxAbs) * half;
@@ -151,9 +188,9 @@ export function MarketDetailGraphs({ rows }: { rows: MarketSymbolRow[] }) {
   return (
     <div className="grid min-w-0 gap-3 lg:grid-cols-2">
       <figure className="min-w-0">
-        <figcaption className="term-label mb-1">Change % by symbol</figcaption>
+        <figcaption className="term-label mb-1">Change % by symbol{cappedNote ? ` · ${cappedNote}` : ''}</figcaption>
         {changes.length === 0 ? (
-          <p className="rounded border border-term-border p-3 text-xs text-term-muted">
+          <p className="rounded border border-term-border p-3 text-xs text-term-muted" role="status">
             No change data for these symbols yet.
           </p>
         ) : (
@@ -173,10 +210,11 @@ export function MarketDetailGraphs({ rows }: { rows: MarketSymbolRow[] }) {
               const bx = has ? Math.min(cx, x(v as number)) : cx;
               const bw = has ? Math.max(2, Math.abs(x(v as number) - cx)) : 0;
               const col = !has ? MUTED : (v as number) > 0 ? GREEN : (v as number) < 0 ? RED : MUTED;
+              const label = r.symbol.length > 12 ? r.symbol.slice(0, 12) + '…' : r.symbol;
               return (
-                <g key={r.symbol}>
+                <g key={`${r.symbol}-${i}`}>
                   <text x={padL - 6} y={y + 13} fill={MUTED} fontSize={9} textAnchor="end">
-                    {r.symbol.length > 12 ? r.symbol.slice(0, 12) + '…' : r.symbol}
+                    {label}
                   </text>
                   {has ? (
                     <rect x={bx} y={y + 3} width={bw} height={11} rx={2} fill={col} fillOpacity={0.8}>
@@ -196,9 +234,9 @@ export function MarketDetailGraphs({ rows }: { rows: MarketSymbolRow[] }) {
         )}
       </figure>
       <figure className="min-w-0">
-        <figcaption className="term-label mb-1">Volume by symbol</figcaption>
+        <figcaption className="term-label mb-1">Volume by symbol{cappedNote ? ` · ${cappedNote}` : ''}</figcaption>
         {vols.length === 0 ? (
-          <p className="rounded border border-term-border p-3 text-xs text-term-muted">
+          <p className="rounded border border-term-border p-3 text-xs text-term-muted" role="status">
             No volume data for these symbols yet — screener fallback carries no volume.
           </p>
         ) : (
@@ -206,7 +244,7 @@ export function MarketDetailGraphs({ rows }: { rows: MarketSymbolRow[] }) {
             viewBox={`0 0 ${W} ${Hv}`}
             className="w-full rounded border border-term-border bg-term-bg"
             role="img"
-            aria-label={`volume by symbol: ${rows
+            aria-label={`volume by symbol: ${capped
               .map((r) => `${r.symbol} ${r.volume ?? 'unavailable'}`)
               .join(', ')}`}
           >
@@ -221,17 +259,18 @@ export function MarketDetailGraphs({ rows }: { rows: MarketSymbolRow[] }) {
                 strokeWidth={1}
               />
             ))}
-            {rows.map((r, i) => {
+            {capped.map((r, i) => {
               const y = padT + i * rowH;
               const v = r.volume;
               const w =
                 finite(v) && (v as number) > 0
                   ? Math.max(2, ((v as number) / maxVol) * (W - padL - padR))
                   : 0;
+              const label = r.symbol.length > 12 ? r.symbol.slice(0, 12) + '…' : r.symbol;
               return (
-                <g key={r.symbol}>
+                <g key={`${r.symbol}-${i}`}>
                   <text x={padL - 6} y={y + 13} fill={MUTED} fontSize={9} textAnchor="end">
-                    {r.symbol.length > 12 ? r.symbol.slice(0, 12) + '…' : r.symbol}
+                    {label}
                   </text>
                   {w > 0 ? (
                     <rect x={padL} y={y + 3} width={w} height={11} rx={2} fill="#3b82a0" fillOpacity={0.8}>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
 import { displaySymbol, searchInstruments } from '../../api/client';
@@ -90,6 +90,15 @@ export default function SearchBox({
     submitted.length >= 1,
   );
 
+  // Cap: a broad query can match dozens of instruments — render the first
+  // page only so the list never mounts hundreds of rows.
+  const MAX_RESULTS = 50;
+  const totalResults = data?.length ?? 0;
+  const visibleResults = useMemo(
+    () => (data ?? []).slice(0, MAX_RESULTS),
+    [data],
+  );
+
   function saveRecent(term: string) {
     const t = term.trim();
     if (!t) return;
@@ -128,9 +137,10 @@ export default function SearchBox({
     // Flush the debounce immediately so Enter never waits 300ms.
     setDebounced(term);
     saveRecent(term);
-    if (data && data.length > 0) {
+    const list = visibleResults.length > 0 ? visibleResults : [];
+    if (list.length > 0) {
       const target =
-        activeIndex >= 0 && activeIndex < data.length ? data[activeIndex] : data[0];
+        activeIndex >= 0 && activeIndex < list.length ? list[activeIndex] : list[0];
       goToSymbol(displaySymbol(target));
     } else {
       void refetch();
@@ -138,17 +148,18 @@ export default function SearchBox({
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'ArrowDown' && data && data.length > 0) {
+    const n = visibleResults.length;
+    if (e.key === 'ArrowDown' && n > 0) {
       e.preventDefault();
-      setActiveIndex((i) => (i + 1) % data.length);
-    } else if (e.key === 'ArrowUp' && data && data.length > 0) {
+      setActiveIndex((i) => (i + 1) % n);
+    } else if (e.key === 'ArrowUp' && n > 0) {
       e.preventDefault();
-      setActiveIndex((i) => (i <= 0 ? data.length - 1 : i - 1));
-    } else if (e.key === 'Enter' && data && data.length > 0 && q.trim()) {
+      setActiveIndex((i) => (i <= 0 ? n - 1 : i - 1));
+    } else if (e.key === 'Enter' && n > 0 && q.trim()) {
       // Enter → first (or arrow-highlighted) result.
       e.preventDefault();
       const target =
-        activeIndex >= 0 && activeIndex < data.length ? data[activeIndex] : data[0];
+        activeIndex >= 0 && activeIndex < n ? visibleResults[activeIndex] : visibleResults[0];
       goToSymbol(displaySymbol(target));
     }
   }
@@ -259,50 +270,57 @@ export default function SearchBox({
             pick the exact symbol or narrow with the market filter.
           </div>
         )}
-        {data && data.length > 0 && (
-          <ul
-            id="search-listbox"
-            role="listbox"
-            aria-label="Search results"
-            className="term-panel divide-y divide-term-border"
-          >
-            {data.map((r, i) => {
-              const sym = displaySymbol(r);
-              const curr = (r.currency ?? '').toUpperCase();
-              const active = i === activeIndex;
-              return (
-                <li
-                  key={`${sym}-${r.exchange_mic ?? ''}`}
-                  id={`search-option-${i}`}
-                  role="option"
-                  aria-selected={active}
-                  className={`flex items-center justify-between gap-2 p-3 ${active ? 'bg-term-border' : ''}`}
-                >
-                  <div className="min-w-0">
-                    <Link
-                      to={`/security/${encodeURIComponent(sym)}`}
-                      className="font-bold text-term-green hover:underline"
-                      onClick={() => saveRecent(submitted)}
-                    >
-                      {sym}
-                    </Link>
-                    <span className="ml-2 text-xs text-term-muted">
-                      {r.company_name ?? ''} {r.exchange_mic ? `· ${r.exchange_mic}` : ''}{' '}
-                      {curr ? `· ${curr}${glyphFor(curr)}` : ''}
-                    </span>
-                  </div>
-                  <Link
-                    className="term-btn-ghost shrink-0 text-xs"
-                    to={`/security/${encodeURIComponent(sym)}`}
-                    onClick={() => saveRecent(submitted)}
-                    aria-label={`Open Security Brief for ${sym}`}
+        {submitted && data && data.length > 0 && (
+          <>
+            {totalResults > visibleResults.length && (
+              <p className="mb-2 text-[11px] text-term-muted" role="status">
+                showing first {visibleResults.length} of {totalResults} — refine the query or market filter.
+              </p>
+            )}
+            <ul
+              id="search-listbox"
+              role="listbox"
+              aria-label="Search results"
+              className="term-panel divide-y divide-term-border"
+            >
+              {visibleResults.map((r, i) => {
+                const sym = displaySymbol(r);
+                const curr = (r.currency ?? '').toUpperCase();
+                const active = i === activeIndex;
+                return (
+                  <li
+                    key={`${sym}-${r.exchange_mic ?? ''}-${i}`}
+                    id={`search-option-${i}`}
+                    role="option"
+                    aria-selected={active}
+                    className={`flex items-center justify-between gap-2 p-3 ${active ? 'bg-term-border' : ''}`}
                   >
-                    BRIEF →
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
+                    <div className="min-w-0">
+                      <Link
+                        to={`/security/${encodeURIComponent(sym)}`}
+                        className="font-bold text-term-green hover:underline"
+                        onClick={() => saveRecent(submitted)}
+                      >
+                        {sym}
+                      </Link>
+                      <span className="ml-2 text-xs text-term-muted">
+                        {r.company_name ?? ''} {r.exchange_mic ? `· ${r.exchange_mic}` : ''}{' '}
+                        {curr ? `· ${curr}${glyphFor(curr)}` : ''}
+                      </span>
+                    </div>
+                    <Link
+                      className="term-btn-ghost shrink-0 text-xs"
+                      to={`/security/${encodeURIComponent(sym)}`}
+                      onClick={() => saveRecent(submitted)}
+                      aria-label={`Open Security Brief for ${sym}`}
+                    >
+                      BRIEF →
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
         )}
       </div>
     </div>

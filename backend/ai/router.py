@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import OrderedDict, defaultdict
 from typing import Any
@@ -48,11 +49,17 @@ class ProviderPerformanceTracker:
 
     Swap the backing store for Postgres/Redis later; the interface stays.
     `correct` is optional (set once outcomes are known); latency/stub/error
-    stats are recorded on every call.
+    stats are recorded on every call. Bounded: the newest ``MAX_RECORDS``
+    calls are kept (oldest dropped) so long-lived routers cannot grow
+    without bound; summaries over the retained window are unaffected for
+    normal (small) volumes.
     """
 
-    def __init__(self) -> None:
+    MAX_RECORDS = 5000
+
+    def __init__(self, max_records: int = MAX_RECORDS) -> None:
         self._records: list[dict[str, Any]] = []
+        self._max_records = max(1, int(max_records))
 
     def record(
         self,
@@ -66,22 +73,56 @@ class ProviderPerformanceTracker:
         stub: bool = False,
         error: str | None = None,
     ) -> None:
+        try:
+            horizon_int = int(horizon)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            horizon_int = 0
+        try:
+            latency = float(latency_ms or 0.0)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            latency = 0.0
+        if not math.isfinite(latency) or latency < 0:
+            latency = 0.0
+        try:
+            prov = str(provider or "unknown")
+        except Exception:
+            prov = "unknown"
+        try:
+            mod = str(model or "unknown")
+        except Exception:
+            mod = "unknown"
+        try:
+            exch = str(exchange or "unknown").upper() or "unknown"
+        except Exception:
+            exch = "unknown"
         self._records.append({
-            "provider": provider, "model": model,
-            "exchange": (exchange or "unknown").upper() or "unknown",
-            "horizon": int(horizon),
-            "correct": correct, "latency_ms": float(latency_ms or 0.0),
+            "provider": prov, "model": mod,
+            "exchange": exch,
+            "horizon": horizon_int,
+            "correct": correct, "latency_ms": latency,
             "stub": bool(stub), "error": bool(error),
         })
+        if len(self._records) > self._max_records:
+            del self._records[: len(self._records) - self._max_records]
 
     def summary(
         self, *, exchange: str | None = None, horizon: int | None = None
     ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+        try:
+            exch_filter = str(exchange).upper() if exchange else None
+        except Exception:
+            exch_filter = None
+        horizon_filter: int | None = None
+        if horizon is not None:
+            try:
+                horizon_filter = int(horizon)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return []
         for record in self._records:
-            if exchange and record["exchange"] != exchange.upper():
+            if exch_filter and record["exchange"] != exch_filter:
                 continue
-            if horizon is not None and record["horizon"] != int(horizon):
+            if horizon_filter is not None and record["horizon"] != horizon_filter:
                 continue
             key = (record["provider"], record["model"], record["exchange"], record["horizon"])
             bucket = groups.setdefault(key, {
@@ -221,10 +262,11 @@ class AIRouter:
     ) -> None:
         # Redacted by construction: packet/opinion never carry secrets.
         prompt_chars = len(packet.evidence_hash) + len(packet.symbol) + 6000
+        prompt_tokens_est = max(1, prompt_chars // 4)  # == estimate_tokens without the alloc
         self.token_log.append({
             "profile": profile, "provider": provider, "model": model,
             "packet_id": packet.packet_id, "evidence_hash": packet.evidence_hash,
-            "prompt_tokens_est": estimate_tokens("x" * prompt_chars),
+            "prompt_tokens_est": prompt_tokens_est,
             "cached": cached, "stub": bool(opinion.stub),
             "latency_ms": round(latency_ms, 2),
         })

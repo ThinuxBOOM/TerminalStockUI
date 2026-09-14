@@ -122,23 +122,32 @@ class InstrumentRegistry:
         return self._by_id.get((instrument_id or "").upper())
 
     def get_by_mic_symbol(self, mic: str, symbol: str) -> Instrument | None:
-        key = (mic.upper(), (symbol or "").upper())
+        try:
+            mic_up = str(mic or "").upper()
+            sym_up = str(symbol or "").upper()
+        except Exception:
+            return None
+        if not mic_up:
+            return None
+        key = (mic_up, sym_up)
         hit = self._by_mic_symbol.get(key)
         if hit is not None:
             return hit
         # Backward-compat: try the alternate suffixed/bare form.
         try:
-            suffix = str(suffix_for_mic(mic)).upper()
+            suffix = str(suffix_for_mic(mic_up)).upper()
         except ValueError:
             return None
+        except Exception:
+            return None
         if suffix:
-            upper = (symbol or "").upper()
+            upper = sym_up
             if upper.endswith(suffix):
                 base = upper[: -len(suffix)]
                 if base:
-                    return self._by_mic_symbol.get((mic.upper(), base))
+                    return self._by_mic_symbol.get((mic_up, base))
             else:
-                return self._by_mic_symbol.get((mic.upper(), upper + suffix))
+                return self._by_mic_symbol.get((mic_up, upper + suffix))
         return None
 
     def resolve(self, symbol: str, market: str | None = None) -> tuple[Instrument | None, list[Instrument], bool]:
@@ -158,14 +167,18 @@ class InstrumentRegistry:
         """
         from backend.instruments.search import search_instruments  # local import: no cycle
 
-        text = (symbol or "").strip()
+        text = str(symbol or "").strip()
         if not text:
             return None, [], False
         upper = text.upper()
+        try:
+            market_up = str(market).strip().upper() if market else None
+        except Exception:
+            market_up = None
 
         # 1. Direct provider-symbol hit (handles .SS/.PA/.AS/.BR exactly).
         direct = self._by_provider.get(upper)
-        if direct and (market is None or direct.exchange_mic == market.upper()):
+        if direct and (market_up is None or direct.exchange_mic == market_up):
             return direct, [direct], False
 
         # 1b. Suffix-aware mic+base lookup (backward-compat both forms).
@@ -174,7 +187,7 @@ class InstrumentRegistry:
             base, mic_hint = split_provider_symbol(text)
         except Exception:
             base, mic_hint = upper, None
-        if mic_hint is not None and (market is None or market.upper() == mic_hint):
+        if mic_hint is not None and (market_up is None or market_up == mic_hint):
             via_mic = self.get_by_mic_symbol(mic_hint, base)
             if via_mic is not None:
                 return via_mic, [via_mic], False
@@ -185,8 +198,8 @@ class InstrumentRegistry:
 
         # 2. Exact exchange-symbol hit (optionally scoped to market).
         exact = [i for i in self._items if i.exchange_symbol.upper() == upper]
-        if market:
-            exact = [i for i in exact if i.exchange_mic == market.upper()]
+        if market_up:
+            exact = [i for i in exact if i.exchange_mic == market_up]
         if len(exact) == 1:
             return exact[0], exact, False
         if len(exact) > 1:
@@ -194,7 +207,7 @@ class InstrumentRegistry:
             return ordered[0], ordered, True
 
         # 3. Ranked search fallback.
-        candidates = search_instruments(self._items, text, market=market, limit=5)
+        candidates = search_instruments(self._items, text, market=market_up, limit=5)
         if not candidates:
             return None, [], False
         top = candidates[0]
