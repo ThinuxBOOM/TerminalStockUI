@@ -14,7 +14,9 @@ No key material ever reaches the browser.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -52,17 +54,18 @@ def reset_ai_router() -> None:  # test hook
 
 
 class InsightBody(BaseModel):
-    symbol: str = Field(min_length=1, max_length=32)
+    symbol: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
     profile: str = Field(default="quick_insight", max_length=64)
 
 
 class ForecastOpinionBody(BaseModel):
-    symbol: str = Field(min_length=1, max_length=32)
+    symbol: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
     horizon: int = Field(default=21)
     profile: str = Field(default="forecast_assist", max_length=64)
     quant_prob: float | None = Field(default=None)
     ai_weight: float | None = Field(default=None)
     ai_enabled: bool = True
+    quant_confidence_label: str | None = Field(default=None, max_length=16)
 
 
 class ProviderHealthTestBody(BaseModel):
@@ -101,11 +104,15 @@ def _build_packet(symbol: str) -> EvidencePacket:
     """Assemble a bounded evidence packet from deterministic services.
 
     Only summary-level fields enter the packet — raw bars/candles are never
-    included (see backend/ai/evidence.py forbidden keys).
+    included (see backend/ai/evidence.py forbidden keys). The market-data
+    lookup is blocking (yfinance is sync I/O); async callers below run this
+    helper in a worker thread via :func:`asyncio.to_thread`.
     """
     clean = (symbol or "").strip().upper()
     if not clean:
         raise HTTPException(status_code=422, detail="symbol must be a non-empty string")
+    if len(clean) > 32 or re.match(r"^[A-Z0-9][A-Z0-9.\-:]{0,31}$", clean) is None:
+        raise HTTPException(status_code=422, detail="symbol must match ^[A-Z0-9][A-Z0-9.\\-:]{0,31}$")
     try:
         from backend.api.deps import get_market_service
 
@@ -183,7 +190,8 @@ def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
 @router.post("/insight")
 async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router)) -> dict[str, Any]:
     profile = _check_profile(body.profile)
-    packet = _build_packet(body.symbol)
+    # get_quote/yfinance are blocking sync I/O — keep the event loop free.
+    packet = await asyncio.to_thread(_build_packet, body.symbol)
     try:
         opinion, cached = await ai.get_insight(packet, profile=profile)
     except HTTPException:
@@ -225,7 +233,8 @@ async def post_forecast_opinion(
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ai weight failed: {exc}") from exc
-    packet = _build_packet(body.symbol)
+    # Blocking market-data lookup — run off the event loop (see post_insight).
+    packet = await asyncio.to_thread(_build_packet, body.symbol)
     try:
         opinion, cached = await ai.get_insight(packet, profile=profile, horizon=horizon)
     except HTTPException:
@@ -235,9 +244,15 @@ async def post_forecast_opinion(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ai insight failed: {exc}") from exc
     quant_prob = float(body.quant_prob) if body.quant_prob is not None else 0.5
+    _lbl = body.quant_confidence_label
+    if _lbl is not None:
+        _lbl = str(_lbl).strip().lower()
+        if _lbl not in ("low", "moderate", "high"):
+            raise HTTPException(status_code=422, detail="quant_confidence_label must be low|moderate|high")
     try:
         blend = blend_forecast(
-            quant_prob, opinion, ai_weight=body.ai_weight, ai_enabled=body.ai_enabled
+            quant_prob, opinion, ai_weight=body.ai_weight, ai_enabled=body.ai_enabled,
+            quant_confidence_label=_lbl,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

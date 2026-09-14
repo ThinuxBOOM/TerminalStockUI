@@ -38,7 +38,13 @@ class Base(DeclarativeBase):
 
 class Instrument(Base):
     __tablename__ = "instruments"
-    __table_args__ = (UniqueConstraint("exchange_mic", "exchange_symbol", name="uq_instruments_mic_symbol"),)
+    __table_args__ = (
+        UniqueConstraint("exchange_mic", "exchange_symbol", name="uq_instruments_mic_symbol"),
+        Index("ix_instruments_provider_symbol", "provider_symbol"),
+        Index("ix_instruments_isin", "isin"),
+        Index("ix_instruments_exchange_symbol", "exchange_symbol"),
+        Index("ix_instruments_mic_active", "exchange_mic", "is_active"),
+    )
 
     instrument_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
     exchange_mic: Mapped[str] = mapped_column(String(8), nullable=False)

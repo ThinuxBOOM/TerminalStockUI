@@ -123,7 +123,8 @@ def test_eux_feature_columns_and_formulas():
         float(frame["open"].iloc[pos]) - float(close.iloc[pos - 1])
     ) / float(close.iloc[pos - 1])
     assert feats.loc[last_idx, "gap_proxy"] == pytest.approx(expected_gap)
-    vol5 = frame["volume"].iloc[pos - 4:pos + 1].mean()
+    # Ex-current trailing mean: spike bar excluded from its own denominator.
+    vol5 = frame["volume"].iloc[pos - 5:pos].mean()
     assert feats.loc[last_idx, "turnover_5d"] == pytest.approx(
         float(frame["volume"].iloc[pos]) / float(vol5)
     )

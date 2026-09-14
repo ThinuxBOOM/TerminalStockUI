@@ -123,6 +123,17 @@ class RedisCache:
         except Exception:
             self._fallback.delete(key)
 
+    def clear(self) -> None:
+        """Best-effort cache flush (tests + admin). Never raises."""
+        try:
+            self._fallback.clear()
+        except Exception:
+            pass
+        try:
+            self._client.flushdb()
+        except Exception:
+            pass
+
 
 _cache: CacheBackend | None = None
 

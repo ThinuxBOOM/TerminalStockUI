@@ -190,8 +190,12 @@ async function searchInstruments(query, market, opts) {
   if (!q) return [];
   const mic = String(market ?? "").trim().toUpperCase();
   const signal = opts?.signal;
-  const params = mic && mic !== "ALL" ? { q, market: mic } : { q };
-  return coalesceInflight(`search:${q.toLowerCase()}:${mic || "ALL"}`, async () => {
+  // Backend /api/instruments/search supports limit (1-50, default 10) +
+  // offset (0-200). Clamp here so slider/page callers can't 422 the query.
+  const lim = Math.min(50, Math.max(1, Number(opts?.limit ?? 20) || 20));
+  const off = Math.min(200, Math.max(0, Number(opts?.offset ?? 0) || 0));
+  const params = mic && mic !== "ALL" ? { q, market: mic, limit: lim, offset: off } : { q, limit: lim, offset: off };
+  return coalesceInflight(`search:${q.toLowerCase()}:${mic || "ALL"}:${lim}:${off}`, async () => {
     const { data } = await api.get("/api/instruments/search", { params, ...signal ? { signal } : {} });
     const list = Array.isArray(data) ? data : data?.results ?? data?.items ?? [];
     const out = [];
@@ -961,6 +965,8 @@ const ScreenerResponseSchema = z.object({
   results: z.array(ScreenerRowSchema).optional().default([]),
   count: z.number().optional().default(0),
   universe_size: z.number().optional().default(0),
+  filtered_total: z.number().optional().default(0),
+  offset: z.number().optional().default(0),
   skipped: z.array(ScreenerSkippedSchema).optional().default([]),
   horizon: z.number().optional(),
   disclosure: z.string().optional().default("")
@@ -1010,6 +1016,8 @@ function normalizeScreener(raw, horizon) {
     results,
     count: typeof r.count === "number" ? r.count : results.length,
     universe_size: typeof r.universe_size === "number" ? r.universe_size : typeof r.universeSize === "number" ? r.universeSize : results.length,
+    filtered_total: typeof r.filtered_total === "number" ? r.filtered_total : typeof r.filteredTotal === "number" ? r.filteredTotal : results.length,
+    offset: typeof r.offset === "number" ? r.offset : 0,
     skipped,
     horizon: num(r.horizon ?? horizon, horizon),
     disclosure: r.disclosure ?? ""
@@ -1020,15 +1028,17 @@ async function getScreener(params = {}, opts = {}) {
   const horizon = params.horizon ?? 21;
   const mic = String(params.market ?? "").trim().toUpperCase();
   const minDir = params.minDirection ?? 0.5;
-  const lim = params.limit ?? 20;
+  const lim = Math.min(50, Math.max(1, Number(params.limit ?? 20) || 20));
+  const off = Math.min(200, Math.max(0, Number(params.offset ?? 0) || 0));
   const signal = opts?.signal ?? params.signal;
   const query = {
     horizon,
     min_direction: minDir,
-    limit: lim
+    limit: lim,
+    offset: off
   };
   if (mic && mic !== "ALL") query.market = mic;
-  return coalesceInflight(`screener:${mic || "ALL"}:${horizon}:${minDir}:${lim}`, async () => {
+  return coalesceInflight(`screener:${mic || "ALL"}:${horizon}:${minDir}:${lim}:${off}`, async () => {
     const { data } = await api.get("/api/screener", {
       params: query,
       timeout: SCREENER_TIMEOUT_MS,

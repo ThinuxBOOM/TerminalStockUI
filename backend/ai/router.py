@@ -168,6 +168,7 @@ class AIRouter:
         profile_map: dict[str, tuple[str, str]] | None = None,
         secret_store: Any | None = None,
         cache_size: int = 256,
+        cache_ttl_s: int = 3600,
     ) -> None:
         if providers is None:
             from backend.ai.providers import build_default_providers
@@ -178,7 +179,11 @@ class AIRouter:
         for profile, target in (profile_map or {}).items():
             self.profile_map[normalize_profile(profile)] = (target[0], target[1])
         self.cache_size = max(1, int(cache_size))
-        self._cache: OrderedDict[str, AIOpinion] = OrderedDict()
+        try:
+            self.cache_ttl_s = max(60, int(cache_ttl_s))
+        except (TypeError, ValueError):
+            self.cache_ttl_s = 3600
+        self._cache: OrderedDict[str, tuple[float, AIOpinion]] = OrderedDict()
         self.token_log: list[dict[str, Any]] = []
         self.performance = ProviderPerformanceTracker()
 
@@ -200,6 +205,27 @@ class AIRouter:
     def clear_cache(self) -> None:
         self._cache.clear()
 
+    def _cache_get(self, key: str) -> AIOpinion | None:
+        """TTL-aware fetch: expired entries are dropped, never served."""
+        hit = self._cache.get(key)
+        if hit is None:
+            return None
+        try:
+            expires_at, opinion = hit
+        except (TypeError, ValueError):
+            self._cache.pop(key, None)
+            return None
+        if expires_at < time.monotonic():
+            self._cache.pop(key, None)
+            return None
+        self._cache.move_to_end(key)
+        return opinion
+
+    def _cache_put(self, key: str, opinion: AIOpinion) -> None:
+        self._cache[key] = (time.monotonic() + self.cache_ttl_s, opinion)
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+
     # -- main entry -------------------------------------------------------
     async def get_insight(
         self,
@@ -219,9 +245,8 @@ class AIRouter:
             provider = _with_model(provider, model)
 
         cache_hit_key = self.cache_key(key, packet, horizon, provider_name, provider.model)
-        cached = self._cache.get(cache_hit_key)
+        cached = self._cache_get(cache_hit_key)
         if cached is not None:
-            self._cache.move_to_end(cache_hit_key)
             self._log_tokens(key, provider_name, provider.model, packet, cached, True, 0.0)
             return cached, True
 
@@ -251,9 +276,7 @@ class AIRouter:
         )
         self._log_tokens(key, provider_name, provider.model, packet, opinion, False, latency_ms)
 
-        self._cache[cache_hit_key] = opinion
-        while len(self._cache) > self.cache_size:
-            self._cache.popitem(last=False)
+        self._cache_put(cache_hit_key, opinion)
         return opinion, False
 
     def _log_tokens(

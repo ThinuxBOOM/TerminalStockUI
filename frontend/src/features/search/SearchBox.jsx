@@ -35,13 +35,15 @@ function glyphFor(currency) {
   if (c === "EUR") return "\u20AC";
   return "";
 }
-function useInstrumentSearch(query, market, enabled) {
+function useInstrumentSearch(query, market, enabled, limit = 50, offset = 0) {
   const mic = market.trim().toUpperCase();
   // Normalized key: "aapl" and "AAP " share one cache entry.
   const key = query.trim().toUpperCase();
+  const lim = Math.min(50, Math.max(1, Number(limit) || 50));
+  const off = Math.min(200, Math.max(0, Number(offset) || 0));
   return useQuery({
-    queryKey: ["instruments", "search", key || "(empty)", mic || "ALL"],
-    queryFn: ({ signal }) => searchInstruments(query, mic || void 0, { signal }),
+    queryKey: ["instruments", "search", key || "(empty)", mic || "ALL", lim, off],
+    queryFn: ({ signal }) => searchInstruments(query, mic || void 0, { signal, limit: lim, offset: off }),
     enabled,
     staleTime: 6e4,
     gcTime: 3e5,

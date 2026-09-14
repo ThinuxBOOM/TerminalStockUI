@@ -39,7 +39,7 @@ MACD_FORMULA = (
     "histogram = MACD - signal (all EMAs adjust=False)"
 )
 BOLLINGER_FORMULA = (
-    "middle = SMA(w); upper/lower = middle +/- k*std(w, ddof=1); "
+    "middle = SMA(w); upper/lower = middle +/- k*std(w, ddof=0 population); "
     "bandwidth = (upper-lower)/middle; %B = (close-lower)/(upper-lower)"
 )
 ATR_FORMULA = (
@@ -136,7 +136,8 @@ def bollinger(close: Any, window: int = 20, num_std: float = 2.0) -> MetricResul
     if error is not None:
         return unavailable(BOLLINGER_FORMULA, ["close"], error)
     middle = series.rolling(window=window, min_periods=window).mean()
-    std = series.rolling(window=window, min_periods=window).std(ddof=1)
+    # Population std (ddof=0) per Bollinger/StockCharts; ddof=1 widens bands ~2.6% at w=20.
+    std = series.rolling(window=window, min_periods=window).std(ddof=0)
     upper = middle + float(num_std) * std
     lower = middle - float(num_std) * std
     width = upper - lower

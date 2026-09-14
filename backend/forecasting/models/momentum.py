@@ -6,10 +6,9 @@ give z = R / (sigma*sqrt(trailing_days)); the direction probability is the
 logistic map 1/(1+exp(-z)) with fixed gain k=1. Uptrend -> > 0.5,
 downtrend -> < 0.5, flat -> 0.5. Deterministic.
 
-Horizon note: predict_all_horizons returns the SAME level for 5/21/63
-(horizon-agnostic stub). Do not read it as horizon-calibrated: forward
-variance should pull long-horizon P toward 0.5. The horizon arg only labels
-output.
+Horizon decay: z_h = z * sqrt(trailing / (trailing + h)) so long-horizon
+P decays toward 0.5 (signal mean-reversion / forward variance). h=5 keeps
+~96% of z, h=21 ~87%, h=63 ~71%. Flat stays exactly 0.5.
 """
 
 from __future__ import annotations
@@ -29,7 +28,8 @@ MODEL_VERSION = "momentum-v1"
 FORMULA = (
     "z = R_trail_log / (sigma_trail*sqrt(trailing_days)); "
     "R_trail_log = log(P_t/P_{t-trailing}); "
-    "P(up) = 1/(1+exp(-k*z)), k=1 (naive momentum baseline, horizon-agnostic)"
+    "z_h = z*sqrt(trailing/(trailing+h)); "
+    "P(up_h) = 1/(1+exp(-k*z_h)), k=1 (horizon-decayed momentum)"
 )
 GAIN = 1.0
 
@@ -90,7 +90,15 @@ class MomentumBaseline:
             # Clip z: exp() overflows past ~709; |z| <= 50 already saturates
             # the sigmoid to 0/1 within float precision. Deterministic.
             z = max(min(GAIN * tr / denom, 50.0), -50.0)
-            proba = 1.0 / (1.0 + math.exp(-z))
+            # Horizon decay toward 0.5: longer horizons dilute trailing signal.
+            try:
+                _decay = math.sqrt(float(self.trailing_days) / (float(self.trailing_days) + float(horizon)))
+            except (ValueError, ZeroDivisionError):
+                _decay = 1.0
+            if not math.isfinite(_decay):
+                _decay = 1.0
+            z_h = max(min(z * _decay, 50.0), -50.0)
+            proba = 1.0 / (1.0 + math.exp(-z_h))
         return ForecastResult(
             TARGET_DIRECTION, horizon, float(proba),
             FORMULA, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
@@ -103,7 +111,7 @@ class MomentumBaseline:
         as_of: str | None = None,
         data_version: str = "unspecified",
     ) -> dict[int, ForecastResult]:
-        """Direction probabilities for 5/21/63 trading days (same level)."""
+        """Direction probabilities for 5/21/63 trading days (horizon-decayed)."""
         return {int(h): self.direction_probability(h, as_of, data_version)
                 for h in horizons}
 

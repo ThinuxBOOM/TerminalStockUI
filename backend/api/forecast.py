@@ -333,7 +333,10 @@ def forecast_limitations(result: dict) -> list[str]:
         "Missing data renders unavailable, never silently imputed.",
         "Disabling AI leaves forecasting intact.",
         "Direction probabilities are uncalibrated ensemble means (see ECE); "
-        "confidence labels measure member agreement, not calibrated skill.",
+        "confidence labels reflect ensemble agreement downgraded by "
+        "data-quality and trailing-risk signals (vol regime, drawdown, "
+        "staleness), not calibrated skill. High agreement near 0.5 caps at "
+        "moderate; AI disagreement downgrades the blend label.",
     ]
     band = result.get("expected_return_range") or {}
     if band.get("n_windows") is not None:
@@ -575,7 +578,8 @@ def _persist_forecast_record(result: dict, symbol: str, market_service=None) -> 
                 dd = None
             confidence = str(result.get("confidence") or "")
             if confidence not in ("low", "moderate", "high"):
-                confidence = "moderate"
+                # Conservative fallback: unknown labels must not inflate to moderate.
+                confidence = "low"
             model_version = str(result.get("model_version") or "")
             feature_version = str(result.get("feature_version") or "")
             data_version = str(result.get("data_version") or "")

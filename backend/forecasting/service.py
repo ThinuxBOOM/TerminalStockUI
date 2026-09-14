@@ -79,6 +79,13 @@ DRAWDOWN_PENALTY_THRESHOLD = 0.25
 VOLATILITY_PENALTY_REGIMES = frozenset({"high", "elevated", "extreme"})
 #: Members needed for "high" confidence (thin ensembles cap at moderate).
 FULL_ENSEMBLE_MIN_MODELS = 3
+#: Minimum distance of the ensemble mean from 0.5 for "high" confidence.
+#: Agreement near coin-flip (e.g. members {0.51,0.53,0.55}) must not read
+#: as high-confidence even when spread is tight.
+CONFIDENCE_HIGH_MIN_DISTANCE = 0.07
+#: AI disagreement above this downgrades the label one notch (mirrors
+#: backend.ai.blend.DISAGREEMENT_THRESHOLD; duplicated to avoid a cycle).
+AI_DISAGREEMENT_THRESHOLD = 0.10
 SSE_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{SSE_DRIFT_VERSION}"
 EUX_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{EUX_DRIFT_VERSION}"
 #: Ensemble member key (probas dict) -> stamped model version. Used to derive
@@ -156,6 +163,9 @@ def _confidence(
     quality_grade: str,
     regime: str | None = None,
     drawdown_prob: float | None = None,
+    direction_prob: float | None = None,
+    mean_prob: float | None = None,
+    ai_disagreement: float | None = None,
 ) -> str:
     """Deterministic confidence from member agreement.
 
@@ -167,7 +177,15 @@ def _confidence(
     via :func:`_penalize_confidence`, never raising, flooring at "low"):
       * volatility regime "high" (top-tercile trailing vol, the strongest
         bucket quantile_bands emits), "elevated" or "extreme" -> one notch.
-      * drawdown probability >= 0.25 -> one notch down.
+      * drawdown probability >= 0.25 -> one notch down (NaN -> penalize,
+        conservative: a missing risk signal must not read as safe).
+      * unknown/missing quality grade -> one notch down (conservative;
+        only A/B/C pass through untouched, D/F cap at low).
+      * sharpness: "high" additionally requires |mean(p) - 0.5| >=
+        CONFIDENCE_HIGH_MIN_DISTANCE, else capped at moderate. ``None``
+        (legacy callers) skips the gate for backward compat.
+      * ai_disagreement > AI_DISAGREEMENT_THRESHOLD -> one notch down
+        (wires AI second-opinion clash into the displayed label).
     ``regime=None`` / ``drawdown_prob=None`` are no-ops (backward compat).
     """
     if n_models <= 1:
@@ -180,8 +198,16 @@ def _confidence(
         level = "low"
     if n_models < FULL_ENSEMBLE_MIN_MODELS and level == "high":
         level = "moderate"
-    if str(quality_grade).upper() in ("D", "F") and level != "low":
-        level = "low"
+    try:
+        _g = str(quality_grade or "").strip().upper()
+    except Exception:
+        _g = ""
+    if _g in ("D", "F"):
+        if level != "low":
+            level = "low"
+    elif _g not in ("A", "B", "C"):
+        # Unknown/missing provenance grade: conservative one-notch penalty.
+        level = _penalize_confidence(level)
     if regime is not None:
         try:
             _r = str(regime).strip().lower()
@@ -194,10 +220,36 @@ def _confidence(
         _dd = None
     if isinstance(_dd, (int, float)):
         try:
-            if float(_dd) >= DRAWDOWN_PENALTY_THRESHOLD:
-                level = _penalize_confidence(level)
+            _dd_f = float(_dd)
         except (TypeError, ValueError):
-            pass
+            _dd_f = None
+        if _dd_f is not None:
+            if math.isnan(_dd_f):
+                level = _penalize_confidence(level)
+            elif _dd_f >= DRAWDOWN_PENALTY_THRESHOLD:
+                level = _penalize_confidence(level)
+    # Sharpness gate: high agreement at coin-flip is not high confidence.
+    _mp = mean_prob if mean_prob is not None else direction_prob
+    if level == "high" and _mp is not None and not isinstance(_mp, bool):
+        try:
+            _mp_f = float(_mp)
+        except (TypeError, ValueError):
+            _mp_f = None
+        if _mp_f is not None and math.isfinite(_mp_f):
+            if abs(_mp_f - 0.5) < CONFIDENCE_HIGH_MIN_DISTANCE:
+                level = _penalize_confidence(level)
+    # AI disagreement penalty (second-opinion risk signal).
+    _ad = ai_disagreement
+    if isinstance(_ad, bool):
+        _ad = None
+    if isinstance(_ad, (int, float)):
+        try:
+            _ad_f = float(_ad)
+        except (TypeError, ValueError):
+            _ad_f = None
+        if _ad_f is not None and math.isfinite(_ad_f):
+            if _ad_f > AI_DISAGREEMENT_THRESHOLD:
+                level = _penalize_confidence(level)
     return level
 
 
@@ -463,9 +515,10 @@ class ForecastService:
             base_confidence = _confidence(
                 spread,
                 len(probas),
-                str(provenance.get("quality_grade", "B")),
+                str(provenance.get("quality_grade") or "U"),
                 regime,
                 dd_prob,
+                direction_prob=direction,
             )
             confidence = (
                 _penalize_confidence(base_confidence)
@@ -509,9 +562,10 @@ class ForecastService:
             confidence = _confidence(
                 spread,
                 len(probas),
-                str(provenance.get("quality_grade", "B")),
+                str(provenance.get("quality_grade") or "U"),
                 regime,
                 dd_prob,
+                direction_prob=direction,
             )
             model_version = EUX_BLEND_VERSION
             feature_version = EUX_FEATURE_VERSION
@@ -522,9 +576,10 @@ class ForecastService:
             confidence = _confidence(
                 spread,
                 len(probas),
-                str(provenance.get("quality_grade", "B")),
+                str(provenance.get("quality_grade") or "U"),
                 regime,
                 dd_prob,
+                direction_prob=direction,
             )
             model_version = ENSEMBLE_VERSION
             feature_version = FEATURE_VERSION

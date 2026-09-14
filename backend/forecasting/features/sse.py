@@ -29,7 +29,8 @@ Formulas (NaN-safe; division by zero yields NaN, never inf):
   * ``limit_proximity_t = 1.0`` if
     ``min(limit_up_dist_t, limit_down_dist_t) <= 0.02`` else ``0.0``
     (within 2% of either daily limit, relative to prev_close).
-  * ``turnover_5d_t = volume_t / mean(volume_{t-4..t})``
+  * ``turnover_5d_t = volume_t / mean(volume_{t-5..t-1})`` (ex-current
+    trailing mean so spikes are undampened; inclusive would read 5x as 2.78x).
   * ``mom_5_t = close_t / close_{t-5} - 1`` (likewise mom_10, mom_20).
 """
 
@@ -108,7 +109,8 @@ def build_sse_features(
     # row is dropped rather than silently labelled 0.
     proximity = proximity.mask(limit_up_dist.isna() | limit_down_dist.isna())
 
-    vol_mean = volume.rolling(int(turnover_window), min_periods=int(turnover_window)).mean()
+    # Ex-current trailing mean: spike bar must not dampen its own denominator.
+    vol_mean = volume.shift(1).rolling(int(turnover_window), min_periods=int(turnover_window)).mean()
     with np.errstate(divide="ignore", invalid="ignore"):
         turnover = volume / vol_mean
     turnover = turnover.mask((vol_mean == 0) | (~np.isfinite(turnover)))

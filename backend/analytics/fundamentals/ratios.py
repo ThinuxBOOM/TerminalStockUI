@@ -108,7 +108,15 @@ def debt_to_equity(fin: Mapping) -> MetricResult:
     missing = _require(fin, keys, DEBT_TO_EQUITY_FORMULA)
     if missing:
         return unavailable(DEBT_TO_EQUITY_FORMULA, keys, f"missing fields: {missing}")
-    return _ratio(get_number(fin, "total_debt"), get_number(fin, "total_equity"),
+    _debt = get_number(fin, "total_debt")
+    _eq = get_number(fin, "total_equity")
+    if _eq is not None and _eq < 0:
+        # Negative book: ratio sign-flips; compute but flag degraded.
+        return MetricResult(
+            _debt / _eq, DEBT_TO_EQUITY_FORMULA, tuple(keys), DEGRADED,
+            reason="total_equity negative; leverage sign-flipped, interpret with caution",
+        )
+    return _ratio(_debt, _eq,
                   DEBT_TO_EQUITY_FORMULA, keys, "total_equity")
 
 
@@ -145,11 +153,19 @@ def roe(fin: Mapping) -> MetricResult:
                            f"missing fields: {missing}")
     equity = get_number(fin, "total_equity")
     prior = get_number(fin, "total_equity_prior")
+    _ni = get_number(fin, "net_income")
     if prior is None:
         if equity == 0:
             return unavailable(ROE_FORMULA, keys, "denominator 'total_equity' is zero")
+        if equity < 0:
+            return MetricResult(
+                _ni / equity, ROE_FORMULA,
+                ("net_income", "total_equity"), DEGRADED,
+                reason="total_equity_prior missing; used ending equity instead of average; "
+                       "total_equity negative, ROE sign-flipped",
+            )
         return MetricResult(
-            get_number(fin, "net_income") / equity, ROE_FORMULA,
+            _ni / equity, ROE_FORMULA,
             ("net_income", "total_equity"), DEGRADED,
             reason="total_equity_prior missing; used ending equity instead of average",
         )
@@ -157,7 +173,11 @@ def roe(fin: Mapping) -> MetricResult:
     if avg_equity == 0:
         return unavailable(ROE_FORMULA, keys + ["total_equity_prior"],
                            "average equity is zero")
-    return MetricResult(get_number(fin, "net_income") / avg_equity, ROE_FORMULA,
+    if avg_equity < 0:
+        return MetricResult(_ni / avg_equity, ROE_FORMULA,
+                            ("net_income", "total_equity", "total_equity_prior"), DEGRADED,
+                            reason="average equity negative; ROE sign-flipped, interpret with caution")
+    return MetricResult(_ni / avg_equity, ROE_FORMULA,
                         ("net_income", "total_equity", "total_equity_prior"), "ok")
 
 

@@ -44,6 +44,8 @@ function screenerErrorDetail(error) {
 function ScreenerPage() {
   const [market, setMarket] = useState("");
   const [horizon, setHorizon] = useState(21);
+  const SCREENER_LIMIT = 20;
+  const [offset, setOffset] = useState(0);
   // Slider input stays responsive while the backend query fires on a
   // debounced value: a full-universe scan takes ~30s cold, so every 0.01
   // tick must not refetch.
@@ -53,14 +55,19 @@ function ScreenerPage() {
     const t = setTimeout(() => setMinProb(clampProb(minProbInput)), 450);
     return () => clearTimeout(t);
   }, [minProbInput]);
+  // Backend paginates filtered rows: any filter change restarts at page 0.
+  useEffect(() => {
+    setOffset(0);
+  }, [market, horizon, minProb]);
   const mic = market.trim().toUpperCase();
   const screen = useQuery({
-    queryKey: ["screener", mic || "ALL", horizon, minProb],
+    queryKey: ["screener", mic || "ALL", horizon, minProb, SCREENER_LIMIT, offset],
     queryFn: ({ signal }) => getScreener({
       market: mic || void 0,
       minDirection: minProb,
       horizon,
-      limit: 20
+      limit: SCREENER_LIMIT,
+      offset
     }, { signal }),
     staleTime: 3e4,
     retry: false,
@@ -146,7 +153,27 @@ function ScreenerPage() {
     {
       detail: "screener rows include fallback data \u2014 prices/probabilities are stale-marked, not live"
     }
-  ), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-term-muted", role: "status" }, data.count, " of ", data.universe_size, " pass", skippedCount > 0 && ` \xB7 ${skippedCount} skipped (see below)`), rows.length === 0 ? /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-term-muted", role: "status" }, data.count, " of ", data.filtered_total ?? data.universe_size, " pass \xB7 page ", Math.floor((data.offset ?? offset) / SCREENER_LIMIT) + 1, skippedCount > 0 && ` \xB7 ${skippedCount} skipped (see below)`), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      className: "term-btn-ghost text-xs",
+      type: "button",
+      disabled: (data.offset ?? offset) <= 0 || screen.isFetching,
+      onClick: () => setOffset((o) => Math.max(0, o - SCREENER_LIMIT)),
+      "aria-label": "Previous screener page"
+    },
+    "\u2190 PREV"
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      className: "term-btn-ghost text-xs",
+      type: "button",
+      disabled: (data.offset ?? offset) + data.count >= (data.filtered_total ?? data.count) || screen.isFetching,
+      onClick: () => setOffset((o) => o + SCREENER_LIMIT),
+      "aria-label": "Next screener page"
+    },
+    "NEXT \u2192"
+  ))), rows.length === 0 ? /* @__PURE__ */ React.createElement(
     EmptyState,
     {
       title: "No instruments pass the screen",
@@ -157,9 +184,10 @@ function ScreenerPage() {
         setHorizon(21);
         setMinProbInput(0.5);
         setMinProb(0.5);
+        setOffset(0);
       }
     }
-  ) : /* @__PURE__ */ React.createElement("div", { className: "term-panel overflow-x-auto" }, /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("caption", { className: "sr-only" }, "Screener results ranked by forecast direction"), /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "border-b border-term-border text-left text-xs text-term-muted" }, /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "#"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Symbol"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Price"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Prob ", horizon, "d"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Confidence"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Quality"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Market"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Provenance"))), /* @__PURE__ */ React.createElement("tbody", null, rows.map((r, idx) => /* @__PURE__ */ React.createElement("tr", { key: `${r.symbol}-${r.exchange_mic}-${idx}`, className: "border-b border-term-border" }, /* @__PURE__ */ React.createElement("td", { className: "p-2 text-term-muted" }, idx + 1), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(
+  ) : /* @__PURE__ */ React.createElement("div", { className: "term-panel overflow-x-auto" }, /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("caption", { className: "sr-only" }, "Screener results ranked by forecast direction"), /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "border-b border-term-border text-left text-xs text-term-muted" }, /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "#"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Symbol"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Price"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Prob ", horizon, "d"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Confidence"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Quality"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Market"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Provenance"))), /* @__PURE__ */ React.createElement("tbody", null, rows.map((r, idx) => /* @__PURE__ */ React.createElement("tr", { key: `${r.symbol}-${r.exchange_mic}-${idx}`, className: "border-b border-term-border" }, /* @__PURE__ */ React.createElement("td", { className: "p-2 text-term-muted" }, (data.offset ?? offset) + idx + 1), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(
     Link,
     {
       to: `/security/${encodeURIComponent(r.symbol)}`,

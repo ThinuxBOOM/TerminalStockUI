@@ -201,6 +201,6 @@ function HomePage() {
       r.symbol,
       r.horizon_days ? ` \xB7 ${r.horizon_days}d` : ""
     ) : /* @__PURE__ */ React.createElement("span", { className: "min-w-0 truncate text-term-muted" }, "\u2014", r.horizon_days ? ` \xB7 ${r.horizon_days}d` : ""),
-    /* @__PURE__ */ React.createElement("span", { className: "shrink-0 text-term-muted" }, formatPct1(r.direction_probability)))))));
+    /* @__PURE__ */ React.createElement("span", { className: "shrink-0 text-term-muted" }, formatPct1(r.direction_probability))))))));
 }
 export { HomePage as default };
