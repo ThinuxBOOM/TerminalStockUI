@@ -278,6 +278,30 @@ def test_get_bars_fallback_empty_db(isolated_db):
         _teardown()
 
 
+def test_stub_bars_anchored_to_quote(isolated_db):
+    """Regression: stub chart must end where the header quote is.
+
+    (GOOGL showed $338.50 in the header with a ~$571 stub chart because the
+    stub base was hash-random and unanchored.)
+    """
+    try:
+        svc = _service()
+        quote = svc.get_quote("AAPL")
+        out = svc.get_bars("AAPL", timeframe="1d", limit=20)
+        assert out["provenance"]["fallback_used"] is True
+        assert out["bars"][-1]["close"] == round(quote["price"], 2)
+        # OHLC ordering survives the rescale on every bar.
+        for bar in out["bars"]:
+            assert bar["low"] <= min(bar["open"], bar["close"])
+            assert bar["high"] >= max(bar["open"], bar["close"])
+        # Unknown symbols anchor to their (stub) quote too — never $571 vs $100.
+        quote_unknown = svc.get_quote("ZZZ_UNKNOWN_123")
+        bars_unknown = svc.get_bars("ZZZ_UNKNOWN_123", timeframe="1d", limit=10)
+        assert bars_unknown["bars"][-1]["close"] == round(quote_unknown["price"], 2)
+    finally:
+        _teardown()
+
+
 def test_get_bars_fallback_unreachable_db_never_raises(isolated_db, monkeypatch):
     import backend.db.session as session_module
 

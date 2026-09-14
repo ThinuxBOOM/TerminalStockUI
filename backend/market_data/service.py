@@ -309,6 +309,10 @@ class MarketDataService:
         ANY exception, unknown instrument, thin/empty coverage, or an
         unreachable DB falls back to the deterministic stub below, so
         offline/test environments never break.
+
+        The stub is anchored to the current quote (best-effort) so its last
+        close matches the header price — an unanchored random base would
+        render a chart on a completely different scale than the quote.
         """
         try:
             db_out = self._get_bars_from_db(symbol, timeframe, limit)
@@ -316,7 +320,28 @@ class MarketDataService:
                 return db_out
         except Exception:
             pass
-        return self._stub_bars(symbol, timeframe, limit)
+        return self._stub_bars(symbol, timeframe, limit, anchor=self._quote_anchor(symbol))
+
+    def _quote_anchor(self, symbol: str) -> float | None:
+        """Best-effort reference price for anchoring stub bars.
+
+        Returns the current quote price (live or stub — either way it is the
+        same number the header shows) or None when no usable price exists.
+        Never raises: the bars fallback must survive quote failures.
+        """
+        try:
+            quote = self.get_quote(symbol)
+        except Exception:
+            return None
+        if not isinstance(quote, dict):
+            return None
+        try:
+            price = float(quote.get("price"))
+        except (TypeError, ValueError):
+            return None
+        if not price or price <= 0 or price != price or price == float("inf"):
+            return None
+        return price
 
     def _get_bars_from_db(
         self, symbol: str, timeframe: str = "1d", limit: int = 30
@@ -426,7 +451,10 @@ class MarketDataService:
             except Exception:
                 pass
 
-    def _stub_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
+    def _stub_bars(
+        self, symbol: str, timeframe: str = "1d", limit: int = 30,
+        anchor: float | None = None,
+    ) -> dict:
         try:
             symbol_text = str(symbol or "").strip()
         except Exception:
@@ -456,6 +484,19 @@ class MarketDataService:
                 "missing_fields": [],
             })
             price = c
+        if anchor is not None and anchor > 0 and rows:
+            # Rescale so the last close lands exactly on the quote price.
+            # A constant factor preserves % returns and OHLC ordering, so
+            # downstream return-based features are unaffected in relative terms.
+            last_close = rows[-1].get("close") or 0
+            if last_close and last_close > 0:
+                factor = anchor / last_close
+                for row in rows:
+                    for key in ("open", "high", "low", "close"):
+                        value = row.get(key)
+                        if isinstance(value, (int, float)) and value > 0:
+                            row[key] = round(value * factor, 2)
+                rows[-1]["close"] = round(anchor, 2)
         mic = instrument.exchange_mic if instrument else "XNAS"
         try:
             expected = expected_delay_minutes(mic)
