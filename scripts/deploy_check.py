@@ -242,20 +242,33 @@ def check_api_entry(root: Path, rep: Report) -> None:
         return
     has_import = bool(re.search(
         r"from\s+backend\.|import\s+backend\b|backend\.app|api\.main|FastAPI", text))
+    # Vercel discovers file-based functions via static analysis: `app` must be
+    # a top-level name (indented/try-wrapped imports are invisible to it and
+    # the build fails with "pattern ... doesn't match any Serverless Functions").
+    has_top_level_app = bool(re.search(
+        r"^(?:from\s+\S+\s+import\s+[^\n]*\bapp\b|app\s*=)", text, re.M))
+    # Legacy Mangum adapter (accepted but no longer required: the current
+    # Python runtime serves the FastAPI `app` natively).
     has_handler = "handler" in text and "Mangum" in text
     has_lifespan_off = 'lifespan="off"' in text or "lifespan='off'" in text
     if not has_import:
         rep.add("FAIL", "api/index.py imports backend app",
                 ["no backend import / FastAPI app reference found"])
-    elif not (has_handler and has_lifespan_off):
+    elif not has_top_level_app:
+        rep.add("FAIL", "api/index.py exposes top-level app",
+                ["`app` must be a top-level `from backend.api.main import app` "
+                 "(try/except-wrapped imports are invisible to Vercel and cause "
+                 "'pattern ... doesn't match any Serverless Functions')"])
+    elif has_handler and not has_lifespan_off:
         rep.add("FAIL", "api/index.py Mangum handler",
-                ["handler present: %s, lifespan='off': %s (api/index.py must "
-                 "expose handler = Mangum(app, lifespan='off'))"
-                 % (has_handler, has_lifespan_off)])
+                ["legacy Mangum handler must use lifespan='off' (or drop Mangum: "
+                 "the current runtime serves the FastAPI `app` natively)"])
     else:
         rep.add("PASS", "api/index.py imports backend app",
                 ["entry wires the FastAPI app",
-                 "handler = Mangum(app, lifespan='off')"])
+                 "top-level app for Vercel static discovery",
+                 "handler = Mangum(app, lifespan='off')"
+                 if has_handler else "native runtime (no Mangum adapter needed)"])
 
 
 def check_migration_tables(root: Path, rep: Report) -> None:

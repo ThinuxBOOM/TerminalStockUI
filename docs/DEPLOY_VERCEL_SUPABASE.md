@@ -87,11 +87,12 @@ keep `frontend` advisory until `continue-on-error` is removed.
    | Build Command | `npm run build --prefix frontend` (`tsc --noEmit && vite build`) |
    | Output Directory | `frontend/dist` (Vite default `dist` under `frontend/`) |
    | Install Command | `npm install --prefix frontend` (no frontend lockfile yet; use `npm ci` once one lands) |
-   | Rewrites | `/api/(.*)` → `/api` (serverless entry `api/index.py`); SPA fallback `/((?!api/).*)` → `/index.html` |
-3. Serverless entry `api/index.py` (owned by the backend/Vercel agent):
-   imports `from backend.api.main import app` and exposes `handler`
-   (Mangum wrapper, lifespan off; falls back to the raw ASGI app). Local dev
-   is unchanged: `uvicorn backend.app:app --port 8000`.
+   | Rewrites | `/api/(.*)` → `/api/index.py` (serverless entry `api/index.py`); SPA fallback `/((?!api/).*)` → `/index.html` |
+ 3. Serverless entry `api/index.py` (owned by the backend/Vercel agent):
+    imports `from backend.api.main import app` and exposes top-level `app`
+    (served natively by the Python runtime — no Mangum adapter; keep the
+    import at top level so Vercel's function discovery sees it). Local dev
+    is unchanged: `uvicorn backend.app:app --port 8000`.
 4. Environment Variables (Project → Settings → Environment Variables —
    Production + Preview; never commit real values):
    | Variable | Value / source | Required |
