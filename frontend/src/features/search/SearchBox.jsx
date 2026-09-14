@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import { displaySymbol, searchInstruments } from "../../api/client";
 import Loading from "../../components/Loading";
@@ -37,10 +37,16 @@ function glyphFor(currency) {
 }
 function useInstrumentSearch(query, market, enabled) {
   const mic = market.trim().toUpperCase();
+  // Normalized key: "aapl" and "AAP " share one cache entry.
+  const key = query.trim().toUpperCase();
   return useQuery({
-    queryKey: ["instruments", "search", query, mic || "ALL"],
-    queryFn: () => searchInstruments(query, mic || void 0),
-    enabled
+    queryKey: ["instruments", "search", key || "(empty)", mic || "ALL"],
+    queryFn: ({ signal }) => searchInstruments(query, mic || void 0, { signal }),
+    enabled,
+    staleTime: 6e4,
+    gcTime: 3e5,
+    retry: false,
+    placeholderData: keepPreviousData
   });
 }
 function SearchBox({
@@ -73,7 +79,8 @@ function SearchBox({
   const { data, isLoading, isFetching, isError, error, refetch } = useInstrumentSearch(
     submitted,
     mic,
-    submitted.length >= 1
+    // Single characters match half the registry: wait for 2+.
+    submitted.length >= 2
   );
   const MAX_RESULTS = 50;
   const totalResults = data?.length ?? 0;
@@ -135,7 +142,7 @@ function SearchBox({
       goToSymbol(displaySymbol(target));
     }
   }
-  const expanded = submitted.length >= 1 && (data?.length ?? 0) > 0;
+  const expanded = submitted.length >= 2 && (data?.length ?? 0) > 0;
   return /* @__PURE__ */ React.createElement("div", { className: "max-w-full" }, /* @__PURE__ */ React.createElement("form", { onSubmit: handleSubmit, className: "flex max-w-full gap-2", role: "search" }, /* @__PURE__ */ React.createElement(
     "input",
     {

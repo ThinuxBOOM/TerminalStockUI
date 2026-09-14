@@ -22,13 +22,13 @@ function ForecastDetails({ symbol }) {
   const [aiProfile, setAiProfile] = useState("Forecast Assist");
   const forecastQ = useQuery({
     queryKey: ["forecast", symbol, horizon],
-    queryFn: () => getForecast(symbol, horizon),
+    queryFn: ({ signal }) => getForecast(symbol, horizon, { signal }),
     retry: false,
     staleTime: 6e4
   });
   const analyticsQ = useQuery({
     queryKey: ["analytics", symbol],
-    queryFn: () => getAnalytics(symbol),
+    queryFn: ({ signal }) => getAnalytics(symbol, { signal }),
     retry: false,
     staleTime: 6e4
   });

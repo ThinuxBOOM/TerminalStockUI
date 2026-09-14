@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useEffect, useMemo, useState } from "react";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { FORECAST_HORIZONS, getScreener } from "../api/client";
 import CurrencyValue from "../components/CurrencyValue";
@@ -44,18 +44,29 @@ function screenerErrorDetail(error) {
 function ScreenerPage() {
   const [market, setMarket] = useState("");
   const [horizon, setHorizon] = useState(21);
+  // Slider input stays responsive while the backend query fires on a
+  // debounced value: a full-universe scan takes ~30s cold, so every 0.01
+  // tick must not refetch.
+  const [minProbInput, setMinProbInput] = useState(0.5);
   const [minProb, setMinProb] = useState(0.5);
+  useEffect(() => {
+    const t = setTimeout(() => setMinProb(clampProb(minProbInput)), 450);
+    return () => clearTimeout(t);
+  }, [minProbInput]);
   const mic = market.trim().toUpperCase();
   const screen = useQuery({
     queryKey: ["screener", mic || "ALL", horizon, minProb],
-    queryFn: () => getScreener({
+    queryFn: ({ signal }) => getScreener({
       market: mic || void 0,
       minDirection: minProb,
       horizon,
       limit: 20
-    }),
+    }, { signal }),
     staleTime: 3e4,
-    retry: false
+    retry: false,
+    // Keep the previous result set on slider commits instead of
+    // flashing back to the skeleton.
+    placeholderData: keepPreviousData
   });
   const data = screen.data;
   const rows = useMemo(() => data?.results ?? [], [data]);
@@ -98,7 +109,7 @@ function ScreenerPage() {
       h,
       "d"
     ))
-  )), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("label", { className: "term-label", htmlFor: "screener-min-prob" }, "Min probability ", (minProb * 100).toFixed(0), "%"), /* @__PURE__ */ React.createElement("div", { className: "mt-1 flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
+  )), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("label", { className: "term-label", htmlFor: "screener-min-prob" }, "Min probability ", (minProbInput * 100).toFixed(0), "%"), /* @__PURE__ */ React.createElement("div", { className: "mt-1 flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
     "input",
     {
       id: "screener-min-prob",
@@ -106,8 +117,8 @@ function ScreenerPage() {
       min: 0,
       max: 1,
       step: 0.01,
-      value: minProb,
-      onChange: (e) => setMinProb(clampProb(Number(e.target.value))),
+      value: minProbInput,
+      onChange: (e) => setMinProbInput(clampProb(Number(e.target.value))),
       "aria-label": "Minimum direction probability (slider)",
       className: "w-40"
     }
@@ -118,8 +129,8 @@ function ScreenerPage() {
       min: 0,
       max: 1,
       step: 0.01,
-      value: minProb,
-      onChange: (e) => setMinProb(clampProb(Number(e.target.value))),
+      value: minProbInput,
+      onChange: (e) => setMinProbInput(clampProb(Number(e.target.value))),
       "aria-label": "Minimum direction probability (numeric)",
       className: "term-input w-20"
     }
@@ -144,6 +155,7 @@ function ScreenerPage() {
       onAction: () => {
         setMarket("");
         setHorizon(21);
+        setMinProbInput(0.5);
         setMinProb(0.5);
       }
     }

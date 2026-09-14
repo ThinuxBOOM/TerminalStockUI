@@ -6,6 +6,18 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      output: {
+        // Split slow-moving vendor code out of the app bundle so repeat
+        // visits reuse cached chunks and route-level lazy() boundaries
+        // stay small.
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-query': ['@tanstack/react-query', 'axios', 'zod'],
+          'vendor-charts': ['lightweight-charts'],
+        },
+      },
+    },
   },
   server: {
     // Local-dev only: `vite dev` proxies /api to FastAPI.

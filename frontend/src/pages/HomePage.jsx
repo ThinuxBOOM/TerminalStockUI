@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { memo, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getAuditForecasts, getHealth, getProvidersHealth, getQuote } from "../api/client";
@@ -25,22 +25,24 @@ function normalizeSymbolInput(v) {
 }
 const MAX_HOME_WATCHLIST = 50;
 const MAX_HOME_REPORTS = 20;
-function VenueRow({ label, symbol }) {
+// Memoized: props are primitives, so parent re-renders (draft keystrokes)
+// skip these rows entirely.
+const VenueRow = memo(function VenueRow({ label, symbol }) {
   const q = useQuery({
     queryKey: ["quote", symbol],
-    queryFn: () => getQuote(symbol),
+    queryFn: ({ signal }) => getQuote(symbol, void 0, { signal }),
     retry: false,
     staleTime: 3e4
   });
   return /* @__PURE__ */ React.createElement("li", { className: "flex items-center justify-between gap-2 border-b border-term-border pb-1" }, /* @__PURE__ */ React.createElement("span", { className: "min-w-0 truncate" }, label), q.isLoading && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-term-muted", role: "status" }, "\u2026"), q.isError && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-term-muted", role: "status" }, "unavailable"), q.data && /* @__PURE__ */ React.createElement("span", { className: "flex shrink-0 items-center gap-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.data.market_state, provenance: q.data.provenance }), /* @__PURE__ */ React.createElement("span", { className: "hidden text-[10px] text-term-muted lg:inline" }, typeof q.data.provenance?.delay_minutes === "number" ? `${q.data.provenance.delay_minutes}m` : "\u2014")));
-}
-function WatchlistRow({
+});
+function WatchlistRowInner({
   symbol,
   onRemove
 }) {
   const q = useQuery({
     queryKey: ["quote", symbol],
-    queryFn: () => getQuote(symbol),
+    queryFn: ({ signal }) => getQuote(symbol, void 0, { signal }),
     retry: false,
     staleTime: 3e4
   });
@@ -79,6 +81,7 @@ function WatchlistRow({
     "\u2715"
   ))), /* @__PURE__ */ React.createElement("div", { className: "mt-1 flex flex-wrap items-center gap-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: d.market_state, provenance: d.provenance }), /* @__PURE__ */ React.createElement(ProvenanceBadge, { p: d.provenance })));
 }
+const WatchlistRow = memo(WatchlistRowInner);
 function HomePage() {
   const health = useQuery({ queryKey: ["health"], queryFn: getHealth, retry: false });
   const providers = useQuery({

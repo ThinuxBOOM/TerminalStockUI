@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { Suspense, lazy, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { getAnalytics, getBars, getForecast, getQuote } from "../../api/client";
@@ -9,7 +9,9 @@ import CurrencyValue from "../../components/CurrencyValue";
 import Loading from "../../components/Loading";
 import Skeleton from "../../components/Skeleton";
 import ErrorState, { StaleBanner } from "../../components/ErrorState";
-import PriceChart from "./PriceChart";
+// PriceChart (and lightweight-charts) loads on demand — the brief header,
+// forecast and events render without waiting for chart code.
+const PriceChart = lazy(() => import("./PriceChart"));
 const DISCLOSURE = "Not investment advice. For informational purposes only.";
 function eventsFromAnalytics(a) {
   if (!a) return [];
@@ -34,25 +36,25 @@ function eventsFromAnalytics(a) {
 function SecurityBrief({ symbol }) {
   const quote = useQuery({
     queryKey: ["quote", symbol],
-    queryFn: () => getQuote(symbol),
+    queryFn: ({ signal }) => getQuote(symbol, void 0, { signal }),
     retry: false,
     staleTime: 3e4
   });
   const forecastQ = useQuery({
     queryKey: ["forecast", symbol, 21],
-    queryFn: () => getForecast(symbol, 21),
+    queryFn: ({ signal }) => getForecast(symbol, 21, { signal }),
     retry: false,
     staleTime: 6e4
   });
   const analyticsQ = useQuery({
     queryKey: ["analytics", symbol],
-    queryFn: () => getAnalytics(symbol),
+    queryFn: ({ signal }) => getAnalytics(symbol, { signal }),
     retry: false,
     staleTime: 6e4
   });
   const barsQ = useQuery({
     queryKey: ["bars", symbol],
-    queryFn: () => getBars(symbol, "1d", 90),
+    queryFn: ({ signal }) => getBars(symbol, "1d", 90, { signal }),
     retry: false,
     staleTime: 6e4
   });
@@ -103,7 +105,7 @@ function SecurityBrief({ symbol }) {
       detail: "live forecast unreachable \u2014 no placeholder numbers shown",
       onRetry: () => void forecastQ.refetch()
     }
-  )), /* @__PURE__ */ React.createElement("section", { className: "mt-4 grid max-w-full gap-4 md:grid-cols-2" }, /* @__PURE__ */ React.createElement("div", { className: "term-panel min-w-0 p-4", "aria-labelledby": "brief-chart" }, /* @__PURE__ */ React.createElement("h3", { id: "brief-chart", className: "term-label" }, "Price chart"), /* @__PURE__ */ React.createElement(
+  )), /* @__PURE__ */ React.createElement("section", { className: "mt-4 grid max-w-full gap-4 md:grid-cols-2" }, /* @__PURE__ */ React.createElement("div", { className: "term-panel min-w-0 p-4", "aria-labelledby": "brief-chart" }, /* @__PURE__ */ React.createElement("h3", { id: "brief-chart", className: "term-label" }, "Price chart"), /* @__PURE__ */ React.createElement(Suspense, { fallback: /* @__PURE__ */ React.createElement(Skeleton, { label: "loading chart…", lines: 4 }) }, /* @__PURE__ */ React.createElement(
     PriceChart,
     {
       symbol,
@@ -112,7 +114,7 @@ function SecurityBrief({ symbol }) {
       error: barsQ.isError ? barsQ.error instanceof Error ? barsQ.error.message : "bars endpoint unreachable" : null,
       provenance: barsQ.data?.provenance ?? null
     }
-  )), /* @__PURE__ */ React.createElement("div", { className: "term-panel min-w-0 p-4", "aria-labelledby": "brief-events" }, /* @__PURE__ */ React.createElement("h3", { id: "brief-events", className: "term-label" }, "Events timeline"), analyticsQ.isLoading && /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement(Skeleton, { label: "loading events\u2026", lines: 3 })), !analyticsQ.isLoading && events.length > 0 && /* @__PURE__ */ React.createElement("ul", { className: "mt-2 space-y-2 text-sm" }, events.map((e, i) => /* @__PURE__ */ React.createElement(
+  ))), /* @__PURE__ */ React.createElement("div", { className: "term-panel min-w-0 p-4", "aria-labelledby": "brief-events" }, /* @__PURE__ */ React.createElement("h3", { id: "brief-events", className: "term-label" }, "Events timeline"), analyticsQ.isLoading && /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement(Skeleton, { label: "loading events\u2026", lines: 3 })), !analyticsQ.isLoading && events.length > 0 && /* @__PURE__ */ React.createElement("ul", { className: "mt-2 space-y-2 text-sm" }, events.map((e, i) => /* @__PURE__ */ React.createElement(
     "li",
     {
       key: `${e.date}-${e.title}-${i}`,

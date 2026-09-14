@@ -30,10 +30,17 @@ function BacktestLabPage() {
     }
   });
   const trimmedSymbol = symbol.trim().toUpperCase();
+  // History follows a debounced symbol: typing "AAPL" must not fire
+  // four sequential history fetches.
+  const [historySymbol, setHistorySymbol] = useState(trimmedSymbol);
+  useEffect(() => {
+    const t = setTimeout(() => setHistorySymbol(symbol.trim().toUpperCase()), 500);
+    return () => clearTimeout(t);
+  }, [symbol]);
   const historyQ = useQuery({
-    queryKey: ["backtest-history", trimmedSymbol],
-    queryFn: () => getBacktestHistory(trimmedSymbol, true),
-    enabled: trimmedSymbol.length > 0,
+    queryKey: ["backtest-history", historySymbol],
+    queryFn: () => getBacktestHistory(historySymbol, true),
+    enabled: historySymbol.length > 0,
     staleTime: 3e4,
     retry: false
   });

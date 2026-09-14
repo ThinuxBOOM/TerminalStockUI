@@ -13,11 +13,11 @@ const MAX_WATCHLIST_ROWS = 100;
 function normalizeSymbolInput(v) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
 }
-async function fetchNativeQuotes(symbols) {
+async function fetchNativeQuotes(symbols, signal) {
   const settled = await Promise.all(
     symbols.map(async (s) => {
       try {
-        return await getQuote(s);
+        return await getQuote(s, void 0, { signal });
       } catch {
         return null;
       }
@@ -29,17 +29,18 @@ function WatchlistPage() {
   const { symbols, add, remove, clear } = useWatchlist();
   const [draft, setDraft] = useState("");
   const [targetCcy, setTargetCcy] = useState("USD");
-  const symbolsKey = symbols.join(",");
+  // Sorted key: reordering the watchlist must not bust the query cache.
+  const symbolsKey = [...symbols].sort().join(",");
   const quotesQuery = useQuery({
     queryKey: ["watchlist", "quotes", symbolsKey],
-    queryFn: () => fetchNativeQuotes(symbols),
+    queryFn: ({ signal }) => fetchNativeQuotes(symbols, signal),
     enabled: symbols.length > 0,
     staleTime: 3e4,
     retry: false
   });
   const rankQuery = useQuery({
     queryKey: ["watchlist", "rank", symbolsKey, targetCcy],
-    queryFn: () => rankCrossMarket(symbols, targetCcy),
+    queryFn: ({ signal }) => rankCrossMarket(symbols, targetCcy, { signal }),
     enabled: symbols.length > 0,
     staleTime: 3e4,
     retry: false

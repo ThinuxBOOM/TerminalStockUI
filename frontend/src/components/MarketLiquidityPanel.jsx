@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { memo, useState } from "react";
 import EmptyState from "./EmptyState";
 import ErrorState from "./ErrorState";
 import FreshnessBadge from "./FreshnessBadge";
@@ -45,7 +45,9 @@ function errorMessage(err) {
   if (typeof e?.message === "string" && e.message) return e.message;
   return "Backend /api/markets/overview unreachable and screener fallback failed.";
 }
-function MarketCard({ m }) {
+// Memoized: `m` is a stable normalized object per market, so expanding
+// one card's graphs doesn't re-render every other card.
+function MarketCardInner({ m }) {
   const total = m.total > 0 ? m.total : m.advancers + m.decliners + m.unchanged;
   const advW = total > 0 ? m.advancers / total * 100 : 0;
   const decW = total > 0 ? m.decliners / total * 100 : 0;
@@ -89,6 +91,7 @@ function MarketCard({ m }) {
     stale && /* @__PURE__ */ React.createElement("p", { className: "mt-1.5 text-[10px] text-term-amber", role: "note" }, "Stale/fallback figures \u2014 shown for context, never ranked.")
   );
 }
+const MarketCard = memo(MarketCardInner);
 function MarketCardWithGraphs({ m }) {
   const [expanded, setExpanded] = useState(false);
   const detail = useMarketDetail(m.mic, expanded);

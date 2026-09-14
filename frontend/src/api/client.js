@@ -185,13 +185,14 @@ function normalizeInstrument(raw) {
     provider_symbol: provider_symbol || symbol
   });
 }
-async function searchInstruments(query, market) {
+async function searchInstruments(query, market, opts) {
   const q = String(query ?? "").trim();
   if (!q) return [];
   const mic = String(market ?? "").trim().toUpperCase();
+  const signal = opts?.signal;
   const params = mic && mic !== "ALL" ? { q, market: mic } : { q };
   return coalesceInflight(`search:${q.toLowerCase()}:${mic || "ALL"}`, async () => {
-    const { data } = await api.get("/api/instruments/search", { params });
+    const { data } = await api.get("/api/instruments/search", { params, ...signal ? { signal } : {} });
     const list = Array.isArray(data) ? data : data?.results ?? data?.items ?? [];
     const out = [];
     for (const row of list) {
@@ -204,13 +205,14 @@ async function searchInstruments(query, market) {
     return out;
   });
 }
-async function getQuote(symbol, market) {
+async function getQuote(symbol, market, opts) {
   const sym = normalizeSymbolParam(symbol);
   const mic = String(market ?? "").trim().toUpperCase();
+  const signal = opts?.signal;
   const params = { symbol: sym };
   if (mic && mic !== "ALL") params.market = mic;
   return coalesceInflight(`quote:${sym}:${mic || "ALL"}`, async () => {
-    const { data } = await api.get("/api/market_data/quote", { params });
+    const { data } = await api.get("/api/market_data/quote", { params, ...signal ? { signal } : {} });
     return normalizeQuote(data);
   });
 }
@@ -338,14 +340,16 @@ function normalizeForecast(raw, symbol, horizon) {
   return ForecastSchema.parse(candidate);
 }
 const FORECAST_TIMEOUT_MS = 6e4;
-async function getForecast(symbol, horizon = 21) {
+async function getForecast(symbol, horizon = 21, opts) {
   const sym = normalizeSymbolParam(symbol);
   const h = horizon;
+  const signal = opts?.signal;
   return coalesceInflight(`forecast:${sym}:${h}`, async () => {
     try {
       const { data } = await api.get(`/api/forecast/${encodeURIComponent(sym)}`, {
         params: { horizon: h },
-        timeout: FORECAST_TIMEOUT_MS
+        timeout: FORECAST_TIMEOUT_MS,
+        ...signal ? { signal } : {}
       });
       return normalizeForecast(data, sym, h);
     } catch (pathErr) {
@@ -353,7 +357,8 @@ async function getForecast(symbol, horizon = 21) {
       try {
         const { data } = await api.get("/api/forecast", {
           params: { symbol: sym, horizon: h },
-          timeout: FORECAST_TIMEOUT_MS
+          timeout: FORECAST_TIMEOUT_MS,
+          ...signal ? { signal } : {}
         });
         return normalizeForecast(data, sym, h);
       } catch {
@@ -388,12 +393,14 @@ function normalizeAnalytics(raw, symbol) {
   return AnalyticsSchema.parse(candidate);
 }
 const ANALYTICS_TIMEOUT_MS = 6e4;
-async function getAnalytics(symbol) {
+async function getAnalytics(symbol, opts) {
   const sym = normalizeSymbolParam(symbol);
+  const signal = opts?.signal;
   return coalesceInflight(`analytics:${sym}`, async () => {
     try {
       const { data } = await api.get(`/api/analytics/${encodeURIComponent(sym)}`, {
-        timeout: ANALYTICS_TIMEOUT_MS
+        timeout: ANALYTICS_TIMEOUT_MS,
+        ...signal ? { signal } : {}
       });
       return normalizeAnalytics(data, sym);
     } catch (pathErr) {
@@ -401,7 +408,8 @@ async function getAnalytics(symbol) {
       try {
         const { data } = await api.get("/api/analytics", {
           params: { symbol: sym },
-          timeout: ANALYTICS_TIMEOUT_MS
+          timeout: ANALYTICS_TIMEOUT_MS,
+          ...signal ? { signal } : {}
         });
         return normalizeAnalytics(data, sym);
       } catch {
@@ -848,7 +856,7 @@ function normalizeRank(raw, symbols, targetCcy) {
   });
   return { ...parsed, symbols: [...symbols] };
 }
-async function rankCrossMarket(symbols, targetCcy) {
+async function rankCrossMarket(symbols, targetCcy, opts) {
   const target = ccy(targetCcy, "USD");
   const seen = /* @__PURE__ */ new Set();
   const clean = [];
@@ -858,6 +866,7 @@ async function rankCrossMarket(symbols, targetCcy) {
     seen.add(norm);
     clean.push(norm);
   }
+  const signal = opts?.signal;
   return coalesceInflight(`fx-rank:${clean.join(",")}:${target}`, async () => {
     const { data } = await api.post(
       "/api/fx/rank",
@@ -865,7 +874,7 @@ async function rankCrossMarket(symbols, targetCcy) {
         symbols: clean,
         target_ccy: target
       },
-      { timeout: RANK_TIMEOUT_MS }
+      { timeout: RANK_TIMEOUT_MS, ...signal ? { signal } : {} }
     );
     return normalizeRank(data, clean, target);
   });
@@ -1007,11 +1016,12 @@ function normalizeScreener(raw, horizon) {
   });
 }
 const SCREENER_TIMEOUT_MS = 6e4;
-async function getScreener(params = {}) {
+async function getScreener(params = {}, opts = {}) {
   const horizon = params.horizon ?? 21;
   const mic = String(params.market ?? "").trim().toUpperCase();
   const minDir = params.minDirection ?? 0.5;
   const lim = params.limit ?? 20;
+  const signal = opts?.signal ?? params.signal;
   const query = {
     horizon,
     min_direction: minDir,
@@ -1021,7 +1031,8 @@ async function getScreener(params = {}) {
   return coalesceInflight(`screener:${mic || "ALL"}:${horizon}:${minDir}:${lim}`, async () => {
     const { data } = await api.get("/api/screener", {
       params: query,
-      timeout: SCREENER_TIMEOUT_MS
+      timeout: SCREENER_TIMEOUT_MS,
+      ...signal ? { signal } : {}
     });
     return normalizeScreener(data, horizon);
   });
@@ -1085,13 +1096,15 @@ function normalizeBarsToCandles(raw, symbol, timeframe = "1d") {
     provenance: normalizeProvenance(r, "bars-api")
   };
 }
-async function getBars(symbol, timeframe = "1d", limit = 90) {
+async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
   const sym = normalizeSymbolParam(symbol);
   const tf = String(timeframe ?? "1d").trim() || "1d";
   const n = Number.isFinite(Number(limit)) ? Math.min(250, Math.max(1, Math.floor(Number(limit)))) : 90;
+  const signal = opts?.signal;
   return coalesceInflight(`bars:${sym}:${tf}:${n}`, async () => {
     const { data } = await api.get("/api/market_data/bars", {
-      params: { symbol: sym, timeframe: tf, limit: n }
+      params: { symbol: sym, timeframe: tf, limit: n },
+      ...signal ? { signal } : {}
     });
     return normalizeBarsToCandles(data, sym, tf);
   });
