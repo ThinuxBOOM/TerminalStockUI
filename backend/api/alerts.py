@@ -180,9 +180,13 @@ class AlertCreate(BaseModel):
     @field_validator("symbol")
     @classmethod
     def _strip_symbol(cls, value: str) -> str:
+        import re as _re
+
         text = (value or "").strip().upper()
         if not text:
             raise ValueError("symbol must be non-empty")
+        if len(text) > 32 or _re.match(r"^[A-Z0-9][A-Z0-9.\-:]{0,31}$", text) is None:
+            raise ValueError("symbol must match ^[A-Z0-9][A-Z0-9.\\-:]{0,31}$")
         return text
 
     @field_validator("threshold", mode="before")
@@ -318,22 +322,25 @@ def list_alerts(
     active_only: bool = Query(
         default=False, description="When true, return active alerts only"
     ),
+    limit: int = Query(default=100, ge=1, le=500, description="Max rows (paginated)"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """List alert rules (creation order; never 500s on a fresh DB)."""
+    """List alert rules (creation order; paginated; never 500s on a fresh DB)."""
     _ensure_tables()
     try:
         query = db.query(Alert).order_by(Alert.created_at.asc())
         if active_only:
             query = query.filter(Alert.is_active.is_(True))
-        rows = query.all()
+        total = query.count()
+        rows = query.offset(offset).limit(limit).all()
     except Exception:
         try:
             db.rollback()
         except Exception:
             pass
         return {
-            "alerts": [], "count": 0,
+            "alerts": [], "count": 0, "total": 0, "limit": limit, "offset": offset,
             "provenance": _alert_provenance(True),
             "disclosure": DISCLOSURE,
         }
@@ -346,6 +353,9 @@ def list_alerts(
     return {
         "alerts": out,
         "count": len(out),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
         "provenance": _alert_provenance(False),
         "disclosure": DISCLOSURE,
     }
@@ -466,13 +476,36 @@ def _finite_or_raise(value: Any, what: str, symbol: str) -> float:
 def _observe(
     alert: Alert, *, market: Any, forecast: Any
 ) -> tuple[float, dict]:
-    """Fetch the observed value + observation provenance for one alert."""
+    """Fetch the observed value + observation provenance for one alert.
+
+    Price conditions honor ``target_ccy``: when it differs from the quote
+    currency the price is converted via the FX service. Conversion failure
+    raises (per-alert error, never a silent mis-fire on mixed currencies).
+    Direction conditions are dimensionless and need no conversion.
+    """
     condition = str(alert.condition)
     symbol = str(alert.symbol)
     if condition in ("price_above", "price_below"):
         quote = market.get_quote(symbol)
         observed = _finite_or_raise(quote.get("price"), "price", symbol)
-        return observed, dict(quote.get("provenance") or {})
+        quote_ccy = str(quote.get("currency") or "USD").strip().upper()
+        target_ccy = str(getattr(alert, "target_ccy", None) or quote_ccy).strip().upper() or quote_ccy
+        if target_ccy != quote_ccy:
+            try:
+                from backend.market_data.fx.provider import FXProvider as _FXP
+                fx_payload = _FXP().get_rate(quote_ccy, target_ccy)
+                rate = _finite_or_raise(fx_payload.get("rate"), "fx rate", symbol)
+                observed = float(observed) * float(rate)
+                if fx_payload.get("fallback_used"):
+                    logger.warning("alert fx fallback %s->%s", quote_ccy, target_ccy)
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError(f"fx conversion {quote_ccy}->{target_ccy} failed: {exc}") from exc
+        prov = dict(quote.get("provenance") or {})
+        prov.setdefault("target_ccy", target_ccy)
+        prov.setdefault("quote_ccy", quote_ccy)
+        return observed, prov
     if condition == "change_pct_below":
         quote = market.get_quote(symbol)
         observed = _finite_or_raise(quote.get("change_pct"), "change_pct", symbol)
@@ -495,6 +528,7 @@ def evaluate_due_alerts(
     forecast: Any = None,
     notifier: Any = None,
     now: datetime | None = None,
+    max_alerts: int = 500,
 ) -> dict:
     """Evaluate every active due alert; shared core (cron + worker).
 
@@ -503,7 +537,8 @@ def evaluate_due_alerts(
     ``fired`` lists ``{alert_id, symbol, observed}``, and ``errors`` maps
     alert_id (or ``_batch``) to a short reason. Per-alert failures —
     including insufficient history — land in ``errors``; the batch itself
-    never raises for them.
+    never raises for them. ``max_alerts`` bounds the batch (creation order)
+    so a large rule table cannot OOM the worker.
     """
     if market is None:
         from backend.market_data.service import MarketDataService
@@ -520,10 +555,15 @@ def evaluate_due_alerts(
     moment = now or _utcnow()
 
     try:
+        try:
+            cap = max(1, min(int(max_alerts), 5000))
+        except (TypeError, ValueError):
+            cap = 500
         alerts = (
             db.query(Alert)
             .filter(Alert.is_active.is_(True))
             .order_by(Alert.created_at.asc())
+            .limit(cap)
             .all()
         )
     except Exception:

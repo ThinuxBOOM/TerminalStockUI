@@ -15,6 +15,17 @@ from cryptography.fernet import Fernet, InvalidToken
 
 REDACTED = "[REDACTED]"
 
+#: Placeholder values that must never be used outside local dev. When
+#: SECRET_KEY equals one of these (or is empty and falls back to an
+#: ephemeral key), encryption still works but ciphertext cannot survive
+#: restarts — callers should warn loudly in production.
+DEFAULT_SECRET_VALUES = frozenset({
+    "",
+    "change-me",
+    "change-me-generate-with-openssl-rand-hex-32",
+    "test-only-secret-key-for-unit-tests-123",
+})
+
 # Keys that must never appear in plaintext in logs / audit payloads.
 _SENSITIVE_KEYS = ("api_key", "apikey", "secret", "token", "password", "authorization", "cookie", "set-cookie")
 _SENSITIVE_RE = re.compile(
@@ -70,6 +81,35 @@ def _load_key() -> bytes:
         digest = __import__("hashlib").sha256(raw.encode()).digest()
         return base64.urlsafe_b64encode(digest)
     return Fernet.generate_key()
+
+
+def is_default_secret_key() -> bool:
+    """True when SECRET_KEY is missing/placeholder (dev-only posture)."""
+    try:
+        raw = (os.getenv("SECRET_KEY", "") or "").strip()
+    except Exception:
+        return True
+    return raw in DEFAULT_SECRET_VALUES
+
+
+def warn_if_default_secret_key(logger_name: str = "onemarket.security") -> bool:
+    """Log an ERROR in production when SECRET_KEY is a placeholder.
+
+    Returns True when the key is a default/placeholder. Never logs the key.
+    """
+    if not is_default_secret_key():
+        return False
+    try:
+        import logging as _logging
+
+        _logging.getLogger(logger_name).error(
+            "SECRET_KEY is missing or a placeholder — generate one with "
+            "`openssl rand -hex 32` and set it via the SECRET_KEY env var. "
+            "Ciphertext from ephemeral keys cannot survive restarts."
+        )
+    except Exception:
+        pass
+    return True
 
 
 _fernet: Fernet | None = None

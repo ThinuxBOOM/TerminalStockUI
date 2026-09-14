@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import random
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from .health import ProviderHealthTracker, market_state
 from .provenance import Provenance, build_provenance
@@ -94,7 +95,29 @@ def _provisional_instrument(symbol_text: str):
     default as quotes), suffixed symbols take their market from the suffix.
     Currency follows the market (XSHG->CNY, Euronext->EUR, else USD).
     Never raises; returns None when the text is unusable.
+
+    Results are cached (LRU, 512 entries) on the normalized UPPER form — a
+    fresh ``model_copy()`` is returned per call so callers can never mutate
+    the cached canonical.
     """
+    try:
+        upper = str(symbol_text or "").strip().upper()
+    except Exception:
+        return None
+    if not upper:
+        return None
+    cached = _provisional_instrument_cached(upper)
+    if cached is None:
+        return None
+    try:
+        return cached.model_copy()
+    except Exception:
+        return cached
+
+
+@lru_cache(maxsize=512)
+def _provisional_instrument_cached(upper: str):
+    """Cached builder for :func:`_provisional_instrument` (UPPER input)."""
     try:
         from backend.instruments.calendars import (
             provider_symbol_for,
@@ -103,14 +126,10 @@ def _provisional_instrument(symbol_text: str):
         from backend.instruments.models import Instrument as RegistryInstrument
     except Exception:
         return None
-    try:
-        upper = str(symbol_text or "").strip().upper()
-    except Exception:
-        return None
     if not upper:
         return None
     try:
-        base, mic_hint = split_provider_symbol(symbol_text)
+        base, mic_hint = split_provider_symbol(upper)
     except Exception:
         base, mic_hint = upper, None
     if mic_hint:
@@ -134,6 +153,34 @@ def _provisional_instrument(symbol_text: str):
         )
     except Exception:
         return None
+
+
+@lru_cache(maxsize=1024)
+def _stub_base_rows(
+    provider_symbol: str, n: int, day_iso: str
+) -> tuple[tuple[float, float, float, float, int], ...]:
+    """Deterministic unanchored OHLCV random-walk (cached base for stubs).
+
+    Pure function of ``(provider_symbol, n, day_iso)``: seeded ``random``
+    (NOT ``secrets`` — this is chart filler, never crypto) so offline charts
+    are stable within a day. Returns immutable ``(o, h, l, c, volume)``
+    tuples; callers copy into fresh dicts and apply the quote anchor +
+    today's timestamps. ``day_iso`` is a cache-buster key only.
+    """
+    _ = day_iso
+    seed = int(hashlib.sha256((provider_symbol or "UNKNOWN").encode()).hexdigest(), 16) % (2**32)
+    rng = random.Random(seed)
+    price = 100.0 + (seed % 900)
+    out: list[tuple[float, float, float, float, int]] = []
+    for _ in range(max(1, min(int(n), 250))):
+        drift = rng.uniform(-0.015, 0.015)
+        o = price
+        c = round(o * (1 + drift), 2)
+        h = round(max(o, c) * (1 + rng.uniform(0, 0.008)), 2)
+        low = round(min(o, c) * (1 - rng.uniform(0, 0.008)), 2)
+        out.append((round(o, 2), h, low, c, rng.randint(100_000, 60_000_000)))
+        price = c
+    return tuple(out)
 
 
 class MarketDataService:
@@ -229,7 +276,17 @@ class MarketDataService:
                 provider_symbol = yahoo_symbol or provider_symbol
             else:
                 provider_symbol = yahoo_symbol
-        cache_key = f"quote:{provider_symbol}:{mic}"
+        # Canonical cache key: upper-case symbol+MIC so aapl:XNAS and
+        # AAPL:XNAS share one entry instead of double-fetching.
+        try:
+            _cache_sym = str(provider_symbol or "").strip().upper()
+        except Exception:
+            _cache_sym = str(provider_symbol)
+        try:
+            _cache_mic = str(mic or "").strip().upper()
+        except Exception:
+            _cache_mic = str(mic)
+        cache_key = f"quote:{_cache_sym}:{_cache_mic}"
         if self.cache is not None:
             try:
                 hit = self.cache.get(cache_key)  # type: ignore[union-attr]
@@ -864,8 +921,18 @@ class MarketDataService:
     def _get_bars_from_db(
         self, symbol: str, timeframe: str = "1d", limit: int = 30
     ) -> dict | None:
-        """Read bars from price_bars; None when the DB path must not serve."""
+        """Read bars from price_bars; None when the DB path must not serve.
+
+        Single round-trip: one ``PriceBar JOIN instruments`` query filtered
+        to the latest ``n`` rows (``ts DESC + LIMIT`` then reversed to
+        ascending in Python — ``ASC + LIMIT`` would return the *oldest* rows
+        instead). The coverage gate (``min(n, 100)`` rows) keeps thin
+        histories on the stub path.
+        """
+        from sqlalchemy import or_ as _or_
+
         from backend.db.models import Instrument as DBInstrument
+        from backend.db.models import PriceBar
         from backend.db.session import get_session_factory
 
         try:
@@ -880,14 +947,15 @@ class MarketDataService:
         Session = get_session_factory()  # lazy per call; cached engine
         db = Session()
         try:
+            query = (
+                db.query(PriceBar, DBInstrument)
+                .join(DBInstrument, PriceBar.instrument_id == DBInstrument.instrument_id)
+                .filter(PriceBar.timeframe == timeframe)
+            )
             if instrument is not None:
-                db_inst = (
-                    db.query(DBInstrument)
-                    .filter(
-                        DBInstrument.exchange_mic == instrument.exchange_mic,
-                        DBInstrument.exchange_symbol == instrument.exchange_symbol,
-                    )
-                    .first()
+                query = query.filter(
+                    DBInstrument.exchange_mic == instrument.exchange_mic,
+                    DBInstrument.exchange_symbol == instrument.exchange_symbol,
                 )
                 response_symbol = instrument.provider_symbol
                 response_inst_id = instrument.instrument_id
@@ -895,31 +963,33 @@ class MarketDataService:
                 # Auto-provisioned symbols (first seen via on-demand
                 # backfill): locate by provider symbol directly.
                 upper = symbol_text.upper()
-                db_inst = (
-                    db.query(DBInstrument)
-                    .filter(DBInstrument.provider_symbol == upper)
-                    .first()
-                )
-                if db_inst is None:
-                    db_inst = (
-                        db.query(DBInstrument)
-                        .filter(DBInstrument.exchange_symbol == upper)
-                        .first()
+                query = query.filter(
+                    _or_(
+                        DBInstrument.provider_symbol == upper,
+                        DBInstrument.exchange_symbol == upper,
                     )
-                response_symbol = (
-                    db_inst.provider_symbol if db_inst is not None
-                    else symbol_text.upper()
                 )
-                response_inst_id = (
-                    str(db_inst.instrument_id) if db_inst is not None else None
-                )
-            if db_inst is None:
+                response_symbol = symbol_text.upper()
+                response_inst_id = None
+            pairs = query.order_by(PriceBar.ts.desc()).limit(n).all()
+            if len(pairs) < min(n, 100):
                 return None
-            return self._bars_response_from_db(
-                db, db_inst,
+            if not pairs:
+                return None
+            first_inst = pairs[0][1]
+            if instrument is None and first_inst is not None:
+                try:
+                    response_symbol = first_inst.provider_symbol or response_symbol
+                    response_inst_id = str(first_inst.instrument_id)
+                except Exception:
+                    pass
+            bar_rows = [bar for bar, _inst in reversed(pairs)]
+            return self._bars_response_from_rows(
+                bar_rows,
+                db_inst=first_inst,
                 response_symbol=response_symbol,
                 response_inst_id=response_inst_id,
-                timeframe=timeframe, limit_n=n,
+                timeframe=timeframe,
             )
         finally:
             try:
@@ -932,7 +1002,7 @@ class MarketDataService:
         db, db_inst, *, response_symbol: str, response_inst_id,
         timeframe: str, limit_n: int,
     ) -> dict | None:
-        """Build the bars payload from a DB instrument row (shared tail)."""
+        """Legacy two-query tail (kept for tests); prefers the join path."""
         from backend.db.models import PriceBar
 
         desc = (
@@ -948,6 +1018,20 @@ class MarketDataService:
         if len(desc) < min(limit_n, 100):
             return None
         rows = list(reversed(desc))
+        return MarketDataService._bars_response_from_rows(
+            rows,
+            db_inst=db_inst,
+            response_symbol=response_symbol,
+            response_inst_id=response_inst_id,
+            timeframe=timeframe,
+        )
+
+    @staticmethod
+    def _bars_response_from_rows(
+        rows, *, db_inst, response_symbol: str, response_inst_id,
+        timeframe: str,
+    ) -> dict | None:
+        """Build the bars payload from ascending PriceBar rows (shared tail)."""
         bars: list[dict] = []
         sources: list[str] = []
         latest_as_of = None
@@ -981,7 +1065,10 @@ class MarketDataService:
         # Deterministic source pick: ties broken alphabetically so same
         # inputs always yield the same provenance (set order is random).
         source = max(sorted(set(sources)), key=sources.count) if sources else "yfinance"
-        mic = db_inst.exchange_mic or "XNAS"
+        try:
+            mic = (getattr(db_inst, "exchange_mic", None) or "XNAS")
+        except Exception:
+            mic = "XNAS"
         try:
             expected = expected_delay_minutes(mic)
         except ValueError:
@@ -1021,25 +1108,17 @@ class MarketDataService:
             n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
-        seed = int(hashlib.sha256(provider_symbol.encode()).hexdigest(), 16) % (2**32)
-        rng = random.Random(seed)
-        base = 100.0 + (seed % 900)
-        price = base
-        rows: list[dict] = []
         day = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        for i in range(n):
-            drift = rng.uniform(-0.015, 0.015)
-            o = price
-            c = round(o * (1 + drift), 2)
-            h = round(max(o, c) * (1 + rng.uniform(0, 0.008)), 2)
-            low = round(min(o, c) * (1 - rng.uniform(0, 0.008)), 2)
-            rows.append({
+        base_rows = _stub_base_rows(provider_symbol or "UNKNOWN", n, day.date().isoformat())
+        rows: list[dict] = [
+            {
                 "ts": (day - timedelta(days=(n - 1 - i))).isoformat(),
-                "open": round(o, 2), "high": h, "low": low, "close": c,
-                "volume": rng.randint(100_000, 60_000_000),
+                "open": o, "high": h, "low": low, "close": c,
+                "volume": vol,
                 "missing_fields": [],
-            })
-            price = c
+            }
+            for i, (o, h, low, c, vol) in enumerate(base_rows)
+        ]
         if anchor is not None and anchor > 0 and rows:
             # Rescale so the last close lands exactly on the quote price.
             # A constant factor preserves % returns and OHLC ordering, so

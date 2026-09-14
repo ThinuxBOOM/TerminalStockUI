@@ -37,9 +37,10 @@ from ..features.features import (
 )
 
 MODEL_NAME = "logistic-direction"
-MODEL_VERSION = "logistic-direction-v1"
+MODEL_VERSION = "logistic-direction-v2"
 FORMULA = (
-    "P(up_h) = sigmoid(w_h . x + b_h); L2 LogisticRegression(C=1.0, "
+    "P(up_h) = sigmoid(w_h . z + b_h) where z = (x - mean_h)/scale_h "
+    "(train-only standardization); L2 LogisticRegression(C=1.0, "
     "random_state=0) per horizon on v1 features"
 )
 MIN_SAMPLES = 20
@@ -59,6 +60,10 @@ class LogisticDirectionModel:
         self.models_: dict[int, Any] = {}
         self.n_train_: dict[int, int] = {}
         self.feature_columns_: list[str] = []
+        # Train-only standardization per horizon (fixes scale-dependent L2:
+        # RSI 0-100 vs ret ~0.02). Stored as plain arrays for determinism.
+        self.scaler_mean_: dict[int, Any] = {}
+        self.scaler_scale_: dict[int, Any] = {}
 
     def fit(self, features: pd.DataFrame, close: pd.Series) -> "LogisticDirectionModel":
         """Fit one classifier per horizon on label-observable rows."""
@@ -75,6 +80,8 @@ class LogisticDirectionModel:
             raise ValueError("feature frame contains NaN/inf; run build_features first")
         fitted: dict[int, Any] = {}
         counts: dict[int, int] = {}
+        means: dict[int, Any] = {}
+        scales: dict[int, Any] = {}
         for horizon in self.horizons:
             labels = direction_label(both["__close__"], horizon)
             mask = labels.notna().to_numpy()
@@ -86,11 +93,20 @@ class LogisticDirectionModel:
             if len(np.unique(yh)) < 2:
                 raise ValueError(
                     f"horizon {horizon}: labels are single-class; cannot fit")
+            # Standardize on train rows only (per-horizon mask).
+            mu = Xh.mean(axis=0)
+            sd = Xh.std(axis=0, ddof=0)
+            # Zero-variance column -> scale 1 (no-op, avoids div-by-zero).
+            sd = np.where(np.isfinite(sd) & (sd > 1e-12), sd, 1.0)
+            Xh_s = (Xh - mu) / sd
             clf = LogisticRegression(C=self.C, max_iter=2000, random_state=0)
-            clf.fit(Xh, yh)
+            clf.fit(Xh_s, yh)
             fitted[horizon] = clf
             counts[horizon] = int(len(yh))
+            means[horizon] = mu
+            scales[horizon] = sd
         self.models_, self.n_train_ = fitted, counts
+        self.scaler_mean_, self.scaler_scale_ = means, scales
         self.feature_columns_ = list(frame.columns)
         return self
 
@@ -104,11 +120,19 @@ class LogisticDirectionModel:
         frame = pd.DataFrame(latest_features)
         if len(frame) == 0:
             raise ValueError("features frame is empty")
-        last = frame.iloc[[-1]]
-        batch = self.predict_proba_batch(last)
+        missing = [c for c in self.feature_columns_ if c not in frame.columns]
+        if missing:
+            raise ValueError(f"latest_features missing columns: {missing}")
+        base = frame.iloc[[-1]][self.feature_columns_].to_numpy(dtype=float)
         out: dict[int, ForecastResult] = {}
-        for horizon, arr in batch.items():
-            proba = float(arr[-1])
+        for horizon, clf in self.models_.items():
+            mu = self.scaler_mean_.get(horizon)
+            sd = self.scaler_scale_.get(horizon)
+            if mu is None or sd is None:
+                row = base
+            else:
+                row = (base - np.asarray(mu)) / np.asarray(sd)
+            proba = float(clf.predict_proba(row)[0, 1])
             out[horizon] = ForecastResult(
                 TARGET_DIRECTION, horizon, min(max(proba, 0.0), 1.0),
                 FORMULA, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
@@ -125,7 +149,9 @@ class LogisticDirectionModel:
         """Batched P(up) arrays for every row of ``features_frame``.
 
         Single ``predict_proba`` call per horizon (no per-row Python loop).
-        Returns ``{horizon: np.ndarray[float]}`` clipped to [0, 1].
+        Applies the same train-only per-horizon standardization as
+        :meth:`predict_direction_proba`. Returns ``{horizon:
+        np.ndarray[float]}`` clipped to [0, 1].
         """
         if not self.models_:
             raise ValueError("model is not fitted; call fit() first")
@@ -138,7 +164,13 @@ class LogisticDirectionModel:
         X = frame[self.feature_columns_].to_numpy(dtype=float)
         out: dict[int, np.ndarray] = {}
         for horizon, clf in self.models_.items():
-            proba = np.asarray(clf.predict_proba(X)[:, 1], dtype=float)
+            mu = self.scaler_mean_.get(horizon)
+            sd = self.scaler_scale_.get(horizon)
+            if mu is None or sd is None:
+                Xs = X
+            else:
+                Xs = (X - np.asarray(mu)) / np.asarray(sd)
+            proba = np.asarray(clf.predict_proba(Xs)[:, 1], dtype=float)
             out[horizon] = np.clip(proba, 0.0, 1.0)
         return out
 

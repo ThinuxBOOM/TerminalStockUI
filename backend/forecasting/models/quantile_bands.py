@@ -45,6 +45,29 @@ FORMULA_DRAWDOWN = (
 )
 
 
+def _effective_min_obs(min_obs: int, horizon: int) -> int:
+    """Horizon-aware window gate for overlapping h-day sums.
+
+    Overlapping windows are autocorrelated: n overlapping windows carry only
+    ~n/h independent blocks. Require at least 2 independent blocks worth of
+    windows (floor 30) so h=63 needs 126 windows on 250-bar history
+    (187 available -> passes with n_eff~3.0 flagged in output). Stricter
+    3*h would 422 live 250-bar forecasts; instead we gate at 2*h and
+    surface n_effective so callers see the thin effective sample.
+    """
+    try:
+        base = int(min_obs)
+    except (TypeError, ValueError):
+        base = 30
+    try:
+        h = int(horizon)
+    except (TypeError, ValueError):
+        h = 1
+    if h < 1:
+        h = 1
+    return max(base, 2 * h)
+
+
 def _clean_close(close) -> pd.Series:
     prices = pd.Series(close, dtype=float).dropna()
     if len(prices) < 2:
@@ -90,16 +113,20 @@ def return_quantiles(
                     f"horizon {horizon}: only 0 trailing windows, "
                     f"need >= {min_obs}")
         sums = lret.rolling(horizon, min_periods=horizon).sum().dropna()
-        if len(sums) < min_obs:
+        required = _effective_min_obs(min_obs, horizon)
+        if len(sums) < required:
             raise ValueError(
                 f"horizon {horizon}: only {len(sums)} trailing windows, "
-                f"need >= {min_obs}")
+                f"need >= {required} (min_obs={min_obs} adjusted for "
+                f"overlapping h-day windows; ~{len(sums)/horizon:.1f} "
+                f"independent blocks)")
         qs = np.quantile(sums.to_numpy(), [lower, 0.5, upper])
         value = {"low": float(np.exp(qs[0]) - 1.0),
                  "median": float(np.exp(qs[1]) - 1.0),
                  "high": float(np.exp(qs[2]) - 1.0),
                  "lower_q": float(lower), "upper_q": float(upper),
-                 "n_windows": int(len(sums))}
+                 "n_windows": int(len(sums)),
+                 "n_effective": float(len(sums) / horizon)}
         out[horizon] = ForecastResult(
             TARGET_RETURN_RANGE, horizon, value,
             FORMULA_BANDS + f" with q=({lower}, 0.5, {upper})",
@@ -171,14 +198,18 @@ def drawdown_probability(
         raise ValueError("threshold must be in (0, 1)")
     prices = _clean_close(close)
     forwards = future_drawdown(prices, horizon).dropna()
-    if len(forwards) < min_obs:
-        raise ValueError(f"only {len(forwards)} observable windows, need >= {min_obs}")
+    required = _effective_min_obs(min_obs, horizon)
+    if len(forwards) < required:
+        raise ValueError(
+            f"only {len(forwards)} observable windows, need >= {required} "
+            f"(min_obs={min_obs} adjusted for overlapping h-day windows)")
     breaches = forwards <= -thresh
     proba = float(breaches.mean())
     return ForecastResult(
         TARGET_DRAWDOWN, horizon,
         {"probability": proba, "threshold": thresh,
          "n_windows": int(len(forwards)),
+         "n_effective": float(len(forwards) / horizon),
          "n_breaches": int(breaches.sum())},
         FORMULA_DRAWDOWN, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
         data_version, as_of,

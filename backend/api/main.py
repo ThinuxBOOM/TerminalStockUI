@@ -55,6 +55,7 @@ def _ensure_canonical_package() -> None:
 _ensure_canonical_package()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend import __version__ as _version
 from backend.api.deps import reset_deps  # noqa: F401  (public test hook)
@@ -75,69 +76,60 @@ from backend.api.markets import router as markets_router
 from backend.api.screener import router as screener_router
 
 
+def _cors_origins() -> list[str]:
+    """Explicit allow-list from CORS_ORIGINS (comma-separated).
+
+    Defaults cover local Vite dev + Vercel previews. Production should set
+    CORS_ORIGINS to the exact frontend origin(s) — never "*".
+    """
+    raw = os.getenv("CORS_ORIGINS", "") or ""
+    configured = [part.strip() for part in raw.split(",") if part.strip()]
+    if configured:
+        return configured
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
 def create_app() -> FastAPI:
-    from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
-    from starlette.middleware.base import BaseHTTPMiddleware
-
     app = FastAPI(title="OneMarket Analyzer", version=_version)
-    # --- CORS: same-origin default; split deploys opt in via ALLOWED_ORIGINS.
-    # Never "*" with credentials. Vercel rewrite (same-origin) works with
-    # the empty default; render.yaml static frontend sets the backend origin.
-    import os as _os
-
-    _allowed = [o.strip() for o in (_os.getenv("ALLOWED_ORIGINS", "") or "").split(",") if o.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_allowed,
-        allow_credentials=False,
-        allow_methods=["GET", "POST"],
-        allow_headers=["Authorization", "Content-Type"],
-        max_age=600,
+    # Hardening middlewares (all no-ops in local dev by default; enforced
+    # via env in staging/prod — see backend/security/*.py):
+    #  - CORS allow-list (CORS_ORIGINS)
+    #  - Security headers (CSP, HSTS in production, X-Frame-Options, ...)
+    #  - Request body size cap (MAX_REQUEST_BYTES, default 1 MiB)
+    #  - Sliding-window rate limiting (RATE_LIMIT_PER_MIN, default 300)
+    #  - Opt-in API-key auth (API_KEY; open when unset)
+    from backend.security.middleware import (
+        RequestSizeLimitMiddleware,
+        SecurityHeadersMiddleware,
+        api_key_middleware,
+        rate_limit_middleware,
     )
 
-    class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
-            response = await call_next(request)
-            try:
-                response.headers["X-Content-Type-Options"] = "nosniff"
-                response.headers["Referrer-Policy"] = "same-origin"
-                response.headers["X-Frame-Options"] = "DENY"
-            except Exception:
-                pass
-            return response
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Role"],
+        max_age=600,
+    )
+    app.middleware("http")(api_key_middleware)
+    app.middleware("http")(rate_limit_middleware)
+    app.add_middleware(RequestSizeLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
+    try:
+        from backend.security.secrets import warn_if_default_secret_key
 
-    class _RateLimitMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
-            try:
-                import os as _os2
-
-                # Test/CI: TestClient shares one IP across the whole suite;
-                # global budgets would flake unrelated tests. Skip here
-                # (production still enforces; edge limits cover multi-replica).
-                if _os2.getenv("PYTEST_CURRENT_TEST"):
-                    return await call_next(request)
-                from backend.security.rate_limit import check_rate_limit
-
-                client_ip = "unknown"
-                try:
-                    client_ip = (request.client.host if request.client else "unknown") or "unknown"
-                except Exception:
-                    pass
-                decision = check_rate_limit(client_ip, request.url.path or "/")
-                if not decision.allowed:
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": "rate limit exceeded, retry shortly"},
-                        headers={"Retry-After": str(decision.retry_after_s)},
-                    )
-            except Exception:
-                pass
-            return await call_next(request)
-
-    app.add_middleware(_SecurityHeadersMiddleware)
-    app.add_middleware(_RateLimitMiddleware)
-    # Fail-closed secret guard in production (import-time, loud).
+        warn_if_default_secret_key()
+    except Exception:
+        pass
+    # Fail-closed production guard (loud RuntimeError on missing/weak
+    # SECRET_KEY when APP_ENV=production; dev/test keep offline behavior).
     try:
         from backend.security.secrets import assert_secret_strength
 

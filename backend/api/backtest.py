@@ -52,7 +52,7 @@ class BacktestRunRequest(BaseModel):
     horizons: list[int] = Field(default_factory=lambda: [5, 21, 63], max_length=3)
     train_size: int = Field(default=100, ge=20, le=1000)
     test_size: int = Field(default=21, ge=1, le=500)
-    gap: int = Field(default=5, ge=0, le=500)
+    gap: int = Field(default=63, ge=0, le=500)
     n_bins: int = Field(default=10, ge=2, le=20)
     limit: int = Field(default=250, ge=100, le=250)
 
@@ -75,6 +75,15 @@ class BacktestRunRequest(BaseModel):
         if not text:
             raise ValueError("symbol must be non-empty")
         return text
+
+    def validate_gap(self) -> None:
+        """Require gap >= max(horizons) so train labels cannot straddle tests."""
+        worst = max(int(h) for h in self.horizons)
+        if int(self.gap) < worst:
+            raise ValueError(
+                f"gap ({self.gap}) must be >= max(horizons) ({worst}) to purge "
+                f"forward-label overlap; raise gap or shrink horizons"
+            )
 
 
 def _reliability_records(table: pd.DataFrame) -> list[dict]:
@@ -220,6 +229,11 @@ def _evaluate_horizon(
     return {
         "n_folds": int(n_folds_used),
         "n_points": int(len(y_true)),
+        "n_warning": (
+            "insufficient windows (n<10): scores unreliable"
+            if len(y_true) < 10
+            else ("small sample (n<30): wide uncertainty" if len(y_true) < 30 else None)
+        ),
         "brier": brier,
         "brier_formula": "Brier = mean((p_i - y_i)^2); 0 = perfect, 0.25 = coin-flip baseline",
         "ece": ece,
@@ -229,6 +243,12 @@ def _evaluate_horizon(
 
 
 def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
+    # Purge guard: default gap=5 leaks for h=21/63. Fail fast with 422
+    # instead of silently scoring leaky folds.
+    try:
+        req.validate_gap()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         bars = market.get_bars(req.symbol, timeframe="1d", limit=req.limit)
     except HTTPException:

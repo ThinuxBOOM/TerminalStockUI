@@ -1,7 +1,7 @@
 """Beneish M-score (Beneish, 1999, "The Detection of Earnings Manipulation").
 
-Formula: M = -4.84 + 0.92*DSRI + 0.58*GMI + 0.464*AQI + 0.404*SGI
-              + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI
+Formula: M = -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI
+               + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI
   DSRI = (receivables_t/revenue_t) / (receivables_{t-1}/revenue_{t-1})
   GMI  = margin_{t-1} / margin_t, margin = (revenue - cogs)/revenue
   AQI  = [1-(current_assets_t+ppe_net_t)/total_assets_t]
@@ -24,7 +24,7 @@ from typing import Mapping
 from ..common import MetricResult, get_number, unavailable
 
 FORMULA = (
-    "M = -4.84 + 0.92*DSRI + 0.58*GMI + 0.464*AQI + 0.404*SGI "
+    "M = -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI "
     "+ 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI; "
     "likely manipulator if M > -1.78 (Beneish 1999)"
 )
@@ -121,7 +121,7 @@ def beneish_m(fin: Mapping) -> MetricResult:
         return unavailable(FORMULA, list(SOURCE_FIELDS), "; ".join(errors))
     components = {"DSRI": DSRI, "GMI": GMI, "AQI": AQI, "SGI": SGI,
                   "DEPI": DEPI, "SGAI": SGAI, "LVGI": LVGI, "TATA": TATA}
-    m = (-4.84 + 0.92 * DSRI + 0.58 * GMI + 0.464 * AQI + 0.404 * SGI
+    m = (-4.84 + 0.92 * DSRI + 0.528 * GMI + 0.404 * AQI + 0.892 * SGI
          + 0.115 * DEPI - 0.172 * SGAI + 4.679 * TATA - 0.327 * LVGI)
     return MetricResult(
         {"m": m, "likely_manipulator": bool(m > CUTOFF),

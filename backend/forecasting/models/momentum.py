@@ -1,9 +1,14 @@
 """Baseline 2: trailing-momentum model (Milestone 3).
 
-Naive reference: trailing `trailing_days` simple return R and its realized
-volatility sigma give z = R / (sigma*sqrt(trailing_days)); the direction
-probability is the logistic map 1/(1+exp(-z)) with fixed gain k=1.
-Uptrend -> > 0.5, downtrend -> < 0.5, flat -> 0.5. Deterministic.
+Naive reference: trailing `trailing_days` LOG return R (log(P_t/P_{t-63}),
+consistent with the log-vol denominator) and its realized volatility sigma
+give z = R / (sigma*sqrt(trailing_days)); the direction probability is the
+logistic map 1/(1+exp(-z)) with fixed gain k=1. Uptrend -> > 0.5,
+downtrend -> < 0.5, flat -> 0.5. Deterministic.
+
+Horizon decay: z_h = z * sqrt(trailing / (trailing + h)) so long-horizon
+P decays toward 0.5 (signal mean-reversion / forward variance). h=5 keeps
+~96% of z, h=21 ~87%, h=63 ~71%. Flat stays exactly 0.5.
 """
 
 from __future__ import annotations
@@ -21,8 +26,10 @@ from ..features.features import FEATURE_VERSION
 MODEL_NAME = "momentum"
 MODEL_VERSION = "momentum-v1"
 FORMULA = (
-    "z = R_trail / (sigma_trail*sqrt(trailing_days)); "
-    "P(up) = 1/(1+exp(-k*z)), k=1 (naive momentum baseline)"
+    "z = R_trail_log / (sigma_trail*sqrt(trailing_days)); "
+    "R_trail_log = log(P_t/P_{t-trailing}); "
+    "z_h = z*sqrt(trailing/(trailing+h)); "
+    "P(up_h) = 1/(1+exp(-k*z_h)), k=1 (horizon-decayed momentum)"
 )
 GAIN = 1.0
 
@@ -45,7 +52,9 @@ class MomentumBaseline:
         tail = prices.iloc[-(window + 1):]
         if (tail <= 0).any() or not np.isfinite(tail.to_numpy()).all():
             raise ValueError("closes must be positive and finite")
-        self.trailing_return = float(tail.iloc[-1] / tail.iloc[0] - 1.0)
+        # Log trailing return for consistency with the log-vol denominator
+        # (simple/log differ ~1.23x on +50% runs; mixing inflates rallies).
+        self.trailing_return = float(math.log(float(tail.iloc[-1] / tail.iloc[0])))
         lret = np.log(tail.to_numpy()[1:] / tail.to_numpy()[:-1])
         self.trailing_vol = float(np.std(lret, ddof=1)) if len(lret) > 1 else 0.0
         return self
@@ -81,7 +90,15 @@ class MomentumBaseline:
             # Clip z: exp() overflows past ~709; |z| <= 50 already saturates
             # the sigmoid to 0/1 within float precision. Deterministic.
             z = max(min(GAIN * tr / denom, 50.0), -50.0)
-            proba = 1.0 / (1.0 + math.exp(-z))
+            # Horizon decay toward 0.5: longer horizons dilute trailing signal.
+            try:
+                _decay = math.sqrt(float(self.trailing_days) / (float(self.trailing_days) + float(horizon)))
+            except (ValueError, ZeroDivisionError):
+                _decay = 1.0
+            if not math.isfinite(_decay):
+                _decay = 1.0
+            z_h = max(min(z * _decay, 50.0), -50.0)
+            proba = 1.0 / (1.0 + math.exp(-z_h))
         return ForecastResult(
             TARGET_DIRECTION, horizon, float(proba),
             FORMULA, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
@@ -94,7 +111,7 @@ class MomentumBaseline:
         as_of: str | None = None,
         data_version: str = "unspecified",
     ) -> dict[int, ForecastResult]:
-        """Direction probabilities for 5/21/63 trading days (same level)."""
+        """Direction probabilities for 5/21/63 trading days (horizon-decayed)."""
         return {int(h): self.direction_probability(h, as_of, data_version)
                 for h in horizons}
 

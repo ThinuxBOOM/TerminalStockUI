@@ -260,7 +260,9 @@ def test_cron_calibrate_single_symbol_200(isolated_db, monkeypatch):
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["ok"] is True
-        assert body["calibrated"] == len(FORECAST_HORIZONS)
+        # Honest counting: calibrated = n>=10 only (h=63 stub n=1 is weak,
+        # not skill). calibrated + unscored covers all horizons.
+        assert body["calibrated"] + body["unscored"] == len(FORECAST_HORIZONS)
         assert set(body["snapshots"]) == {f"AAPL:{h}" for h in FORECAST_HORIZONS}
         assert all(n >= 0 for n in body["snapshots"].values())
         assert body["errors"] == {}
@@ -277,7 +279,7 @@ def test_cron_calibrate_post_never_500s_batch(isolated_db, monkeypatch):
                            json={"symbols": ["AAPL", "ZZZ_NOPE_123"]})
         assert resp.status_code == 200, resp.text  # stub bars cover unknown too
         body = resp.json()
-        assert body["calibrated"] == 2 * len(FORECAST_HORIZONS)
+        assert body["calibrated"] + body["unscored"] == 2 * len(FORECAST_HORIZONS)
         assert body["errors"] == {}
     finally:
         _teardown()
@@ -302,7 +304,7 @@ def test_cron_calibrate_per_pair_errors_never_500(isolated_db, monkeypatch):
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["ok"] is False
-        assert body["calibrated"] == len(FORECAST_HORIZONS)
+        assert body["calibrated"] + body["unscored"] == len(FORECAST_HORIZONS)
         assert set(body["snapshots"]) == {f"AAPL:{h}" for h in FORECAST_HORIZONS}
         assert set(body["errors"]) == {f"BOOM:{h}" for h in FORECAST_HORIZONS}
         assert PROVENANCE_KEYS <= set(body["provenance"])

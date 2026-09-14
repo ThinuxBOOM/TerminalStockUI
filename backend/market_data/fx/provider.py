@@ -152,6 +152,8 @@ class FXProvider:
         Tries the direct pair first, then the inverse pair (inverted).
         Raises :class:`ProviderError` when yfinance is unavailable or both
         tickers yield no usable close — the caller then serves the stub.
+        as_of is the MARKET bar timestamp (last hist index), not fetch time,
+        so weekend/holiday closes are not misgraded as fresh.
         """
         try:  # lazy: never imported at module load; offline envs stay safe
             import yfinance as yf
@@ -176,11 +178,25 @@ class FXProvider:
                 last_exc = exc
                 continue
             rate = close if not invert else 1.0 / close
+            # Market-time stamp: last bar index, not fetch wall-clock.
+            try:
+                bar_ts = hist.index[-1]
+                if hasattr(bar_ts, "to_pydatetime"):
+                    bar_dt = bar_ts.to_pydatetime()
+                else:
+                    from datetime import datetime as _dt
+                    bar_dt = _dt.fromisoformat(str(bar_ts))
+                from datetime import timezone as _tz
+                if bar_dt.tzinfo is None:
+                    bar_dt = bar_dt.replace(tzinfo=_tz.utc)
+                as_of = bar_dt
+            except Exception:
+                as_of = _utcnow()
             return {
                 "base": base,
                 "quote": quote,
                 "rate": rate,
-                "as_of": _utcnow(),
+                "as_of": as_of,
                 "source": YF_SOURCE,
             }
         raise ProviderError(
@@ -360,11 +376,24 @@ class FXProvider:
                 raise ValueError("non-positive rate")
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError(NAME, f"unexpected frankfurter schema: {exc}") from exc
+        # Market-time stamp: Frankfurter/ECB reference date when present,
+        # not fetch wall-clock (a Tuesday fetch of Monday's fix must not
+        # grade as fresh Tuesday).
+        as_of = _utcnow()
+        try:
+            stamp = data.get("date")
+            if stamp:
+                from datetime import datetime as _dt2
+                from datetime import timezone as _tz2
+                parsed = _dt2.fromisoformat(str(stamp)[:10])
+                as_of = parsed.replace(tzinfo=_tz2.utc)
+        except Exception:
+            as_of = _utcnow()
         return {
             "base": base,
             "quote": quote,
             "rate": rate,
-            "as_of": _utcnow(),
+            "as_of": as_of,
             "source": LIVE_SOURCE,
         }
 

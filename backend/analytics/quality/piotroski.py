@@ -15,7 +15,12 @@ Formula: F = sum of 9 binary criteria (1 point each):
   Operating efficiency
     8. dMARGIN = gross_margin_t - gross_margin_{t-1} > 0
     9. dTURN = asset_turnover_t - asset_turnover_{t-1} > 0
-Grades (conventional buckets): 7-9 strong, 4-6 average, 0-3 weak.
+Grades (house buckets, lenient vs original 8-9 strong / 0-2 weak):
+7-9 strong, 4-6 average, 0-3 weak.
+Note: canonical Piotroski scales ROA/CFO by BEGINNING total assets; this
+implementation uses ending-period TA (sign rarely flips, magnitudes differ).
+Leverage uses ending TA (canonical uses average TA). Margin/turnover/liquidity
+deltas use caller-supplied ratios; ensure they are computed consistently.
 Source fields: current + prior-year statement items listed in SOURCE_FIELDS.
 """
 

@@ -103,12 +103,15 @@ def build_features(
                         min_periods=rsi_window).mean()
     rsi = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
     rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    # Flat history is neutral 50, consistent with analytics/technical RSI.
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
 
     vol_mean = frame["volume"].rolling(volume_window, min_periods=volume_window).mean()
     vol_std = frame["volume"].rolling(volume_window, min_periods=volume_window).std(ddof=1)
     with np.errstate(divide="ignore", invalid="ignore"):
         volume_z = (frame["volume"] - vol_mean) / vol_std
-    volume_z = volume_z.mask((vol_std == 0) & volume_z.notna(), 0.0)
+    # std==0 -> 0/0=NaN; contract is z=0 there (mask on std alone).
+    volume_z = volume_z.mask(vol_std == 0, 0.0)
 
     features = pd.DataFrame(index=frame.index)
     features["ret_1"] = lret
@@ -161,7 +164,8 @@ def build_extended_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     volume_z63 = volume_z63.mask((vol_std63 == 0) & volume_z63.notna(), 0.0)
     ret_skew = lret.rolling(21, min_periods=21).skew()
 
-    # RSI recomputed identically to build_features, then lagged 5 (past-only).
+    # RSI recomputed identically to build_features (incl. flat-history 50),
+    # then lagged 5 (past-only).
     delta = close.diff()
     gain = delta.clip(lower=0.0)
     loss = -delta.clip(upper=0.0)
@@ -169,6 +173,7 @@ def build_extended_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     avg_loss = loss.ewm(alpha=1.0 / 14, adjust=False, min_periods=14).mean()
     rsi = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
     rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
     rsi_lag5 = rsi.shift(5)
 
     extra = pd.DataFrame(index=frame.index)

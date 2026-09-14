@@ -7,6 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.market_data.health import market_state as _calendar_market_state
 from backend.market_data.providers.base import ProviderError
 from backend.market_data.service import MarketDataService
+from backend.security.validation import (
+    sanitize_error,
+    validate_instrument_id,
+    validate_symbol,
+    validate_timeframe,
+)
 from backend.api.deps import get_market_service, get_registry
 from backend.api.schemas import BarsResponse, QuoteResponse
 
@@ -61,14 +67,9 @@ def quote(
     svc: MarketDataService = Depends(get_market_service),
 ):
     """GET /api/market_data/quote?symbol=AAPL"""
-    try:
-        from backend.security.validation import sanitize_error, validate_symbol
-
-        symbol = validate_symbol(symbol)
-        if market is not None and str(market).strip():
-            market = validate_symbol(str(market).strip(), field="market")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    symbol = validate_symbol(symbol)
+    if market is not None and str(market).strip():
+        market = validate_symbol(str(market).strip(), field="market")
     try:
         return _enrich_market_state(svc.get_quote(symbol, market))
     except HTTPException:
@@ -88,13 +89,8 @@ def bars(
     limit: int = Query(default=30, ge=1, le=250),
     svc: MarketDataService = Depends(get_market_service),
 ):
-    try:
-        from backend.security.validation import sanitize_error, validate_symbol, validate_timeframe
-
-        symbol = validate_symbol(symbol)
-        timeframe = validate_timeframe(timeframe)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    symbol = validate_symbol(symbol)
+    timeframe = validate_timeframe(timeframe)
     try:
         return svc.get_bars(symbol, timeframe, limit)
     except HTTPException:
@@ -113,6 +109,7 @@ def security_quote(
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
+    instrument_id = validate_instrument_id(instrument_id)
     try:
         inst = registry.get_by_id(instrument_id)
     except HTTPException:
@@ -141,6 +138,8 @@ def security_bars(
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
+    instrument_id = validate_instrument_id(instrument_id)
+    timeframe = _check_timeframe(timeframe)
     try:
         inst = registry.get_by_id(instrument_id)
     except HTTPException:

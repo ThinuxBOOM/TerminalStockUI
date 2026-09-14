@@ -252,12 +252,16 @@ def test_beneish_components_and_flag():
     result = beneish_m(FIN)
     comps = result.value["components"]
     assert len(comps) == 8
-    expected = (-4.84 + 0.92 * comps["DSRI"] + 0.58 * comps["GMI"]
-                + 0.464 * comps["AQI"] + 0.404 * comps["SGI"]
+    # Canonical Beneish 1999 8-variable coefficients.
+    expected = (-4.84 + 0.92 * comps["DSRI"] + 0.528 * comps["GMI"]
+                + 0.404 * comps["AQI"] + 0.892 * comps["SGI"]
                 + 0.115 * comps["DEPI"] - 0.172 * comps["SGAI"]
                 + 4.679 * comps["TATA"] - 0.327 * comps["LVGI"])
     assert result.value["m"] == pytest.approx(expected)
     assert isinstance(result.value["likely_manipulator"], bool)
+    # Independent golden vector: all indices == 1.0 -> M == sum of coeffs.
+    assert (-4.84 + 0.92 + 0.528 + 0.404 + 0.892
+            + 0.115 - 0.172 + 4.679 - 0.327) == pytest.approx(2.199)
 
 
 def test_dupont_identity():

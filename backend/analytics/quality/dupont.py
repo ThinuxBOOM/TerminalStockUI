@@ -59,6 +59,8 @@ def dupont(fin: Mapping) -> MetricResult:
         "avg_assets": avg_assets,
         "avg_equity": avg_equity,
     }
+    if avg_equity < 0:
+        notes.append("average equity negative; ROE sign-flipped, interpret with caution")
     if notes:
         return MetricResult(value, FORMULA, SOURCE_FIELDS, DEGRADED,
                             reason="; ".join(notes))

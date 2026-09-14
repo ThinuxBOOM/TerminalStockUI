@@ -69,13 +69,16 @@ def _data_version(now: Optional[datetime] = None) -> str:
 def build_provenance(job: str, **extra: Any) -> dict:
     """Spec Sec 4 style provenance envelope + versions block for a job run."""
     now = _utcnow()
+    # Stub jobs do no real work: grade C + fallback_used=True so scheduler
+    # monitoring never reads them as healthy live runs.
+    is_stub = True
     prov: dict[str, Any] = {
         "source": f"worker:{job}",
         "as_of": now.isoformat(),
         "delay_minutes": 0,
-        "quality_grade": "B",
-        "fallback_used": False,
-        "missing_fields": [],
+        "quality_grade": "C" if is_stub else "B",
+        "fallback_used": True,
+        "missing_fields": ["live bars/forecast not wired (stub)"],
         "actor": f"worker:{job}",
         "versions": {
             "backend": BACKEND_VERSION,
