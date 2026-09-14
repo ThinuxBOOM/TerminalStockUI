@@ -9,7 +9,9 @@ export function marketLiquidityKey(mic: string): readonly [string, string] {
 
 /**
  * Homepage per-market liquidity+breadth query.
- * staleTime 30s + retry 1 (matches the app-wide QueryClient defaults).
+ * staleTime 120s + gcTime 10m: aggregates move slowly and the backend now
+ * serves them from parallel scans, so repeats stay warm instead of
+ * re-firing 6 detail fan-outs. retry 1 (matches app-wide defaults).
  * Resolves via GET /api/markets/overview when deployed, otherwise via
  * the client-side screener fan-out in getMarketsOverview (marked
  * fallback_used + grade D so the panel gates it honestly).
@@ -18,14 +20,16 @@ export function useMarketLiquidity() {
   return useQuery({
     queryKey: [...MARKETS_OVERVIEW_KEY],
     queryFn: getMarketsOverview,
-    staleTime: 30_000,
+    staleTime: 120_000,
+    gcTime: 600_000,
     retry: 1,
   });
 }
 
 /**
  * Per-market detail (rows for graphs). Disabled until the card is expanded
- * so the homepage never fires 6 detail fan-outs on load.
+ * so the homepage never fires 6 detail fan-outs on load. 120s stale keeps
+ * expand/collapse instant; charts downsample server-side (?limit=50).
  */
 export function useMarketDetail(mic: string, enabled: boolean) {
   const upper = String(mic ?? '').trim().toUpperCase();
@@ -33,7 +37,8 @@ export function useMarketDetail(mic: string, enabled: boolean) {
     queryKey: [...marketLiquidityKey(upper)],
     queryFn: () => getMarketLiquidity(upper),
     enabled,
-    staleTime: 30_000,
+    staleTime: 120_000,
+    gcTime: 600_000,
     retry: 1,
   });
 }

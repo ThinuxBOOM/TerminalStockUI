@@ -75,14 +75,10 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
   const forecast: Forecast | null = forecastQ.data ?? null;
   const analytics: Analytics | null = analyticsQ.data ?? null;
   const events = useMemo(() => eventsFromAnalytics(analytics), [analytics]);
-
-  if (quote.isLoading)
-    return (
-      <div className="max-w-full">
-        <Skeleton label={`loading ${symbol}…`} lines={6} />
-        <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
-      </div>
-    );
+  // Non-blocking: the quote header skeletons inline while forecast, chart
+  // and events (already fetching in parallel) render from their own
+  // queries instead of waiting behind `quote.isLoading`.
+  const quoteLoading = quote.isLoading && !quote.data;
   if (quote.isError) {
     return (
       <div className="max-w-full">
@@ -100,7 +96,7 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
   }
 
   const q = quote.data;
-  if (!q)
+  if (!q && !quoteLoading)
     return (
       <div className="max-w-full">
         <ErrorState
@@ -111,6 +107,35 @@ export default function SecurityBrief({ symbol }: { symbol: string }) {
             void forecastQ.refetch();
           }}
         />
+        <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
+      </div>
+    );
+  if (!q)
+    return (
+      <div className="max-w-full">
+        <Skeleton label={`loading ${symbol}…`} lines={3} />
+        {forecastQ.isLoading && (
+          <div className="mt-4">
+            <Skeleton label="loading live forecast…" lines={4} />
+          </div>
+        )}
+        {!forecastQ.isLoading && forecast && (
+          <div className="term-panel mt-4 min-w-0 p-4">
+            <ForecastCard price={null} currency="USD" forecast={forecast} />
+          </div>
+        )}
+        <div className="term-panel mt-4 min-w-0 p-4" aria-labelledby="brief-chart">
+          <h3 id="brief-chart" className="term-label">
+            Price chart
+          </h3>
+          <PriceChart
+            symbol={symbol}
+            data={barsQ.data?.candles ?? null}
+            loading
+            error={null}
+            provenance={barsQ.data?.provenance ?? null}
+          />
+        </div>
         <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
       </div>
     );

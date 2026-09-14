@@ -80,10 +80,36 @@ SEED_INSTRUMENTS: list[Instrument] = [
 
 
 class InstrumentRegistry:
-    """In-memory canonical registry (DB-backed later; same interface)."""
+    """In-memory canonical registry (DB-backed later; same interface).
+
+    Seed list + ``EXTRA_SYMBOLS`` env additions (dedupe by
+    (exchange_mic, exchange_symbol); seeds win on collision).
+    """
 
     def __init__(self, instruments: list[Instrument] | None = None) -> None:
-        self._items: list[Instrument] = list(instruments) if instruments else list(SEED_INSTRUMENTS)
+        if instruments is not None:
+            seed = list(instruments)
+        else:
+            seed = list(SEED_INSTRUMENTS)
+            try:
+                from backend.instruments.config import extra_instruments as _extras
+
+                for inst in _extras():
+                    try:
+                        key = (inst.exchange_mic.upper(), inst.exchange_symbol.upper())
+                    except Exception:
+                        continue
+                    if all(
+                        not (
+                            getattr(s, "exchange_mic", "").upper() == key[0]
+                            and getattr(s, "exchange_symbol", "").upper() == key[1]
+                        )
+                        for s in seed
+                    ):
+                        seed.append(inst)
+            except Exception:
+                pass
+        self._items: list[Instrument] = seed
         self._by_id: dict[str, Instrument] = {}
         self._by_mic_symbol: dict[tuple[str, str], Instrument] = {}
         self._by_provider: dict[str, Instrument] = {}

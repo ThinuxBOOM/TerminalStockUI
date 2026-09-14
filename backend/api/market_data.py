@@ -56,40 +56,55 @@ def _enrich_market_state(out: dict) -> dict:
 
 @router.get("/quote", response_model=QuoteResponse)
 def quote(
-    symbol: str = Query(..., min_length=1, description="e.g. AAPL, 600519.SS, MC.PA"),
+    symbol: str = Query(..., min_length=1, max_length=32, description="e.g. AAPL, 600519.SS, MC.PA"),
     market: str | None = Query(default=None, description="Optional MIC scope"),
     svc: MarketDataService = Depends(get_market_service),
 ):
     """GET /api/market_data/quote?symbol=AAPL"""
     try:
+        from backend.security.validation import sanitize_error, validate_symbol
+
+        symbol = validate_symbol(symbol)
+        if market is not None and str(market).strip():
+            market = validate_symbol(str(market).strip(), field="market")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         return _enrich_market_state(svc.get_quote(symbol, market))
     except HTTPException:
         raise
     except ProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=sanitize_error(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"quote failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="quote failed")) from exc
 
 
 @router.get("/bars", response_model=BarsResponse)
 def bars(
-    symbol: str = Query(..., min_length=1),
+    symbol: str = Query(..., min_length=1, max_length=32),
     timeframe: str = Query(default="1d"),
     limit: int = Query(default=30, ge=1, le=250),
     svc: MarketDataService = Depends(get_market_service),
 ):
     try:
+        from backend.security.validation import sanitize_error, validate_symbol, validate_timeframe
+
+        symbol = validate_symbol(symbol)
+        timeframe = validate_timeframe(timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         return svc.get_bars(symbol, timeframe, limit)
     except HTTPException:
         raise
     except ProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=sanitize_error(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"bars failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="bars failed")) from exc
 
 
 @securities_router.get("/{instrument_id}/quote", response_model=QuoteResponse)

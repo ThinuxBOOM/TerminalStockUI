@@ -101,22 +101,53 @@ class LogisticDirectionModel:
         data_version: str = "unspecified",
     ) -> dict[int, ForecastResult]:
         """Direction probabilities for the latest feature row, per horizon."""
-        if not self.models_:
-            raise ValueError("model is not fitted; call fit() first")
         frame = pd.DataFrame(latest_features)
-        missing = [c for c in self.feature_columns_ if c not in frame.columns]
-        if missing:
-            raise ValueError(f"latest_features missing columns: {missing}")
-        row = frame.iloc[[-1]][self.feature_columns_].to_numpy(dtype=float)
+        if len(frame) == 0:
+            raise ValueError("features frame is empty")
+        last = frame.iloc[[-1]]
+        batch = self.predict_proba_batch(last)
         out: dict[int, ForecastResult] = {}
-        for horizon, clf in self.models_.items():
-            proba = float(clf.predict_proba(row)[0, 1])
+        for horizon, arr in batch.items():
+            proba = float(arr[-1])
             out[horizon] = ForecastResult(
                 TARGET_DIRECTION, horizon, min(max(proba, 0.0), 1.0),
                 FORMULA, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
                 data_version, as_of,
             )
         return out
+
+    def predict_proba_batch(
+        self,
+        features_frame: pd.DataFrame,
+        as_of: str | None = None,
+        data_version: str = "unspecified",
+    ) -> dict[int, np.ndarray]:
+        """Batched P(up) arrays for every row of ``features_frame``.
+
+        Single ``predict_proba`` call per horizon (no per-row Python loop).
+        Returns ``{horizon: np.ndarray[float]}`` clipped to [0, 1].
+        """
+        if not self.models_:
+            raise ValueError("model is not fitted; call fit() first")
+        frame = pd.DataFrame(features_frame)
+        missing = [c for c in self.feature_columns_ if c not in frame.columns]
+        if missing:
+            raise ValueError(f"latest_features missing columns: {missing}")
+        if len(frame) == 0:
+            raise ValueError("features frame is empty")
+        X = frame[self.feature_columns_].to_numpy(dtype=float)
+        out: dict[int, np.ndarray] = {}
+        for horizon, clf in self.models_.items():
+            proba = np.asarray(clf.predict_proba(X)[:, 1], dtype=float)
+            out[horizon] = np.clip(proba, 0.0, 1.0)
+        return out
+
+    def predict_proba_values(
+        self,
+        features_frame: pd.DataFrame,
+    ) -> dict[int, list[float]]:
+        """Plain-list view of :meth:`predict_proba_batch` (JSON-friendly)."""
+        return {h: [float(v) for v in arr] for h, arr in self.predict_proba_batch(features_frame).items()}
 
 
 __all__ = ["LogisticDirectionModel", "MODEL_NAME", "MODEL_VERSION"]

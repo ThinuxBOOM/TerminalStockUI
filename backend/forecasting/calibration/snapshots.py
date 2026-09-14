@@ -249,15 +249,21 @@ def build_snapshot(
     if len(rows) < MIN_BARS:
         return zero()
     try:
+        # Single-pass frame build (one loop over rows).
+        recs = [
+            (r["open"], r["high"], r["low"], r["close"],
+             float(r["volume"] or 0), r["ts"])
+            for r in rows
+        ]
         frame = pd.DataFrame(
             {
-                "open": [r["open"] for r in rows],
-                "high": [r["high"] for r in rows],
-                "low": [r["low"] for r in rows],
-                "close": [r["close"] for r in rows],
-                "volume": [float(r["volume"] or 0) for r in rows],
+                "open": [o for o, _, _, _, _, _ in recs],
+                "high": [h for _, h, _, _, _, _ in recs],
+                "low": [lo for _, _, lo, _, _, _ in recs],
+                "close": [c for _, _, _, c, _, _ in recs],
+                "volume": [v for _, _, _, _, v, _ in recs],
             },
-            index=pd.to_datetime([r["ts"] for r in rows]),
+            index=pd.to_datetime([t for _, _, _, _, _, t in recs]),
         )
         features = build_features(frame)
     except (ValueError, TypeError, KeyError):
@@ -321,6 +327,20 @@ def build_snapshot(
                 extra_p = None
         if drift_p is None and mom_p is None and logreg is None and extra_p is None:
             continue
+        # Batched logistic predict for the fold's test block (test_size=1 in
+        # the snapshot stride, but batch keeps the path O(1) predict calls).
+        logreg_probs: dict[int, float] = {}
+        if logreg is not None:
+            try:
+                batch = logreg.predict_proba_batch(features.iloc[test_idx])
+                arr = batch.get(horizon)
+                if arr is not None:
+                    for pos, proba in zip(
+                        (int(p) for p in test_idx), (float(v) for v in arr)
+                    ):
+                        logreg_probs[pos] = proba
+            except (ValueError, IndexError, KeyError, TypeError):
+                logreg_probs = {}
         for pos in (int(p) for p in test_idx):
             try:
                 label = labels_full.iloc[pos]
@@ -334,7 +354,9 @@ def build_snapshot(
                 window["historical-drift"] = float(drift_p)
             if mom_p is not None:
                 window["momentum"] = float(mom_p)
-            if logreg is not None:
+            if pos in logreg_probs:
+                window["logistic-direction"] = float(logreg_probs[pos])
+            elif logreg is not None:
                 try:
                     window["logistic-direction"] = float(
                         logreg.predict_direction_proba(
@@ -372,10 +394,19 @@ def build_snapshot(
         if n == 0:
             members[name] = {"hit_rate": None, "n": 0}
             continue
-        correct = sum(
-            1 for p, y in zip(probs, labs)
-            if (1.0 if float(p) >= 0.5 else 0.0) == float(y))
-        members[name] = {"hit_rate": float(correct / n), "n": int(n)}
+        # Vectorized hit-rate (no per-pair Python loop).
+        try:
+            import numpy as _np
+
+            p_arr = _np.asarray(probs, dtype=float)
+            y_arr = _np.asarray(labs, dtype=float)
+            preds = (p_arr >= 0.5).astype(float)
+            members[name] = {"hit_rate": float((preds == y_arr).mean()), "n": int(n)}
+        except Exception:
+            correct = sum(
+                1 for p, y in zip(probs, labs)
+                if (1.0 if float(p) >= 0.5 else 0.0) == float(y))
+            members[name] = {"hit_rate": float(correct / n), "n": int(n)}
     return {
         "symbol": exchange_symbol,
         "exchange_mic": exchange_mic,

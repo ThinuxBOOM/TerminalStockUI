@@ -52,6 +52,48 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Memoized full-table spot cache (60s): sequential SSE symbols previously
+#: re-downloaded the ~5000-row ``stock_zh_a_spot_em`` table per quote.
+#: One download per minute serves the whole scan; indexed lookup is O(1).
+_SPOT_CACHE: dict[str, object] = {"ts": 0.0, "df": None}
+
+
+def _spot_frame():
+    """Cached spot table (60s TTL). Raises ProviderError when unavailable."""
+    now = time.monotonic()
+    try:
+        cached_df = _SPOT_CACHE.get("df")
+        cached_ts = float(_SPOT_CACHE.get("ts") or 0.0)
+    except Exception:
+        cached_df, cached_ts = None, 0.0
+    if cached_df is not None and (now - cached_ts) < 60.0:
+        return cached_df
+    assert ak is not None
+    fetch = getattr(ak, "stock_zh_a_spot_em", None)
+    if fetch is None:
+        raise ProviderError(NAME, "akshare spot API unavailable")
+    df = fetch()
+    if df is None or len(df) == 0:
+        raise ProviderError(NAME, "akshare spot table empty")
+    try:
+        # Pre-index on the code column once (O(n) string cast per download,
+        # not per symbol).
+        if "代码" in getattr(df, "columns", []):
+            df = df.copy()
+            df["_code_str"] = df["代码"].astype(str)
+            df = df.set_index("_code_str", drop=False)
+    except Exception:
+        pass
+    _SPOT_CACHE["df"] = df
+    _SPOT_CACHE["ts"] = now
+    return df
+
+
+def clear_spot_cache() -> None:  # test hook
+    _SPOT_CACHE["df"] = None
+    _SPOT_CACHE["ts"] = 0.0
+
+
 def shanghai_display(as_of_utc: datetime) -> str:
     """Format a UTC ``as_of`` for Asia/Shanghai display (store UTC ISO)."""
     if as_of_utc.tzinfo is None:
@@ -177,17 +219,25 @@ class AKShareProvider:
         return quote
 
     def _fetch_spot(self, code: str) -> dict:
-        """Fetch one SSE quote via ``stock_zh_a_spot_em`` (Chinese columns)."""
-        assert ak is not None
-        fetch = getattr(ak, "stock_zh_a_spot_em", None)
-        if fetch is None:
-            raise ProviderError(self.name, "akshare spot API unavailable")
-        df = fetch()
+        """Fetch one SSE quote via cached ``stock_zh_a_spot_em`` (Chinese columns)."""
+        df = _spot_frame()
         if df is None or len(df) == 0:
             raise ProviderError(self.name, f"no data for {code}")
         # Column is Chinese "代码"; be defensive about missing columns.
         try:
-            if "代码" in getattr(df, "columns", []):
+            if "_code_str" in getattr(df, "columns", []):
+                try:
+                    row = df.loc[str(code)].to_dict() if str(code) in df.index else None
+                    if row is None:
+                        raise ProviderError(self.name, f"no data for {code}")
+                    # Duplicate index entries yield a DataFrame, not a Series.
+                    if not isinstance(row, dict):
+                        row = df.loc[[str(code)]].iloc[0].to_dict()
+                except ProviderError:
+                    raise
+                except Exception as exc:
+                    raise ProviderError(self.name, f"{type(exc).__name__}: {exc}") from exc
+            elif "代码" in getattr(df, "columns", []):
                 rows = df[df["代码"].astype(str) == str(code)]
                 if len(rows) == 0:
                     raise ProviderError(self.name, f"no data for {code}")

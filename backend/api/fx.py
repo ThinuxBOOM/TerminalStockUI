@@ -66,7 +66,7 @@ class ConvertRequest(BaseModel):
 
 
 class RankRequest(BaseModel):
-    symbols: list[str] = Field(min_length=1)
+    symbols: list[str] = Field(min_length=1, max_length=20)
     target_ccy: str = "USD"
     allow_fallback: bool = False
 

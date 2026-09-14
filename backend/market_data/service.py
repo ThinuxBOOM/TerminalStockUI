@@ -425,6 +425,17 @@ class MarketDataService:
         return Provenance(**payload["provenance"])
 
     # -- bars (DB-first, deterministic offline-capable stub fallback) ---
+    def _bars_cache_key(self, symbol: str, timeframe: str, limit: int) -> str:
+        try:
+            sym = str(symbol or "").strip().upper()
+        except Exception:
+            sym = str(symbol)
+        try:
+            n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            n = 30
+        return f"bars:{sym}:{(timeframe or '1d')}:{n}"
+
     def get_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
         """Serve daily bars from ``price_bars`` when coverage is sufficient.
 
@@ -443,10 +454,28 @@ class MarketDataService:
         current quote (best-effort) so its last close matches the header
         price — an unanchored random base would render a chart on a
         completely different scale than the quote.
+
+        Results are cached 120s (bars move slowly; quote anchor is already
+        quote-cached) so screener/forecast/backtest fan-outs sharing a
+        symbol pay one DB/stub build per two minutes, not one per horizon.
         """
+        cache_key: str | None = None
+        if self.cache is not None:
+            try:
+                cache_key = self._bars_cache_key(symbol, timeframe, limit)
+                hit = self.cache.get(cache_key)  # type: ignore[union-attr]
+                if isinstance(hit, dict) and isinstance(hit.get("bars"), list):
+                    return hit
+            except Exception:
+                cache_key = None
         try:
             db_out = self._get_bars_from_db(symbol, timeframe, limit)
             if db_out is not None:
+                if self.cache is not None and cache_key is not None:
+                    try:
+                        self.cache.set(cache_key, db_out, ttl_s=120)  # type: ignore[union-attr]
+                    except Exception:
+                        pass
                 return db_out
         except Exception:
             pass
@@ -454,10 +483,110 @@ class MarketDataService:
             if self._fetch_and_store_bars(symbol, timeframe):
                 db_out = self._get_bars_from_db(symbol, timeframe, limit)
                 if db_out is not None:
+                    if self.cache is not None and cache_key is not None:
+                        try:
+                            self.cache.set(cache_key, db_out, ttl_s=120)  # type: ignore[union-attr]
+                        except Exception:
+                            pass
                     return db_out
         except Exception:
             pass
-        return self._stub_bars(symbol, timeframe, limit, anchor=self._quote_anchor(symbol))
+        out = self._stub_bars(symbol, timeframe, limit, anchor=self._quote_anchor(symbol))
+        if self.cache is not None and cache_key is not None:
+            try:
+                self.cache.set(cache_key, out, ttl_s=120)  # type: ignore[union-attr]
+            except Exception:
+                pass
+        return out
+
+    def get_bars_many(
+        self, symbols: list[str], timeframe: str = "1d", limit: int = 30
+    ) -> dict[str, dict]:
+        """Bulk bars for a symbol list (one worker pool, shared cache).
+
+        Never raises: per-symbol failures are skipped from the dict.
+        Used by screener/markets fan-outs to avoid N sequential round trips
+        blocking one request thread.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        wanted: list[str] = []
+        for raw in symbols or []:
+            try:
+                text = str(raw or "").strip()
+            except Exception:
+                continue
+            if text:
+                wanted.append(text)
+        if not wanted:
+            return {}
+        out: dict[str, dict] = {}
+
+        def _one(sym: str) -> tuple[str, dict | None]:
+            try:
+                return sym, self.get_bars(sym, timeframe=timeframe, limit=limit)
+            except Exception:
+                return sym, None
+
+        workers = max(1, min(8, len(wanted)))
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for sym, payload in pool.map(_one, wanted):
+                    if isinstance(payload, dict):
+                        out[sym] = payload
+        except Exception:
+            for sym in wanted:
+                try:
+                    payload = self.get_bars(sym, timeframe=timeframe, limit=limit)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    out[sym] = payload
+        return out
+
+    def get_quotes_many(
+        self, symbols: list[str], market: str | None = None
+    ) -> dict[str, dict]:
+        """Bulk quotes for a symbol list (bounded pool, per-symbol degrade).
+
+        Never raises; failures are skipped. Homepage/screener fan-outs use
+        this instead of N sequential ``get_quote`` calls.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        wanted: list[str] = []
+        for raw in symbols or []:
+            try:
+                text = str(raw or "").strip()
+            except Exception:
+                continue
+            if text:
+                wanted.append(text)
+        if not wanted:
+            return {}
+        out: dict[str, dict] = {}
+
+        def _one(sym: str) -> tuple[str, dict | None]:
+            try:
+                return sym, self.get_quote(sym, market)
+            except Exception:
+                return sym, None
+
+        workers = max(1, min(8, len(wanted)))
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for sym, payload in pool.map(_one, wanted):
+                    if isinstance(payload, dict):
+                        out[sym] = payload
+        except Exception:
+            for sym in wanted:
+                try:
+                    payload = self.get_quote(sym, market)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    out[sym] = payload
+        return out
 
     def _quote_anchor(self, symbol: str) -> float | None:
         """Best-effort reference price for anchoring stub bars.

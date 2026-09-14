@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.service import ForecastService, get_forecast_service
@@ -259,6 +259,7 @@ def calibration_history(
 @router.get("/{symbol}")
 def get_forecast(
     symbol: str,
+    background_tasks: BackgroundTasks,
     horizon: int = Query(default=21, description="Trading-day horizon: 5, 21 or 63"),
     svc: ForecastService = Depends(get_forecast_service),
 ) -> dict:
@@ -269,6 +270,12 @@ def get_forecast(
             detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
         )
     try:
+        from backend.security.validation import sanitize_error, validate_symbol
+
+        symbol = validate_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         result = svc.forecast(symbol, int(horizon))
     except HTTPException:
         raise
@@ -277,14 +284,22 @@ def get_forecast(
     except Exception as exc:
         try:
             from backend.market_data.providers.base import ProviderError as _PE
+            from backend.security.validation import sanitize_error as _se
 
             if isinstance(exc, _PE):
-                raise HTTPException(status_code=502, detail=str(exc)) from exc
+                raise HTTPException(status_code=502, detail=_se(exc)) from exc
         except HTTPException:
             raise
         except Exception:
             pass
-        raise HTTPException(status_code=502, detail=f"forecast failed: {exc}") from exc
+        try:
+            from backend.security.validation import sanitize_error as _se2
+
+            raise HTTPException(status_code=502, detail=_se2(exc, prefix="forecast failed")) from exc
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=502, detail="forecast failed") from exc
     # Flatten the record mirror out of the wire payload (kept in result["record"]).
     payload = {k: v for k, v in result.items() if k != "record"}
     # Display fields the terminal UI renders (derived, never invented):
@@ -320,9 +335,21 @@ def get_forecast(
     payload["calibration"] = cal_rows
     payload["calibration_meta"] = cal_meta
     # Persist the versioned record so GET /api/audit/forecasts (homepage
-    # "Latest research") is fed by live runs. Best-effort: never breaks
-    # the forecast path (DB miss / constraint / offline -> skip).
-    _persist_forecast_record(result, symbol, market_service=getattr(svc, "market", None))
+    # "Latest research") is fed by live runs. Off the read path: scheduled
+    # as a background task so the forecast response never waits on the DB
+    # write (find-or-create instrument + forecast + audit). Best-effort:
+    # DB miss / constraint / offline -> skip, never breaks the path.
+    try:
+        market_service = getattr(svc, "market", None)
+        try:
+            background_tasks.add_task(
+                _persist_forecast_record, result, symbol,
+                market_service=market_service,
+            )
+        except Exception:
+            _persist_forecast_record(result, symbol, market_service=market_service)
+    except Exception:
+        pass
     return payload
 
 

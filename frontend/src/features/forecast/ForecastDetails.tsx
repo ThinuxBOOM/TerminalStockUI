@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AI_PROFILES,
   FORECAST_HORIZONS,
@@ -37,18 +37,36 @@ function fmtPct(p: number): string {
 export default function ForecastDetails({ symbol }: { symbol: string }) {
   const [horizon, setHorizon] = useState<number>(21);
   const [aiProfile, setAiProfile] = useState<AIProfile>('Forecast Assist');
+  const queryClient = useQueryClient();
 
   const forecastQ = useQuery({
     queryKey: ['forecast', symbol, horizon],
     queryFn: () => getForecast(symbol, horizon),
     retry: false,
-    staleTime: 60_000,
+    // Backend caches forecasts 300s; keep tabs warm so switching 5/21/63
+    // is instant after the first load. keepPreviousData avoids flashing
+    // the skeleton while the next horizon resolves.
+    staleTime: 300_000,
+    gcTime: 600_000,
+    placeholderData: (prev) => prev,
   });
+  // Prefetch adjacent horizons in the background (warm cache, no waterfall).
+  useEffect(() => {
+    for (const h of FORECAST_HORIZONS) {
+      if (h === horizon) continue;
+      void queryClient.prefetchQuery({
+        queryKey: ['forecast', symbol, h],
+        queryFn: () => getForecast(symbol, h),
+        staleTime: 300_000,
+      });
+    }
+  }, [queryClient, symbol, horizon]);
   const analyticsQ = useQuery({
     queryKey: ['analytics', symbol],
     queryFn: () => getAnalytics(symbol),
     retry: false,
-    staleTime: 60_000,
+    staleTime: 300_000,
+    gcTime: 600_000,
   });
   const aiM = useMutation({
     mutationFn: () => postAIInsight(symbol, aiProfile),
@@ -64,7 +82,9 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
     queryKey: ['calibration-history', symbol, horizon],
     queryFn: () => getCalibrationHistory(symbol, horizon, 20),
     retry: false,
-    staleTime: 60_000,
+    staleTime: 300_000,
+    gcTime: 600_000,
+    placeholderData: (prev) => prev,
   });
   const calHistory = calHistoryQ.data ?? [];
   const latestMeta = calHistory[0] ?? null;

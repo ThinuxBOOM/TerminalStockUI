@@ -48,8 +48,8 @@ def reset_backtest_history() -> None:  # test hook
 
 
 class BacktestRunRequest(BaseModel):
-    symbol: str = Field(min_length=1, description="e.g. AAPL")
-    horizons: list[int] = Field(default_factory=lambda: [5, 21, 63])
+    symbol: str = Field(min_length=1, max_length=32, description="e.g. AAPL")
+    horizons: list[int] = Field(default_factory=lambda: [5, 21, 63], max_length=3)
     train_size: int = Field(default=100, ge=20, le=1000)
     test_size: int = Field(default=21, ge=1, le=500)
     gap: int = Field(default=5, ge=0, le=500)
@@ -115,8 +115,12 @@ def _evaluate_horizon(
     n_bins: int,
 ) -> dict:
     labels_full = direction_label(closes_feat, int(horizon))
+    # Expanding origin: train blocks are always contiguous history prefixes
+    # (0:origin), so globally precomputed trailing features carry the same
+    # warmup as live inference. Rolling mid-series slices would reuse
+    # warmup smoothed with out-of-fold past (see features warmup caveat).
     splitter = WalkForwardSplitter(
-        train_size=train_size, test_size=test_size, gap=gap
+        train_size=train_size, test_size=test_size, gap=gap, expanding=True
     )
     try:
         folds = list(splitter.splits(len(features)))
@@ -156,8 +160,22 @@ def _evaluate_horizon(
         if drift_p is None and mom_p is None and logreg is None:
             continue
         n_folds_used += 1
+        # Batched logistic predict: one predict_proba per fold (not per row).
+        logreg_probs: dict[int, float] = {}
+        if logreg is not None:
+            try:
+                batch = logreg.predict_proba_batch(features.iloc[test_idx])
+                arr = batch.get(int(horizon))
+                if arr is not None:
+                    for pos, proba in zip(
+                        (int(p) for p in test_idx), (float(v) for v in arr)
+                    ):
+                        logreg_probs[pos] = proba
+            except (ValueError, IndexError, KeyError):
+                logreg_probs = {}
         for pos in test_idx:
-            label = labels_full.iloc[int(pos)]
+            pos = int(pos)
+            label = labels_full.iloc[pos]
             if pd.isna(label):
                 continue  # horizon unobservable at the tail: skip, never impute
             parts: list[float] = []
@@ -165,7 +183,9 @@ def _evaluate_horizon(
                 parts.append(float(drift_p))
             if mom_p is not None:
                 parts.append(float(mom_p))
-            if logreg is not None:
+            if pos in logreg_probs:
+                parts.append(float(logreg_probs[pos]))
+            elif logreg is not None:
                 try:
                     parts.append(
                         float(
@@ -223,15 +243,21 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
     if not rows:
         raise HTTPException(status_code=422, detail=f"insufficient history for {req.symbol!r}: 0 bars")
     try:
+        # Single-pass frame build (one loop, not five list comps).
+        recs = [
+            (r["open"], r["high"], r["low"], r["close"],
+             float(r["volume"] or 0), r["ts"])
+            for r in rows
+        ]
         frame = pd.DataFrame(
             {
-                "open": [r["open"] for r in rows],
-                "high": [r["high"] for r in rows],
-                "low": [r["low"] for r in rows],
-                "close": [r["close"] for r in rows],
-                "volume": [float(r["volume"] or 0) for r in rows],
+                "open": [o for o, _, _, _, _, _ in recs],
+                "high": [h for _, h, _, _, _, _ in recs],
+                "low": [lo for _, _, lo, _, _, _ in recs],
+                "close": [c for _, _, _, c, _, _ in recs],
+                "volume": [v for _, _, _, _, v, _ in recs],
             },
-            index=pd.to_datetime([r["ts"] for r in rows]),
+            index=pd.to_datetime([t for _, _, _, _, _, t in recs]),
         )
     except HTTPException:
         raise
@@ -315,6 +341,8 @@ def backtest_history(
     sym = (symbol or "").strip().upper()
     if not sym:
         raise HTTPException(status_code=422, detail="symbol must be a non-empty string")
+    if len(sym) > 32 or not all(c.isalnum() or c in "._-/=" for c in sym):
+        raise HTTPException(status_code=422, detail="symbol contains unsupported characters")
     try:
         bars = market.get_bars(sym, timeframe="1d", limit=5)
         provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}

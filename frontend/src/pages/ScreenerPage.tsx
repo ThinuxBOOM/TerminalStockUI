@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -67,23 +67,38 @@ export default function ScreenerPage() {
   const [market, setMarket] = useState<string>('');
   const [horizon, setHorizon] = useState<ForecastHorizon>(21);
   const [minProb, setMinProb] = useState<number>(0.5);
+  // Debounced slider: the scan is fetched ONCE per (market, horizon) and
+  // filtered client-side, so dragging 0.50 -> 0.80 no longer fires a full
+  // ~30s server scan per 0.01 tick.
+  const [debouncedMinProb, setDebouncedMinProb] = useState<number>(0.5);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedMinProb(minProb), 300);
+    return () => clearTimeout(t);
+  }, [minProb]);
 
   const mic = market.trim().toUpperCase();
   const screen = useQuery({
-    queryKey: ['screener', mic || 'ALL', horizon, minProb],
+    // NOTE: minProb intentionally excluded — client-side filter below.
+    queryKey: ['screener', mic || 'ALL', horizon],
     queryFn: () =>
       getScreener({
         market: mic || undefined,
-        minDirection: minProb,
+        minDirection: 0,
         horizon,
-        limit: 20,
+        limit: 50,
       }),
-    staleTime: 30_000,
+    staleTime: 60_000,
+    gcTime: 300_000,
     retry: false,
+    placeholderData: (prev) => prev,
   });
 
   const data = screen.data;
-  const rows = useMemo(() => data?.results ?? [], [data]);
+  const allRows = useMemo(() => data?.results ?? [], [data]);
+  const rows = useMemo(
+    () => allRows.filter((r) => (r.direction_probability ?? 0) >= debouncedMinProb).slice(0, 20),
+    [allRows, debouncedMinProb],
+  );
   const skippedCount = data?.skipped?.length ?? 0;
   const skippedSymbols = useMemo(
     () => (data?.skipped ?? []).slice(0, MAX_SKIPPED_SHOWN).map((s) => s.symbol),
@@ -197,7 +212,7 @@ export default function ScreenerPage() {
               />
             )}
             <p className="text-xs text-term-muted" role="status">
-              {data.count} of {data.universe_size} pass
+              {rows.length} of {data.universe_size} pass
               {skippedCount > 0 && ` · ${skippedCount} skipped (see below)`}
             </p>
             {rows.length === 0 ? (

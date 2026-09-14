@@ -1,0 +1,78 @@
+# OneMarket Analyzer — market registry (single source of truth for venues).
+#
+# Add a market here (MIC + suffix + timezone + currency) and it flows to:
+#   backend/instruments/config.py -> calendars.EXCHANGE_META (compat view)
+#   backend/api/markets.py + screener.py (validation, no code edit)
+#   frontend market selectors (via GET /api/markets)
+#   ingest universe (enabled markets x active instruments)
+#
+# No secrets in this file (committed). Per-deploy ticker additions use the
+# EXTRA_SYMBOLS env var (see backend/instruments/config.py) without editing
+# this file. Instruments themselves live in backend/instruments/registry.py
+# (seed list) and the instruments DB table; this file owns VENUES only.
+version: 1
+markets:
+  - mic: XNYS
+    name: New York Stock Exchange
+    provider_suffix: ""
+    timezone: America/New_York
+    currency: USD
+    country: US
+    delay_minutes: 15
+    enabled: true
+    ingest: true
+  - mic: XNAS
+    name: Nasdaq
+    provider_suffix: ""
+    timezone: America/New_York
+    currency: USD
+    country: US
+    delay_minutes: 15
+    enabled: true
+    ingest: true
+  - mic: XSHG
+    name: Shanghai Stock Exchange
+    provider_suffix: .SS
+    timezone: Asia/Shanghai
+    currency: CNY
+    country: CN
+    delay_minutes: 15
+    enabled: true
+    ingest: true
+  - mic: XPAR
+    name: Euronext Paris
+    provider_suffix: .PA
+    timezone: Europe/Paris
+    currency: EUR
+    country: FR
+    delay_minutes: 15
+    enabled: true
+    ingest: true
+  - mic: XAMS
+    name: Euronext Amsterdam
+    provider_suffix: .AS
+    timezone: Europe/Amsterdam
+    currency: EUR
+    country: NL
+    delay_minutes: 15
+    enabled: true
+    ingest: true
+  - mic: XBRU
+    name: Euronext Brussels
+    provider_suffix: .BR
+    timezone: Europe/Brussels
+    currency: EUR
+    country: BE
+    delay_minutes: 15
+    enabled: true
+    ingest: true
+  # --- template for a new market (copy, fill, restart) ---
+  # - mic: XLON
+  #   name: London Stock Exchange
+  #   provider_suffix: .L
+  #   timezone: Europe/London
+  #   currency: GBP
+  #   country: GB
+  #   delay_minutes: 15
+  #   enabled: true
+  #   ingest: true

@@ -62,10 +62,18 @@ def _cron_secret() -> str:
 def _check_cron_auth(request: Request) -> None:
     """Enforce Bearer auth iff CRON_SECRET is set; 401 otherwise.
 
-    The secret value itself is never logged.
+    Fail-closed in production: missing CRON_SECRET with APP_ENV=production
+    refuses cron writes instead of serving them open. The secret value
+    itself is never logged.
     """
+    import os as _os
+
     secret = _cron_secret()
     if not secret:
+        env = (_os.getenv("APP_ENV", "") or "").strip().lower()
+        if env in ("production", "prod"):
+            logger.warning("cron refused: CRON_SECRET unset in production")
+            raise HTTPException(status_code=401, detail="unauthorized")
         return  # local dev: open
     provided = request.headers.get("authorization", "") or ""
     if not hmac.compare_digest(f"Bearer {secret}", provided):
@@ -74,7 +82,7 @@ def _check_cron_auth(request: Request) -> None:
 
 
 class IngestRequest(BaseModel):
-    symbols: list[str] | None = Field(default=None)
+    symbols: list[str] | None = Field(default=None, max_length=100)
 
 
 def _cron_provenance(has_errors: bool) -> dict:
@@ -174,7 +182,9 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
     for raw in symbols or []:
         text = (raw or "").strip()
         if text:
-            wanted.append(text)
+            wanted.append(text[:32])
+        if len(wanted) >= 100:
+            break
     if not wanted:
         return {
             "ok": True,

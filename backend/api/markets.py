@@ -18,6 +18,7 @@ joined, fallback sticky, missing unioned, grade recomputed).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -30,7 +31,21 @@ from backend.market_data.service import MarketDataService
 
 router = APIRouter(prefix="/api/markets", tags=["markets"])
 
-KNOWN_MARKETS = frozenset({"XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"})
+_BUILTIN_MARKETS = frozenset({"XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"})
+
+
+def _known_markets() -> frozenset:
+    """Canonical venue set: YAML registry union built-ins (never empty)."""
+    try:
+        from backend.instruments.config import market_mics
+
+        configured = set(market_mics(enabled_only=True))
+    except Exception:
+        configured = set()
+    return frozenset(configured | set(_BUILTIN_MARKETS))
+
+
+KNOWN_MARKETS = _BUILTIN_MARKETS  # compat alias (tests import this name)
 
 DISCLOSURE = "Not investment advice. For informational purposes only."
 
@@ -116,10 +131,10 @@ def _turnover_note(target_ccy: str | None) -> str:
 
 def _validate_mic(mic: str) -> str:
     norm = (mic or "").strip().upper()
-    if norm not in KNOWN_MARKETS:
+    if norm not in _known_markets():
         raise HTTPException(
             status_code=422,
-            detail=f"unknown market {mic!r}: expected one of {sorted(KNOWN_MARKETS)}",
+            detail=f"unknown market {mic!r}: expected one of {sorted(_known_markets())}",
         )
     return norm
 
@@ -288,6 +303,8 @@ def _scan_mic(
     registry: InstrumentRegistry,
     svc: MarketDataService,
     skipped: list[dict],
+    limit: int | None = None,
+    sort: str = "turnover",
 ) -> tuple[list[dict], int]:
     try:
         universe = [i for i in registry.all() if getattr(i, "exchange_mic", None) == mic]
@@ -295,24 +312,134 @@ def _scan_mic(
         skipped.append({"symbol": "_universe", "mic": mic, "reason": f"{type(exc).__name__}: {exc}"})
         return [], 0
     rows: list[dict] = []
-    for inst in universe:
+
+    def _one(inst) -> tuple[str, dict | None]:
         try:
             symbol_key = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
         except Exception:
-            skipped.append({"symbol": "UNKNOWN", "mic": mic, "reason": "bad registry entry"})
-            continue
+            return "skip", {"symbol": "UNKNOWN", "mic": mic, "reason": "bad registry entry"}
         try:
-            rows.append(_collect_row(inst, svc))
+            return "ok", _collect_row(inst, svc)
         except HTTPException:
             # Never let one bad symbol abort the batch; degrade to skipped.
-            skipped.append({"symbol": symbol_key, "mic": mic, "reason": "HTTPException"})
+            return "skip", {"symbol": symbol_key, "mic": mic, "reason": "HTTPException"}
         except Exception as exc:  # per-symbol degrade, never 500
-            skipped.append({
+            return "skip", {
                 "symbol": symbol_key,
                 "mic": mic,
                 "reason": f"{type(exc).__name__}: {exc}",
-            })
+            }
+
+    # Bounded parallel fan-out (quote + 5-bar fetch per symbol are
+    # independent). Sequential per-market scans held the request thread for
+    # the full universe; 8 workers cut wall time ~8x with identical rows.
+    workers = max(1, min(8, len(universe) or 1))
+    local_skipped: list[dict] = []
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for kind, payload in pool.map(_one, universe):
+                if kind == "ok" and isinstance(payload, dict):
+                    rows.append(payload)
+                elif isinstance(payload, dict):
+                    local_skipped.append(payload)
+    except Exception:
+        for inst in universe:
+            kind, payload = _one(inst)
+            if kind == "ok" and isinstance(payload, dict):
+                rows.append(payload)
+            elif isinstance(payload, dict):
+                local_skipped.append(payload)
+    skipped.extend(local_skipped)
+    # Server-side sort + limit BEFORE wire assembly (liquidity charts only
+    # render the head; transferring the full tail wastes time + bytes).
+    try:
+        key_fn = {
+            "turnover": lambda r: (r.get("turnover") is not None, r.get("turnover") or 0.0),
+            "change": lambda r: (r.get("change_pct") is not None, abs(r.get("change_pct") or 0.0)),
+            "volume": lambda r: (r.get("volume") is not None, r.get("volume") or 0),
+        }.get((sort or "turnover").strip().lower(), None)
+        if key_fn is not None:
+            rows.sort(key=key_fn, reverse=True)
+    except Exception:
+        pass
+    if limit is not None:
+        try:
+            rows = rows[: max(1, int(limit))]
+        except (TypeError, ValueError):
+            pass
     return rows, len(universe)
+
+
+@router.get("")
+def list_markets(
+    registry: InstrumentRegistry = Depends(get_registry),
+) -> dict:
+    """Venue discovery (single source for frontend selectors).
+
+    Returns every known MIC with label/currency/timezone + symbol counts so
+    selectors never hardcode the venue set. `config/markets.yaml` venues
+    union built-ins; counts come from the live registry (incl. EXTRA_SYMBOLS).
+    """
+    try:
+        from backend.instruments.calendars import EXCHANGE_META as _BUILTIN
+        from backend.instruments.config import load_market_configs
+    except Exception:
+        _BUILTIN, load_market_configs = {}, lambda: ()
+    try:
+        items = registry.all()
+    except Exception:
+        items = []
+    counts: dict[str, int] = {}
+    for inst in items or []:
+        try:
+            mic = str(getattr(inst, "exchange_mic", "") or "").upper()
+        except Exception:
+            continue
+        if mic:
+            counts[mic] = counts.get(mic, 0) + 1
+    venues: list[dict] = []
+    seen: set[str] = set()
+    try:
+        configured = list(load_market_configs())
+    except Exception:
+        configured = []
+    for cfg in configured:
+        try:
+            mic = str(cfg.mic).upper()
+        except Exception:
+            continue
+        if mic in seen:
+            continue
+        seen.add(mic)
+        venues.append({
+            "mic": mic,
+            "label": str(getattr(cfg, "name", mic)),
+            "currency": str(getattr(cfg, "currency", "USD")),
+            "timezone": str(getattr(cfg, "timezone", "UTC")),
+            "suffix": str(getattr(cfg, "provider_suffix", "")),
+            "enabled": bool(getattr(cfg, "enabled", True)),
+            "symbols": int(counts.get(mic, 0)),
+        })
+    for mic in sorted(_known_markets()):
+        if mic in seen:
+            continue
+        meta = _BUILTIN.get(mic, {}) if isinstance(_BUILTIN, dict) else {}
+        venues.append({
+            "mic": mic,
+            "label": str(meta.get("name", mic)) if isinstance(meta, dict) else mic,
+            "currency": str(meta.get("currency", "USD")) if isinstance(meta, dict) else "USD",
+            "timezone": str(meta.get("timezone", "UTC")) if isinstance(meta, dict) else "UTC",
+            "suffix": str(meta.get("suffix", "")) if isinstance(meta, dict) else "",
+            "enabled": True,
+            "symbols": int(counts.get(mic, 0)),
+        })
+    venues.sort(key=lambda v: str(v.get("mic") or ""))
+    return {
+        "markets": venues,
+        "count": len(venues),
+        "provenance": _combine_provenance([]),
+        "disclosure": DISCLOSURE,
+    }
 
 
 @router.get("/overview")
@@ -329,12 +456,31 @@ def markets_overview(
     skipped: list[dict] = []
     markets: list[dict] = []
     all_provenance: list[dict] = []
-    for mic in sorted(KNOWN_MARKETS):
-        rows, universe_size = _scan_mic(mic, registry, svc, skipped)
+    # Fan out per-MIC scans concurrently (6 markets x symbols each); each
+    # _scan_mic already parallelizes its symbols, so cap outer workers.
+    mics = sorted(_known_markets())
+
+    def _scan_one(mic: str) -> tuple[dict, list[dict]]:
+        local_skipped: list[dict] = []
+        rows, universe_size = _scan_mic(mic, registry, svc, local_skipped)
         agg = _aggregate(mic, universe_size, rows, _turnover_note(ccy))
-        markets.append(agg)
-        if isinstance(agg.get("provenance"), dict):
-            all_provenance.append(agg["provenance"])
+        return agg, local_skipped
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(6, len(mics) or 1)) as pool:
+            for agg, local in pool.map(_scan_one, mics):
+                markets.append(agg)
+                skipped.extend(local)
+                if isinstance(agg.get("provenance"), dict):
+                    all_provenance.append(agg["provenance"])
+        markets.sort(key=lambda m: str(m.get("mic") or ""))
+    except Exception:
+        for mic in mics:
+            rows, universe_size = _scan_mic(mic, registry, svc, skipped)
+            agg = _aggregate(mic, universe_size, rows, _turnover_note(ccy))
+            markets.append(agg)
+            if isinstance(agg.get("provenance"), dict):
+                all_provenance.append(agg["provenance"])
     return {
         "markets": markets,
         "count": len(markets),
@@ -353,6 +499,14 @@ def market_liquidity(
         default=None,
         description="Display grouping only (USD|EUR|CNY); turnover stays native, no FX",
     ),
+    limit: int = Query(
+        default=50, ge=1, le=100,
+        description="Max per-symbol rows (charts render the head; default 50)",
+    ),
+    sort: str = Query(
+        default="turnover",
+        description="Row order: turnover|change|volume",
+    ),
     registry: InstrumentRegistry = Depends(get_registry),
     svc: MarketDataService = Depends(get_market_service),
 ) -> dict:
@@ -360,7 +514,7 @@ def market_liquidity(
     norm = _validate_mic(mic)
     ccy = _normalize_target_ccy(target_ccy)
     skipped: list[dict] = []
-    rows, universe_size = _scan_mic(norm, registry, svc, skipped)
+    rows, universe_size = _scan_mic(norm, registry, svc, skipped, limit=limit, sort=sort)
     agg = _aggregate(norm, universe_size, rows, _turnover_note(ccy))
     wire_rows = [
         {

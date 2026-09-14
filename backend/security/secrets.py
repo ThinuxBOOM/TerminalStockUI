@@ -22,6 +22,40 @@ _SENSITIVE_RE = re.compile(
 )
 
 
+_WEAK_KEY_MARKERS = ("change-me", "test-only", "example", "placeholder", "secret")
+
+
+def _is_weak_key(raw: str) -> bool:
+    try:
+        lowered = str(raw or "").strip().lower()
+    except Exception:
+        return True
+    if len(str(raw or "")) < 32:
+        return True
+    return any(marker in lowered for marker in _WEAK_KEY_MARKERS)
+
+
+def assert_secret_strength(*, app_env: str | None = None) -> None:
+    """Fail loudly in production on weak/ephemeral SECRET_KEY.
+
+    Weak keys previously hashed silently into Fernet (false security) and
+    an unset key generated an ephemeral per-process key (restarts invalidate
+    all provider_secrets ciphertext). Production refuses both; dev/test
+    keep the old behavior for offline runs.
+    """
+    import os as _os
+
+    env = (app_env or _os.getenv("APP_ENV", "") or "").strip().lower()
+    if env not in ("production", "prod"):
+        return
+    raw = _os.getenv("SECRET_KEY", "") or ""
+    if not raw or _is_weak_key(raw):
+        raise RuntimeError(
+            "SECRET_KEY is missing or weak in production: set a 32+ char "
+            "random SECRET_KEY (rotation invalidates stored provider_secrets)"
+        )
+
+
 def _load_key() -> bytes:
     raw = os.getenv("SECRET_KEY", "")
     if raw:
