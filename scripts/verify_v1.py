@@ -73,8 +73,8 @@ KEY_FILES = [
     "backend/observability/audit_verify.py",
     "infra/migrations/0001_initial.sql",
     "infra/docker/.env.example",
-    "frontend/src/api/client.ts",
-    "frontend/src/pages/WatchlistPage.tsx",
+    "frontend/src/api/client.js",
+    "frontend/src/pages/WatchlistPage.jsx",
 ]
 
 
@@ -92,6 +92,15 @@ def read_text(root: Path, rel: str) -> str | None:
         return (root / rel).read_text(encoding="utf-8")
     except OSError:
         return None
+
+
+def read_any(root: Path, rels: list[str]) -> str:
+    """Return first existing file's text (frontend is plain .js/.jsx, not .ts/.tsx)."""
+    for rel in rels:
+        text = read_text(root, rel)
+        if text is not None:
+            return text
+    return ""
 
 
 def parse_ast(text: str) -> ast.Module | None:
@@ -222,20 +231,21 @@ def check_gates(root: Path, rep: Report) -> None:
                 ["%s <- %s" % (p, found[p]) for p in sorted(found)])
 
     # Tooling gate: vitest must not collect Playwright E2E or build output,
-    # and must include tsx specs (false PASS before: e2e collected on
-    # repo-root runs; false FAIL before: .tsx tests silently skipped).
-    vitest_text = read_text(root, "frontend/vitest.config.ts") or ""
+    # and must include jsx specs (false PASS before: e2e collected on
+    # repo-root runs; false FAIL before: .jsx tests silently skipped).
+    # Frontend is plain JS: config is vitest.config.js (accept .ts legacy).
+    vitest_text = read_text(root, "frontend/vitest.config.js") or read_text(root, "frontend/vitest.config.ts") or ""
     vitest_bits = {
-        "include covers tsx": ("tsx" in vitest_text and "test" in vitest_text),
+        "include covers jsx/tsx": (("jsx" in vitest_text or "tsx" in vitest_text) and "test" in vitest_text),
         "exclude e2e": ("e2e" in vitest_text),
         "exclude node_modules": ("node_modules" in vitest_text),
         "exclude dist": ("dist" in vitest_text),
     }
     if all(vitest_bits.values()):
-        rep.add("GATES", "vitest isolate (e2e/dist excluded, tsx included)", "PASS",
+        rep.add("GATES", "vitest isolate (e2e/dist excluded, jsx/tsx included)", "PASS",
                 ["%s: yes" % k for k in vitest_bits])
     else:
-        rep.add("GATES", "vitest isolate (e2e/dist excluded, tsx included)", "FAIL",
+        rep.add("GATES", "vitest isolate (e2e/dist excluded, jsx/tsx included)", "FAIL",
                 ["%s: %s" % (k, "yes" if v else "NO") for k, v in vitest_bits.items()])
 
     # Persist gate: forecast writes are best-effort (never break the read
@@ -337,8 +347,8 @@ def check_dod(root: Path, rep: Report) -> None:
 
     reg = read_text(root, "backend/instruments/registry.py") or ""
     instr_api = read_text(root, "backend/api/instruments.py") or ""
-    client_ts = read_text(root, "frontend/src/api/client.ts") or ""
-    searchbox = read_text(root, "frontend/src/features/search/SearchBox.tsx") or ""
+    client_ts = read_any(root, ["frontend/src/api/client.js", "frontend/src/api/client.ts"])
+    searchbox = read_any(root, ["frontend/src/features/search/SearchBox.jsx", "frontend/src/features/search/SearchBox.tsx"])
     backend_search_ok = ("APIRouter" in instr_api
                          and "/api/instruments" in instr_api
                          and "def " in instr_api)
@@ -348,7 +358,7 @@ def check_dod(root: Path, rep: Report) -> None:
         rep.add("DoD 2", "search + analyze NYSE/NASDAQ with full provenance", "PASS",
                 ["seed AAPL in backend/instruments/registry.py",
                  "instruments router (prefix /api/instruments) in backend/api/instruments.py",
-                 "client threads ?market= MIC filter (frontend/src/api/client.ts)",
+                 "client threads ?market= MIC filter (frontend/src/api/client.js)",
                  "exchange-aware SearchBox (XNYS/XNAS/...) + ambiguity banner",
                  "evidence: python -m pytest backend/tests/test_instruments.py "
                  "backend/tests/test_provenance.py -q"])
@@ -368,7 +378,7 @@ def check_dod(root: Path, rep: Report) -> None:
     ]
     missing_an = [f for f in analytics_files if not (root / f).is_file()]
     dq = read_text(root, "docs/DATA_QUALITY.md") or ""
-    brief = read_text(root, "frontend/src/features/security/SecurityBrief.tsx") or ""
+    brief = read_any(root, ["frontend/src/features/security/SecurityBrief.jsx", "frontend/src/features/security/SecurityBrief.tsx"])
     if (not missing_an and "| A |" in dq
             and "ProvenanceBadge" in brief and "Not investment advice" in brief):
         rep.add("DoD 3", "charts + fundamentals + deterministic scores + quality", "PASS",
@@ -387,7 +397,7 @@ def check_dod(root: Path, rep: Report) -> None:
     svc = read_text(root, "backend/forecasting/service.py") or ""
     cal = read_text(root, "backend/forecasting/calibration/metrics.py") or ""
     common = read_text(root, "backend/forecasting/common.py") or ""
-    fdetails = read_text(root, "frontend/src/features/forecast/ForecastDetails.tsx") or ""
+    fdetails = read_any(root, ["frontend/src/features/forecast/ForecastDetails.jsx", "frontend/src/features/forecast/ForecastDetails.tsx"])
     horizons_ok = "FORECAST_HORIZONS" in common and "FORECAST_HORIZONS" in svc
     core_ok = all([svc, cal, horizons_ok, "Brier" in cal, "CalibrationChart" in fdetails])
     code_has_codes = ("INVALID_HORIZON" in svc) or ("FORECAST_BLOCKED" in svc)
@@ -403,7 +413,7 @@ def check_dod(root: Path, rep: Report) -> None:
                 "`400 INVALID_HORIZON` / `409 FORECAST_BLOCKED`, but backend "
                 "raises HTTP 422 ValueError and never emits those code strings; "
                 "no test asserts them"]
-        client_fc = read_text(root, "frontend/src/api/client.ts") or ""
+        client_fc = read_any(root, ["frontend/src/api/client.js", "frontend/src/api/client.ts"])
         # Path-first with query fallback is the aligned shape (client tries
         # GET /api/forecast/{symbol} then falls back to ?symbol= on 404/501).
         # Only flag drift when the path-style call is ABSENT — matching the
@@ -436,11 +446,11 @@ def check_dod(root: Path, rep: Report) -> None:
                 ["forecast service/calibration/horizons incomplete"])
 
     schemas = read_text(root, "backend/ai/schemas.py") or ""
-    ai_card = read_text(root, "frontend/src/components/AIOpinionCard.tsx") or ""
+    ai_card = read_any(root, ["frontend/src/components/AIOpinionCard.jsx", "frontend/src/components/AIOpinionCard.tsx"])
     blend = read_text(root, "backend/ai/blend.py") or ""
     if ("evidence_ids" in schemas and "CAPPED 20%" in ai_card
             and "resolve_ai_weight" in blend):
-        client_ai = read_text(root, "frontend/src/api/client.ts") or ""
+        client_ai = read_any(root, ["frontend/src/api/client.js", "frontend/src/api/client.ts"])
         note = ("note: contract code `AI_VALIDATION_FAILED` is docs-only; code "
                 "uses HTTP 422 with plain detail (same fail-safe behavior)")
         # Backend _check_profile normalizes display labels ("Forecast Assist"
@@ -475,7 +485,7 @@ def check_dod(root: Path, rep: Report) -> None:
 
     router = read_text(root, "backend/ai/router.py") or ""
     ai_api = read_text(root, "backend/api/ai.py") or ""
-    psettings = read_text(root, "frontend/src/features/providers/ProviderSettings.tsx") or ""
+    psettings = read_any(root, ["frontend/src/features/providers/ProviderSettings.jsx", "frontend/src/features/providers/ProviderSettings.tsx", "frontend/src/pages/ProviderSettingsPage.jsx", "frontend/src/pages/ProviderSettingsPage.tsx"])
     if ("/providers/performance" in ai_api and "class AIRouter" in router
             and psettings):
         rep.add("DoD 6", "switch provider/model + compare; historical performance",
@@ -517,7 +527,7 @@ def check_dod(root: Path, rep: Report) -> None:
                 ["ai_enabled path or disabled-path tests missing"])
 
     cals = read_text(root, "backend/instruments/calendars.py") or ""
-    watch = read_text(root, "frontend/src/pages/WatchlistPage.tsx") or ""
+    watch = read_any(root, ["frontend/src/pages/WatchlistPage.jsx", "frontend/src/pages/WatchlistPage.tsx"])
     suffix_ok = all(s in cals for s in ('".SS"', '".PA"', '".AS"', '".BR"'))
     seeds_ok = all(s in reg for s in ("600519", '"MC"', "ASML", "UCB"))
     stub_ok = "STUB" in cals and "is_holiday" in cals
