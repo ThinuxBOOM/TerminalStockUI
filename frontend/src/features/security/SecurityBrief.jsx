@@ -64,10 +64,13 @@ function SecurityBrief({ symbol }) {
   if (quote.isLoading)
     return /* @__PURE__ */ React.createElement("div", { className: "max-w-full" }, /* @__PURE__ */ React.createElement(Skeleton, { label: `loading ${symbol}\u2026`, lines: 6 }), /* @__PURE__ */ React.createElement("p", { className: "mt-2 text-[11px] text-term-muted" }, DISCLOSURE));
   if (quote.isError) {
-    return /* @__PURE__ */ React.createElement("div", { className: "max-w-full" }, /* @__PURE__ */ React.createElement(StaleBanner, { detail: quote.error instanceof Error ? quote.error.message : "quote endpoint unreachable" }), /* @__PURE__ */ React.createElement(
-      ForecastUnavailable,
+    // Hard error with no quote payload: ErrorState (with retry), not a
+    // "cached data" banner — nothing is being shown.
+    return /* @__PURE__ */ React.createElement("div", { className: "max-w-full" }, /* @__PURE__ */ React.createElement(
+      ErrorState,
       {
-        detail: "forecast not requested without a live quote \u2014 no placeholder numbers shown",
+        title: "Quote unavailable",
+        detail: quote.error instanceof Error ? quote.error.message : "quote endpoint unreachable",
         onRetry: () => {
           void quote.refetch();
           void forecastQ.refetch();

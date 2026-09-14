@@ -172,6 +172,10 @@ def roic(fin: Mapping) -> MetricResult:
     if missing:
         return unavailable(ROIC_FORMULA, base_keys + ["invested_capital"],
                            f"missing fields: {missing}")
+    tax = get_number(fin, "tax_rate")
+    if not 0.0 <= tax <= 1.0:
+        return unavailable(ROIC_FORMULA, base_keys + ["invested_capital"],
+                           f"tax_rate must be in [0, 1] (decimal, not percent), got {tax}")
     capital = get_number(fin, "invested_capital")
     sources = ["ebit", "tax_rate", "invested_capital"]
     reason = None
@@ -191,7 +195,7 @@ def roic(fin: Mapping) -> MetricResult:
         reason = "invested_capital missing; derived as total_debt + total_equity"
     if capital == 0:
         return unavailable(ROIC_FORMULA, sources, "invested capital is zero")
-    nopat = get_number(fin, "ebit") * (1.0 - get_number(fin, "tax_rate"))
+    nopat = get_number(fin, "ebit") * (1.0 - tax)
     return MetricResult(nopat / capital, ROIC_FORMULA, tuple(sources), quality,
                         reason=reason)
 

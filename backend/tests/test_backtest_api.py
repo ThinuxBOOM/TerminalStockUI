@@ -22,7 +22,7 @@ def test_backtest_run_shape_and_history():
     resp = client.post(
         "/api/backtest/run",
         json={"symbol": "AAPL", "horizons": [5, 21],
-              "train_size": 100, "test_size": 21, "gap": 5},
+              "train_size": 100, "test_size": 21, "gap": 21},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -60,6 +60,18 @@ def test_backtest_rejects_bad_horizon_with_422():
     assert resp.status_code == 422, resp.text
     resp = client.post("/api/backtest/run", json={"symbol": "AAPL", "horizons": []})
     assert resp.status_code == 422, resp.text
+
+
+def test_backtest_rejects_leaky_gap_with_422():
+    # gap < max(horizons) would let train labels straddle tests.
+    client = _client()
+    resp = client.post(
+        "/api/backtest/run",
+        json={"symbol": "AAPL", "horizons": [5, 21],
+              "train_size": 100, "test_size": 21, "gap": 5},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "gap" in resp.text.lower()
 
 
 def test_backtest_deterministic():

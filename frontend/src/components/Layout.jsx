@@ -29,6 +29,11 @@ function Layout({ children }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+  // Move screen-reader/keyboard focus to the main region on route change
+  // (the skip link target already carries tabIndex=-1).
+  useEffect(() => {
+    document.getElementById("main-content")?.focus({ preventScroll: true });
+  }, [location.pathname]);
   return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen max-w-full overflow-x-clip bg-term-bg" }, /* @__PURE__ */ React.createElement(
     "a",
     {
@@ -36,7 +41,7 @@ function Layout({ children }) {
       className: "sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded focus:bg-term-green focus:px-3 focus:py-1 focus:text-sm focus:text-black"
     },
     "Skip to content"
-  ), /* @__PURE__ */ React.createElement("header", { className: "border-b border-term-border bg-term-panel" }, /* @__PURE__ */ React.createElement("div", { className: "mx-auto flex max-w-7xl items-center gap-4 px-4 py-3" }, /* @__PURE__ */ React.createElement(Link, { to: "/", className: "shrink-0 text-term-green font-bold tracking-widest", "aria-label": "OneMarket home" }, "ONE", /* @__PURE__ */ React.createElement("span", { className: "text-term-text" }, "MARKET"), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-[10px] text-term-muted" }, "TERMINAL v0.1")), /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React.createElement("header", { className: "border-b border-term-border bg-term-panel" }, /* @__PURE__ */ React.createElement("div", { className: "mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3" }, /* @__PURE__ */ React.createElement(Link, { to: "/", className: "shrink-0 text-term-green font-bold tracking-widest", "aria-label": "OneMarket home" }, "ONE", /* @__PURE__ */ React.createElement("span", { className: "text-term-text" }, "MARKET"), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-[10px] text-term-muted" }, "TERMINAL v0.1")), /* @__PURE__ */ React.createElement(
     "form",
     {
       className: "flex min-w-0 flex-1 gap-2",

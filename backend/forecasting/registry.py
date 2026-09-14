@@ -25,6 +25,9 @@ ENSEMBLE_MEMBERS = (
     momentum.MODEL_VERSION,
     logistic.MODEL_VERSION,
 )
+# NOTE: gradient-boost-direction is registered but intentionally NOT in
+# ENSEMBLE_MEMBERS (dormant reference baseline, not wired into
+# ForecastService). Wire it in only after the column-guard fix + OOS eval.
 
 REGISTRY: dict[str, dict[str, dict[str, str]]] = {
     historical_drift.MODEL_NAME: {
@@ -73,6 +76,21 @@ REGISTRY: dict[str, dict[str, dict[str, str]]] = {
         ENSEMBLE_VERSION: {
             "artifact_path": f"artifacts/{ENSEMBLE_NAME}/{ENSEMBLE_VERSION}.json",
             "feature_version": FEATURE_VERSION,
+        }
+    },
+    # Blended venue ensembles (defined in forecasting.service as
+    # ENSEMBLE_VERSION+SSE/EUX_DRIFT_VERSION). Registered here so blend
+    # versions resolve in provenance instead of dangling.
+    f"{ENSEMBLE_NAME}+{sse_drift.MODEL_VERSION}": {
+        f"{ENSEMBLE_VERSION}+{sse_drift.MODEL_VERSION}": {
+            "artifact_path": f"artifacts/{ENSEMBLE_NAME}/{ENSEMBLE_VERSION}+{sse_drift.MODEL_VERSION}.json",
+            "feature_version": SSE_FEATURE_VERSION,
+        }
+    },
+    f"{ENSEMBLE_NAME}+{euronext_drift.MODEL_VERSION}": {
+        f"{ENSEMBLE_VERSION}+{euronext_drift.MODEL_VERSION}": {
+            "artifact_path": f"artifacts/{ENSEMBLE_NAME}/{ENSEMBLE_VERSION}+{euronext_drift.MODEL_VERSION}.json",
+            "feature_version": EUX_FEATURE_VERSION,
         }
     },
 }

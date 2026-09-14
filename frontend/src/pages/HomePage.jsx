@@ -9,7 +9,8 @@ import MarketLiquidityPanel from "../components/MarketLiquidityPanel";
 import { useMarketLiquidity } from "../hooks/useMarketLiquidity";
 import useWatchlist from "../hooks/useWatchlist";
 import CurrencyValue from "../components/CurrencyValue";
-import Skeleton from "../components/Skeleton";
+import { formatPct1 } from "../utils/format";
+import Skeleton, { SkeletonLine } from "../components/Skeleton";
 import EmptyState from "../components/EmptyState";
 import ErrorState, { StaleBanner } from "../components/ErrorState";
 const VENUES = [
@@ -34,7 +35,7 @@ const VenueRow = memo(function VenueRow({ label, symbol }) {
     retry: false,
     staleTime: 3e4
   });
-  return /* @__PURE__ */ React.createElement("li", { className: "flex items-center justify-between gap-2 border-b border-term-border pb-1" }, /* @__PURE__ */ React.createElement("span", { className: "min-w-0 truncate" }, label), q.isLoading && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-term-muted", role: "status" }, "\u2026"), q.isError && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-term-muted", role: "status" }, "unavailable"), q.data && /* @__PURE__ */ React.createElement("span", { className: "flex shrink-0 items-center gap-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.data.market_state, provenance: q.data.provenance }), /* @__PURE__ */ React.createElement("span", { className: "hidden text-[10px] text-term-muted lg:inline" }, typeof q.data.provenance?.delay_minutes === "number" ? `${q.data.provenance.delay_minutes}m` : "\u2014")));
+  return /* @__PURE__ */ React.createElement("li", { className: "flex items-center justify-between gap-2 border-b border-term-border pb-1" }, /* @__PURE__ */ React.createElement("span", { className: "min-w-0 truncate" }, label), q.isLoading && /* @__PURE__ */ React.createElement("span", { className: "w-16 shrink-0", role: "status", "aria-label": "loading" }, /* @__PURE__ */ React.createElement(SkeletonLine, null)), q.isError && /* @__PURE__ */ React.createElement("span", { className: "text-xs text-term-muted", role: "status" }, "unavailable"), q.data && /* @__PURE__ */ React.createElement("span", { className: "flex shrink-0 items-center gap-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.data.market_state, provenance: q.data.provenance }), /* @__PURE__ */ React.createElement(FreshnessBadge, { p: q.data.provenance })));
 });
 function WatchlistRowInner({
   symbol,
@@ -47,7 +48,7 @@ function WatchlistRowInner({
     staleTime: 3e4
   });
   if (q.isLoading)
-    return /* @__PURE__ */ React.createElement("li", { className: "p-3 text-xs text-term-muted", role: "status" }, "\u2026 ", symbol);
+    return /* @__PURE__ */ React.createElement("li", { className: "p-3", role: "status", "aria-label": `loading ${symbol}` }, /* @__PURE__ */ React.createElement(Skeleton, { label: `loading ${symbol}\u2026`, lines: 1 }));
   if (q.isError || !q.data)
     return /* @__PURE__ */ React.createElement("li", { className: "flex items-center justify-between gap-2 p-3 text-xs" }, /* @__PURE__ */ React.createElement("span", { className: "min-w-0 truncate text-term-muted" }, symbol, " \u2014 unavailable"), /* @__PURE__ */ React.createElement("span", { className: "flex shrink-0 gap-2" }, /* @__PURE__ */ React.createElement(Link, { className: "text-term-green", to: `/security/${encodeURIComponent(symbol)}` }, "BRIEF \u2192"), /* @__PURE__ */ React.createElement(
       "button",
@@ -200,7 +201,6 @@ function HomePage() {
       r.symbol,
       r.horizon_days ? ` \xB7 ${r.horizon_days}d` : ""
     ) : /* @__PURE__ */ React.createElement("span", { className: "min-w-0 truncate text-term-muted" }, "\u2014", r.horizon_days ? ` \xB7 ${r.horizon_days}d` : ""),
-    /* @__PURE__ */ React.createElement("span", { className: "shrink-0 text-term-muted" }, typeof r.direction_probability === "number" ? `${(r.direction_probability * 100).toFixed(0)}%` : "\u2014")
-  ))))));
+    /* @__PURE__ */ React.createElement("span", { className: "shrink-0 text-term-muted" }, formatPct1(r.direction_probability)))))));
 }
 export { HomePage as default };

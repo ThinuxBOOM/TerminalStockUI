@@ -1,11 +1,8 @@
 import React from "react";
 import { isFxProvenanceMissingError, isFreshFxProvenance } from "../api/client";
+import { formatDateTime } from "../utils/format";
 function fmtTime(iso) {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
+  return formatDateTime(iso);
 }
 function FXProvenanceBanner({
   provenance,

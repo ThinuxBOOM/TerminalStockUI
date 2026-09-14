@@ -98,6 +98,9 @@ def validate_series(
     series, error = _coerce_series(values, field_name)
     if error is not None:
         return None, 0, error
+    # Treat +/-inf as missing (dropna alone keeps inf and poisons
+    # rolling/ewm windows). Count them as dropped for quality grading.
+    series = series.replace([float("inf"), float("-inf")], float("nan"))
     valid = series.dropna()
     dropped = int(len(series) - len(valid))
     if len(valid) < min_length:
@@ -125,6 +128,8 @@ def align_series(
         columns[name] = series
     frame = pd.DataFrame(columns)
     n_before = len(frame)
+    # Same inf rule as validate_series: inf rows are missing, not valid.
+    frame = frame.replace([float("inf"), float("-inf")], float("nan"))
     frame = frame.dropna()
     dropped = int(n_before - len(frame))
     if len(frame) < min_length:

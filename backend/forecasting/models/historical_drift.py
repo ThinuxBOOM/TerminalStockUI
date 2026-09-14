@@ -5,7 +5,9 @@ then scales by horizon: mu_h = mu*h, sigma_h = sigma*sqrt(h).
   * direction_probability = Phi(mu_h / sigma_h) (standard normal CDF via
     math.erf; degenerate sigma=0 falls back to sign(mu)).
   * expected_return_range = mu_h +/- z*sigma_h, reported in SIMPLE-return
-    space via exp() (log-normal convention).
+    space via exp() (log-normal convention). NOTE: mid = exp(mu*h)-1 is the
+    MEDIAN (not the mean exp(mu*h+0.5*sigma^2*h)-1; Jensen gap ~0.4pp at
+    typical vol/horizon).
 Deterministic: closed form, no randomness. Reference baseline only.
 """
 
@@ -33,7 +35,8 @@ FORMULA_DIRECTION = (
     "trailing daily log returns (sigma=0 -> sign(mu))"
 )
 FORMULA_RANGE = (
-    "range_h = exp(mu*h +/- z*sigma*sqrt(h)) - 1 (log-normal band)"
+    "range_h = exp(mu*h +/- z*sigma*sqrt(h)) - 1 (log-normal band; "
+    "mid = median exp(mu*h)-1, not mean)"
 )
 
 

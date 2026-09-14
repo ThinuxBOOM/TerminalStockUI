@@ -290,6 +290,24 @@ class ForecastService:
         rows = bars.get("bars", [])
         if len(rows) < 100:
             raise ValueError(f"insufficient history for {symbol!r}: {len(rows)} bars")
+        # Drop incomplete OHLC rows (None open/high/low): a single None bar
+        # must not kill a 250-bar forecast. Count drops in provenance.
+        prov = dict(bars.get("provenance", {}) or {})
+        try:
+            kept = [r for r in rows if r.get("close") is not None]
+            dropped_incomplete = len(rows) - len([r for r in kept if r.get("open") is not None and r.get("high") is not None and r.get("low") is not None])
+            rows = [r for r in kept if r.get("open") is not None and r.get("high") is not None and r.get("low") is not None]
+            if dropped_incomplete:
+                mf = list(prov.get("missing_fields") or [])
+                mf.append(f"dropped {dropped_incomplete} incomplete OHLC bars")
+                prov["missing_fields"] = mf
+                bars = {**bars, "provenance": prov}
+            if len(rows) < 100:
+                raise ValueError(f"insufficient history for {symbol!r}: {len(rows)} complete bars")
+        except ValueError:
+            raise
+        except Exception:
+            pass
         try:
             opens = [r["open"] for r in rows]
             highs = [r["high"] for r in rows]
@@ -331,6 +349,18 @@ class ForecastService:
             raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
         ohlcv, bars = self._load(symbol)
         provenance = dict(bars.get("provenance", {}))
+        # Corporate-action lineage: bars are assumed split/dividend-adjusted
+        # (ingest uses auto_adjust=True). An unadjusted 2:1 split looks like a
+        # -50% single-day crash. Detect that signature and cap confidence.
+        try:
+            _rets = ohlcv["close"].pct_change().dropna()
+            _crash = bool((_rets <= -0.45).any()) if len(_rets) else False
+        except Exception:
+            _crash = False
+        if _crash:
+            _mf = list(provenance.get("missing_fields") or [])
+            _mf.append("possible unadjusted corporate action (single-day drop <= -45%)")
+            provenance["missing_fields"] = _mf
         stamp = as_of or str(provenance.get("as_of"))
         base_data_version = _data_version({**provenance, "as_of": stamp})
         sse = _is_sse(symbol, bars)
@@ -499,6 +529,26 @@ class ForecastService:
             model_version = ENSEMBLE_VERSION
             feature_version = FEATURE_VERSION
 
+        # Staleness + fallback honesty: stub/fallback bars or months-old data
+        # must never read as high-confidence. Cap to low and let the
+        # limitations string disclose it (see api/forecast.forecast_limitations).
+        try:
+            _fallback = bool(provenance.get("fallback_used"))
+        except Exception:
+            _fallback = False
+        _stale = False
+        try:
+            _asof_raw = str(provenance.get("as_of") or stamp or "")
+            _asof_dt = datetime.fromisoformat(_asof_raw.replace("Z", "+00:00"))
+            if _asof_dt.tzinfo is None:
+                _asof_dt = _asof_dt.replace(tzinfo=timezone.utc)
+            _age_days = (datetime.now(timezone.utc) - _asof_dt).total_seconds() / 86400.0
+            _stale = _age_days > 7.0
+        except Exception:
+            _stale = False
+        if _fallback or _stale or _crash:
+            confidence = "low"
+
         # -- JSON safety: non-finite floats are invalid JSON (NaN/inf) ----
         # Finite inputs pass through bit-identical; only pathological model
         # outputs (e.g. exp() overflow on extreme synthetic drift) map to
@@ -525,8 +575,16 @@ class ForecastService:
         ]
 
         instrument_id = bars.get("instrument_id") or f"stub-{symbol.strip().upper()}"
+        # Anchor target on the LAST BAR timestamp (market time), not fetch
+        # wall-clock: if cron stalls, the target must not slide forward on
+        # stale bars.
+        try:
+            _last_ts = ohlcv.index.max()
+            _anchor = _last_ts.isoformat() if _last_ts is not None else stamp
+        except Exception:
+            _anchor = stamp
         target_date = _target_date(
-            stamp, horizon, _target_mic(symbol, bars, sse, eux)
+            _anchor, horizon, _target_mic(symbol, bars, sse, eux)
         )
         record = {
             "forecast_id": _deterministic_id(symbol, horizon, stamp, data_version),

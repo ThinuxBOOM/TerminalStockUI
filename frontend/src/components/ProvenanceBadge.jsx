@@ -1,10 +1,7 @@
 import React from "react";
+import { formatDateTime } from "../utils/format";
 function fmtTime(iso) {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
+  return formatDateTime(iso);
 }
 function ProvenanceBadge({ p }) {
   if (!p || typeof p !== "object") {

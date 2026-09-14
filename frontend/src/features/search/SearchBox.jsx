@@ -120,11 +120,10 @@ function SearchBox({
     if (!term) return;
     setDebounced(term);
     saveRecent(term);
-    const list = visibleResults.length > 0 ? visibleResults : [];
-    if (list.length > 0) {
-      const target = activeIndex >= 0 && activeIndex < list.length ? list[activeIndex] : list[0];
-      goToSymbol(displaySymbol(target));
-    } else {
+    // Search only: never auto-navigate. The user picks an explicit row
+    // (click BRIEF or arrow-highlight + Enter) so ambiguous symbols are
+    // disambiguated instead of silently jumping to the first hit.
+    if (visibleResults.length === 0) {
       void refetch();
     }
   }
@@ -136,10 +135,11 @@ function SearchBox({
     } else if (e.key === "ArrowUp" && n > 0) {
       e.preventDefault();
       setActiveIndex((i) => i <= 0 ? n - 1 : i - 1);
-    } else if (e.key === "Enter" && n > 0 && q.trim()) {
+    } else if (e.key === "Enter" && n > 0 && q.trim() && activeIndex >= 0 && activeIndex < n) {
+      // Navigate only on an explicitly highlighted row; plain Enter
+      // just runs the search (see handleSubmit).
       e.preventDefault();
-      const target = activeIndex >= 0 && activeIndex < n ? visibleResults[activeIndex] : visibleResults[0];
-      goToSymbol(displaySymbol(target));
+      goToSymbol(displaySymbol(visibleResults[activeIndex]));
     }
   }
   const expanded = submitted.length >= 2 && (data?.length ?? 0) > 0;

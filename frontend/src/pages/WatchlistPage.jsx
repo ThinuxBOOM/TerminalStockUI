@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import useWatchlist from "../hooks/useWatchlist";
 import { TARGET_CURRENCIES, getQuote, isFreshFxProvenance, normalizeTargetCcy, rankCrossMarket } from "../api/client";
@@ -94,7 +95,7 @@ function WatchlistPage() {
   ), /* @__PURE__ */ React.createElement(
     "form",
     {
-      className: "flex gap-2",
+      className: "flex flex-wrap gap-2",
       onSubmit: (e) => {
         e.preventDefault();
         addSymbol();
@@ -103,7 +104,7 @@ function WatchlistPage() {
     /* @__PURE__ */ React.createElement(
       "input",
       {
-        className: "term-input",
+        className: "term-input min-w-0 flex-1",
         value: draft,
         onChange: (e) => setDraft(e.target.value),
         placeholder: "Add symbol (e.g. MC.PA)",
@@ -156,7 +157,7 @@ function WatchlistPage() {
     return /* @__PURE__ */ React.createElement("ul", { className: "term-panel divide-y divide-term-border" }, symbolsOverflow && /* @__PURE__ */ React.createElement("li", { className: "p-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleSymbols.length, " of ", symbols.length, " \u2014 remove symbols to narrow the list."), visibleSymbols.map((sym, i) => {
       const q = rows[i] ?? null;
       if (!q) {
-        return /* @__PURE__ */ React.createElement("li", { key: sym, className: "flex items-center justify-between p-3" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, sym), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, "unavailable")), /* @__PURE__ */ React.createElement(
+        return /* @__PURE__ */ React.createElement("li", { key: sym, className: "flex items-center justify-between p-3" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(sym)}`, className: "font-bold text-term-green hover:underline" }, sym), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, "unavailable")), /* @__PURE__ */ React.createElement(
           "button",
           {
             className: "term-btn-ghost text-xs",
@@ -167,7 +168,7 @@ function WatchlistPage() {
           "REMOVE"
         ));
       }
-      return /* @__PURE__ */ React.createElement("li", { key: `${sym}-${q.instrument?.exchange_mic ?? ""}`, className: "p-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("b", { className: "text-term-green" }, q.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, q.instrument?.company_name ?? "", " ", q.instrument?.exchange_mic ? `\xB7 ${q.instrument.exchange_mic}` : "", " ", q.currency ? `\xB7 ${q.currency}` : ""), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-sm" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: q.price, currency: q.currency ?? "USD" })), /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.market_state, provenance: q.provenance }))), /* @__PURE__ */ React.createElement(
+      return /* @__PURE__ */ React.createElement("li", { key: `${sym}-${q.instrument?.exchange_mic ?? ""}`, className: "p-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(q.symbol)}`, className: "font-bold text-term-green hover:underline" }, q.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, q.instrument?.company_name ?? "", " ", q.instrument?.exchange_mic ? `\xB7 ${q.instrument.exchange_mic}` : "", " ", q.currency ? `\xB7 ${q.currency}` : ""), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-sm" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: q.price, currency: q.currency ?? "USD" })), /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.market_state, provenance: q.provenance }))), /* @__PURE__ */ React.createElement(
         "button",
         {
           className: "term-btn-ghost text-xs",
@@ -187,20 +188,13 @@ function WatchlistPage() {
       return /* @__PURE__ */ React.createElement("div", { className: "term-panel border-term-red p-4 text-sm text-term-red", role: "alert" }, GATE_MESSAGE);
     }
     const rows = visibleRanked;
-    return /* @__PURE__ */ React.createElement("div", { className: "term-panel overflow-x-auto" }, rankedOverflow && /* @__PURE__ */ React.createElement("p", { className: "p-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleRanked.length, " of ", rankedRows.length, " \u2014 remove symbols to narrow the list."), /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "border-b border-term-border text-left text-xs text-term-muted" }, /* @__PURE__ */ React.createElement("th", { className: "p-2" }, "#"), /* @__PURE__ */ React.createElement("th", { className: "p-2" }, "Symbol"), /* @__PURE__ */ React.createElement("th", { className: "p-2" }, "Native"), /* @__PURE__ */ React.createElement("th", { className: "p-2" }, "Converted (", data.target_ccy, ")"), /* @__PURE__ */ React.createElement("th", { className: "p-2" }, "Market"), /* @__PURE__ */ React.createElement("th", { className: "p-2" }, "Provenance"), /* @__PURE__ */ React.createElement("th", { className: "p-2" }, /* @__PURE__ */ React.createElement("span", { className: "sr-only" }, "Remove")))), /* @__PURE__ */ React.createElement("tbody", null, rows.map((r, idx) => /* @__PURE__ */ React.createElement("tr", { key: `${r.symbol}-${idx}`, className: "border-b border-term-border" }, /* @__PURE__ */ React.createElement("td", { className: "p-2 text-term-muted" }, idx + 1), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement("b", { className: "text-term-green" }, r.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, r.instrument?.company_name ?? "", " ", r.instrument?.exchange_mic ? `\xB7 ${r.instrument.exchange_mic}` : "")), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: r.price ?? null, currency: r.currency ?? "USD" })), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement("b", null, /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "term-panel overflow-x-auto" }, rankedOverflow && /* @__PURE__ */ React.createElement("p", { className: "p-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleRanked.length, " of ", rankedRows.length, " \u2014 remove symbols to narrow the list."), /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("caption", { className: "sr-only" }, "Watchlist ranked by converted price"), /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "border-b border-term-border text-left text-xs text-term-muted" }, /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "#"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Symbol"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Native"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Converted (", data.target_ccy, ")"), /* @__PURE__ */ /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "FX provenance"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, /* @__PURE__ */ React.createElement("span", { className: "sr-only" }, "Remove")))), /* @__PURE__ */ React.createElement("tbody", null, rows.map((r, idx) => /* @__PURE__ */ React.createElement("tr", { key: `${r.symbol}-${idx}`, className: "border-b border-term-border" }, /* @__PURE__ */ React.createElement("td", { className: "p-2 text-term-muted" }, idx + 1), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(r.symbol)}`, className: "font-bold text-term-green hover:underline" }, r.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, r.instrument?.company_name ?? "", " ", r.instrument?.exchange_mic ? `\xB7 ${r.instrument.exchange_mic}` : "")), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: r.price ?? null, currency: r.currency ?? "USD" })), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement("b", null, /* @__PURE__ */ React.createElement(
       CurrencyValue,
       {
         value: r.converted_price ?? null,
         currency: data.target_ccy
       }
-    ))), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(
-      "span",
-      {
-        className: "text-term-muted",
-        title: "Per-row market state is not served on ranked rows \u2014 see the native quote on the Security Brief"
-      },
-      "\u2014"
-    )), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(ProvenanceBadge, { p: data.fx_provenance ?? r.provenance })), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(
+    ))), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(ProvenanceBadge, { p: data.fx_provenance ?? r.provenance })), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(
       "button",
       {
         className: "term-btn-ghost text-xs",

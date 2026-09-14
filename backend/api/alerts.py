@@ -466,13 +466,36 @@ def _finite_or_raise(value: Any, what: str, symbol: str) -> float:
 def _observe(
     alert: Alert, *, market: Any, forecast: Any
 ) -> tuple[float, dict]:
-    """Fetch the observed value + observation provenance for one alert."""
+    """Fetch the observed value + observation provenance for one alert.
+
+    Price conditions honor ``target_ccy``: when it differs from the quote
+    currency the price is converted via the FX service. Conversion failure
+    raises (per-alert error, never a silent mis-fire on mixed currencies).
+    Direction conditions are dimensionless and need no conversion.
+    """
     condition = str(alert.condition)
     symbol = str(alert.symbol)
     if condition in ("price_above", "price_below"):
         quote = market.get_quote(symbol)
         observed = _finite_or_raise(quote.get("price"), "price", symbol)
-        return observed, dict(quote.get("provenance") or {})
+        quote_ccy = str(quote.get("currency") or "USD").strip().upper()
+        target_ccy = str(getattr(alert, "target_ccy", None) or quote_ccy).strip().upper() or quote_ccy
+        if target_ccy != quote_ccy:
+            try:
+                from backend.market_data.fx.provider import FXProvider as _FXP
+                fx_payload = _FXP().get_rate(quote_ccy, target_ccy)
+                rate = _finite_or_raise(fx_payload.get("rate"), "fx rate", symbol)
+                observed = float(observed) * float(rate)
+                if fx_payload.get("fallback_used"):
+                    logger.warning("alert fx fallback %s->%s", quote_ccy, target_ccy)
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError(f"fx conversion {quote_ccy}->{target_ccy} failed: {exc}") from exc
+        prov = dict(quote.get("provenance") or {})
+        prov.setdefault("target_ccy", target_ccy)
+        prov.setdefault("quote_ccy", quote_ccy)
+        return observed, prov
     if condition == "change_pct_below":
         quote = market.get_quote(symbol)
         observed = _finite_or_raise(quote.get("change_pct"), "change_pct", symbol)

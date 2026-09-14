@@ -95,12 +95,15 @@ def build_features(
                         min_periods=rsi_window).mean()
     rsi = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
     rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    # Flat history is neutral 50, consistent with analytics/technical RSI.
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
 
     vol_mean = frame["volume"].rolling(volume_window, min_periods=volume_window).mean()
     vol_std = frame["volume"].rolling(volume_window, min_periods=volume_window).std(ddof=1)
     with np.errstate(divide="ignore", invalid="ignore"):
         volume_z = (frame["volume"] - vol_mean) / vol_std
-    volume_z = volume_z.mask((vol_std == 0) & volume_z.notna(), 0.0)
+    # std==0 -> 0/0=NaN; contract is z=0 there (mask on std alone).
+    volume_z = volume_z.mask(vol_std == 0, 0.0)
 
     features = pd.DataFrame(index=frame.index)
     features["ret_1"] = lret

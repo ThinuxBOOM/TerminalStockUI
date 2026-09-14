@@ -120,7 +120,7 @@ function ScreenerPage() {
       value: minProbInput,
       onChange: (e) => setMinProbInput(clampProb(Number(e.target.value))),
       "aria-label": "Minimum direction probability (slider)",
-      className: "w-40"
+      className: "w-full min-w-32 max-w-52"
     }
   ), /* @__PURE__ */ React.createElement(
     "input",

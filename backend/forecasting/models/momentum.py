@@ -1,9 +1,15 @@
 """Baseline 2: trailing-momentum model (Milestone 3).
 
-Naive reference: trailing `trailing_days` simple return R and its realized
-volatility sigma give z = R / (sigma*sqrt(trailing_days)); the direction
-probability is the logistic map 1/(1+exp(-z)) with fixed gain k=1.
-Uptrend -> > 0.5, downtrend -> < 0.5, flat -> 0.5. Deterministic.
+Naive reference: trailing `trailing_days` LOG return R (log(P_t/P_{t-63}),
+consistent with the log-vol denominator) and its realized volatility sigma
+give z = R / (sigma*sqrt(trailing_days)); the direction probability is the
+logistic map 1/(1+exp(-z)) with fixed gain k=1. Uptrend -> > 0.5,
+downtrend -> < 0.5, flat -> 0.5. Deterministic.
+
+Horizon note: predict_all_horizons returns the SAME level for 5/21/63
+(horizon-agnostic stub). Do not read it as horizon-calibrated: forward
+variance should pull long-horizon P toward 0.5. The horizon arg only labels
+output.
 """
 
 from __future__ import annotations
@@ -21,8 +27,9 @@ from ..features.features import FEATURE_VERSION
 MODEL_NAME = "momentum"
 MODEL_VERSION = "momentum-v1"
 FORMULA = (
-    "z = R_trail / (sigma_trail*sqrt(trailing_days)); "
-    "P(up) = 1/(1+exp(-k*z)), k=1 (naive momentum baseline)"
+    "z = R_trail_log / (sigma_trail*sqrt(trailing_days)); "
+    "R_trail_log = log(P_t/P_{t-trailing}); "
+    "P(up) = 1/(1+exp(-k*z)), k=1 (naive momentum baseline, horizon-agnostic)"
 )
 GAIN = 1.0
 
@@ -45,7 +52,9 @@ class MomentumBaseline:
         tail = prices.iloc[-(window + 1):]
         if (tail <= 0).any() or not np.isfinite(tail.to_numpy()).all():
             raise ValueError("closes must be positive and finite")
-        self.trailing_return = float(tail.iloc[-1] / tail.iloc[0] - 1.0)
+        # Log trailing return for consistency with the log-vol denominator
+        # (simple/log differ ~1.23x on +50% runs; mixing inflates rallies).
+        self.trailing_return = float(math.log(float(tail.iloc[-1] / tail.iloc[0])))
         lret = np.log(tail.to_numpy()[1:] / tail.to_numpy()[:-1])
         self.trailing_vol = float(np.std(lret, ddof=1)) if len(lret) > 1 else 0.0
         return self

@@ -134,7 +134,7 @@ def test_e2e_journey_search_to_audit():
         resp = client.post(
             "/api/backtest/run",
             json={"symbol": "AAPL", "horizons": [5, 21],
-                  "train_size": 100, "test_size": 21, "gap": 5},
+                  "train_size": 100, "test_size": 21, "gap": 21},
         )
         assert resp.status_code == 200, resp.text
         run = resp.json()
