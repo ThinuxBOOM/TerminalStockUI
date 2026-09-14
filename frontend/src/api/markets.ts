@@ -60,6 +60,9 @@ export type MarketBreadth = {
   /** Per-symbol rows (present on GET /api/markets/{mic}/liquidity and the
    *  screener fallback; empty on the overview aggregate). Powers graphs. */
   rows: MarketSymbolRow[];
+  /** No-FX turnover disclaimer from the backend (native price*volume sums
+   *  mix currencies). Null on the client-side screener fallback. */
+  turnover_note: string | null;
 };
 
 export type MarketsOverview = {
@@ -162,7 +165,11 @@ export function normalizeMarketBreadth(raw: unknown, micFallback = ''): MarketBr
   const advancers = numOrZero(r.advancers ?? r.adv ?? r.up ?? r.advancing);
   const decliners = numOrZero(r.decliners ?? r.dec ?? r.down ?? r.declining);
   const unchanged = numOrZero(r.unchanged ?? r.unch ?? r.flat ?? r.unchanged_count);
-  const totalRaw = numOrZero(r.total ?? r.count ?? r.universe ?? r.universe_size);
+  const totalRaw = numOrZero(
+    r.total ?? r.count ?? r.universe ?? r.universe_size ?? r.symbols_total ?? r.quoted,
+  );
+  // Backend sends symbols_total (universe) + quoted alongside the scored
+  // adv/dec/unch split — unscored symbols are in neither bucket.
   const total = totalRaw > 0 ? totalRaw : advancers + decliners + unchanged;
   const countsRaw = isRecord(r.market_state_counts)
     ? r.market_state_counts
@@ -197,6 +204,10 @@ export function normalizeMarketBreadth(raw: unknown, micFallback = ''): MarketBr
     ),
     market_state_counts,
     rows: normalizeMarketRows(r.rows ?? r.symbols ?? r.details ?? r.items),
+    turnover_note:
+      typeof r.turnover_note === 'string' && r.turnover_note.trim() !== ''
+        ? r.turnover_note
+        : null,
     provenance: localProvenance(r, `markets-api:${mic}`),
   };
 }
@@ -213,7 +224,9 @@ export function normalizeMarketRows(raw: unknown): MarketSymbolRow[] {
     out.push({
       symbol,
       price: numOrNull(item.price ?? item.last ?? item.close),
-      change_pct: numOrNull(item.change_pct ?? item.changePct ?? item.change),
+      // NOTE: absolute `change` (currency units) must never stand in for
+      // percent change — a $1.75 move would render as +1.75%.
+      change_pct: numOrNull(item.change_pct ?? item.changePct),
       volume: numOrNull(item.volume ?? item.volume_shares ?? item.total_volume),
       turnover: numOrNull(item.turnover ?? item.notional ?? item.total_turnover),
       range_pct: numOrNull(item.range_pct ?? item.rangePct ?? item.day_range_pct),
@@ -237,9 +250,17 @@ export function normalizeMarketsOverview(raw: unknown): MarketsOverview {
           : Array.isArray(r.items)
             ? (r.items as unknown[])
             : [];
-  const markets = listRaw.map((row, i) =>
-    normalizeMarketBreadth(row, MARKET_MICS[i] ?? ''),
-  );
+  const topNote =
+    typeof r.turnover_note === 'string' && r.turnover_note.trim() !== ''
+      ? r.turnover_note
+      : null;
+  const markets = listRaw.map((row, i) => {
+    const parsed = normalizeMarketBreadth(row, MARKET_MICS[i] ?? '');
+    // The no-FX disclaimer rides at the overview top level: stamp it onto
+    // markets that don't carry their own.
+    if (!parsed.turnover_note && topNote) parsed.turnover_note = topNote;
+    return parsed;
+  });
   const provenance = localProvenance(raw, 'markets-api');
   const explicitFallback =
     typeof r.fallback_used === 'boolean' ? (r.fallback_used as boolean) : false;
@@ -283,7 +304,9 @@ export function computeBreadthFromScreener(mic: string, rows: ScreenerRow[]): Ma
   const rowMissing = new Set<string>();
   for (const row of rows) {
     const cp = numOrNull(row.change_pct);
-    if (cp === null) unchanged += 1;
+    // Backend convention: adv/dec/unch cover SCORED symbols only — unscored
+    // rows stay out of the split (total remains the universe size).
+    if (cp === null) { /* unscored — excluded from the split */ }
     else if (cp > 0) advancers += 1;
     else if (cp < 0) decliners += 1;
     else unchanged += 1;
@@ -329,6 +352,7 @@ export function computeBreadthFromScreener(mic: string, rows: ScreenerRow[]): Ma
     turnover: turnoverN > 0 ? turnoverSum : null,
     avg_range_pct: rangeN > 0 ? rangeSum / rangeN : null,
     market_state_counts,
+    turnover_note: null, // client-side fallback: no native-currency disclaimer source
     rows: rows.map((row) => ({
       symbol: row.symbol,
       price: numOrNull(row.price),

@@ -113,7 +113,16 @@ def require_fx_provenance(
     at = now or _utcnow()
     if at.tzinfo is None:
         at = at.replace(tzinfo=timezone.utc)
-    age_hours = max(0.0, (at - norm["as_of"]).total_seconds() / 3600)
+    raw_age_hours = (at - norm["as_of"]).total_seconds() / 3600
+    if raw_age_hours < -5 / 60:
+        # Future-dated rates (beyond clock-skew tolerance): refuse to rank on
+        # them instead of clamping the age to zero and passing the gate.
+        raise FXProvenanceMissing(
+            "FX rates are future-dated: as_of is ahead of wall-clock; "
+            "refresh FX before ranking",
+            provenance={**norm, "age_hours": round(raw_age_hours, 2)},
+        )
+    age_hours = max(0.0, raw_age_hours)
     if age_hours > max_age_hours:
         raise FXProvenanceMissing(
             f"FX rates stale: as_of is {age_hours:.1f}h old "

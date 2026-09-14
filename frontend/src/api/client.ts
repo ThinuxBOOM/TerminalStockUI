@@ -356,12 +356,21 @@ export async function getQuote(
   });
 }
 
-/** Freshness derivation used by FreshnessBadge. */
+/** Freshness derivation used by FreshnessBadge.
+ * Uses the EFFECTIVE age — max(expected feed delay, actual as_of age) — so
+ * days-old data can never badge DELAYED when it is really STALE. */
 export function freshnessOf(p: Provenance): 'live' | 'delayed' | 'stale' | 'cached' {
   if (p.fallback_used) return 'cached';
+  // Negative delay is the unknown-delay sentinel (provenance absent) — stale.
   if (p.delay_minutes < 0) return 'stale';
-  if (p.delay_minutes <= 1) return 'live';
-  if (p.delay_minutes <= 30) return 'delayed';
+  let effective = p.delay_minutes;
+  const asOfMs = Date.parse(p.as_of);
+  if (Number.isFinite(asOfMs)) {
+    const ageMin = (Date.now() - asOfMs) / 60000;
+    if (Number.isFinite(ageMin)) effective = Math.max(effective, ageMin);
+  }
+  if (effective <= 1) return 'live';
+  if (effective <= 30) return 'delayed';
   return 'stale';
 }
 

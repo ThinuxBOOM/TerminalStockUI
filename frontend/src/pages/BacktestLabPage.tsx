@@ -281,6 +281,9 @@ export default function BacktestLabPage() {
                     const keys = Object.keys(run.metrics ?? {});
                     const first = keys.length > 0 ? run.metrics[keys[0]] : undefined;
                     const horizons = run.horizons ?? [];
+                    // Displayed scores come from metrics[keys[0]] only —
+                    // tag the row so multi-horizon runs can't misread.
+                    const scored = keys.length > 0 ? keys[0] : null;
                     return (
                       <tr key={run.run_id ?? `run-${i}`} className="border-t border-term-border">
                         <td className="py-1 pr-2 font-mono text-[11px]">{String(run.run_id ?? '').slice(0, 8) || '—'}</td>
@@ -292,6 +295,9 @@ export default function BacktestLabPage() {
                           {first?.brier === null || first?.brier === undefined
                             ? '—'
                             : Number(first.brier).toFixed(4)}
+                          {scored !== null && (
+                            <span className="ml-1 text-[10px] text-term-muted">·{scored}d</span>
+                          )}
                         </td>
                         <td className="py-1 pr-2">
                           {first?.ece === null || first?.ece === undefined
@@ -315,6 +321,10 @@ export default function BacktestLabPage() {
 function LabResults({ r }: { r: Backtest }) {
   const stale =
     r.provenance?.fallback_used === true || (r.provenance?.delay_minutes ?? 0) > 30;
+  // Scores describe the FIRST requested horizon only (flattened server-side);
+  // label it so multi-horizon runs can't read as all-horizon skill.
+  const scoredHorizon = (r.horizons ?? [])[0];
+  const scoredSuffix = scoredHorizon !== undefined ? ` · ${scoredHorizon}d` : '';
   const reliability = useMemo(() => r.reliability ?? [], [r]);
   const failures = useMemo(() => r.failures ?? [], [r]);
   const visibleBins = useMemo(
@@ -356,7 +366,7 @@ function LabResults({ r }: { r: Backtest }) {
       )}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="term-panel p-4">
-          <p className="term-label">Brier score · {r.symbol}</p>
+          <p className="term-label">Brier score · {r.symbol}{scoredSuffix}</p>
           <p className="mt-1 text-2xl font-bold">
             {r.brier === null || r.brier === undefined ? '—' : r.brier.toFixed(4)}
           </p>
@@ -366,7 +376,7 @@ function LabResults({ r }: { r: Backtest }) {
           </div>
         </div>
         <div className="term-panel p-4">
-          <p className="term-label">ECE (calibration error)</p>
+          <p className="term-label">ECE (calibration error){scoredSuffix}</p>
           <p className="mt-1 text-2xl font-bold">
             {r.ece === null || r.ece === undefined ? '—' : r.ece.toFixed(4)}
           </p>
@@ -391,7 +401,7 @@ function LabResults({ r }: { r: Backtest }) {
       </section>
 
       <section className="term-panel p-4">
-        <CalibrationChart rows={reliability} title="Reliability diagram" />
+          <CalibrationChart rows={reliability} title={`Reliability diagram${scoredSuffix}`} />
         <div className="mt-2 overflow-x-auto">
           {reliability.length > visibleBins.length && (
             <p className="mb-1 text-[11px] text-term-muted" role="status">

@@ -112,10 +112,19 @@ class YFinanceProvider:
             if hist is None or len(hist) == 0:
                 if price is None:
                     raise ProviderError(self.name, f"no data for {symbol}")
+                # History empty but fast_info has a price: keep its currency
+                # (hardcoding USD here once mislabeled Euronext quotes).
+                ccy_only = "USD"
+                try:
+                    ccy_only = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
+                except Exception:
+                    pass
                 return {"symbol": symbol.upper(), "price": float(price),
-                        "currency": "USD", "as_of": _utcnow()}
+                        "currency": ccy_only, "as_of": _utcnow()}
             last = hist.iloc[-1]
-            prev = hist.iloc[-2] if len(hist) > 1 else last
+            # Single-row history has no observable prior close: leave
+            # prev_close missing (never fabricate change=0 "flat day").
+            prev = hist.iloc[-2] if len(hist) > 1 else None
             currency = getattr(ticker, "fast_info", None)
             ccy = "USD"
             try:
@@ -123,14 +132,41 @@ class YFinanceProvider:
             except Exception:
                 pass
             _ = currency
+            def _safe_volume(value: object) -> int | None:
+                # None/inf/str must not kill a live quote (int(None) raises).
+                try:
+                    number = float(value)  # type: ignore[arg-type]
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if number != number or number in (float("inf"), float("-inf")):
+                    return None
+                try:
+                    return int(number)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+
+            def _safe_price(value: object) -> float | None:
+                # OHLC holes must degrade to missing fields, never kill the
+                # whole live quote (float(None) raises TypeError).
+                try:
+                    number = float(value)  # type: ignore[arg-type]
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if number != number or number in (float("inf"), float("-inf")):
+                    return None
+                return number
+
+            close = _safe_price(last["Close"])
+            if close is None:
+                raise ProviderError(self.name, f"no data for {symbol}")
             return {
                 "symbol": symbol.upper(),
-                "price": float(last["Close"]),
-                "open": float(last["Open"]),
-                "high": float(last["High"]),
-                "low": float(last["Low"]),
-                "prev_close": float(prev["Close"]),
-                "volume": int(last["Volume"]) if last["Volume"] == last["Volume"] else None,
+                "price": close,
+                "open": _safe_price(last["Open"]),
+                "high": _safe_price(last["High"]),
+                "low": _safe_price(last["Low"]),
+                "prev_close": _safe_price(prev["Close"]) if prev is not None else None,
+                "volume": _safe_volume(last["Volume"]),
                 "currency": ccy,
                 "as_of": _utcnow(),
             }

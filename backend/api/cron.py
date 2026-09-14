@@ -159,7 +159,9 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
 
     Per-pair failures are reported in ``errors`` (keyed ``"SYM:horizon"``);
     the batch itself never 500s. ``snapshots`` maps the same key to the
-    scored window count; ``calibrated`` is the written-row count.
+    scored window count; ``calibrated`` counts SCORED rows (n_windows > 0)
+    while ``unscored`` counts written rows with zero windows (thin history:
+    honest NULL metrics, not skill).
     """
     from backend.db.session import get_session_factory, init_db
     from backend.forecasting.calibration.snapshots import (
@@ -177,6 +179,7 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
         return {
             "ok": True,
             "calibrated": 0,
+            "unscored": 0,
             "snapshots": {},
             "errors": {},
             "provenance": _cron_provenance(False),
@@ -193,6 +196,7 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
         return {
             "ok": False,
             "calibrated": 0,
+            "unscored": 0,
             "snapshots": {},
             "errors": {raw: "db unavailable" for raw in wanted},
             "provenance": _cron_provenance(True),
@@ -200,6 +204,7 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
     snapshots: dict[str, int] = {}
     errors: dict[str, str] = {}
     calibrated = 0
+    unscored = 0
     try:
         for raw in wanted:
             for horizon in FORECAST_HORIZONS:
@@ -207,8 +212,14 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
                 try:
                     snap = build_snapshot(raw, int(horizon), market_service=market)
                     upsert_snapshot(db, snap)
-                    snapshots[key] = int(snap.get("n_windows") or 0)
-                    calibrated += 1
+                    n_windows = int(snap.get("n_windows") or 0)
+                    snapshots[key] = n_windows
+                    # Zero-window rows are written (honest NULL metrics) but
+                    # must not read as scored skill.
+                    if n_windows > 0:
+                        calibrated += 1
+                    else:
+                        unscored += 1
                 except Exception as exc:
                     try:
                         db.rollback()
@@ -222,11 +233,13 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
         except Exception:
             pass
     logger.info(
-        "calibrate done calibrated=%d errors=%d", calibrated, len(errors)
+        "calibrate done calibrated=%d unscored=%d errors=%d",
+        calibrated, unscored, len(errors),
     )
     return {
         "ok": not errors,
         "calibrated": calibrated,
+        "unscored": unscored,
         "snapshots": snapshots,
         "errors": errors,
         "provenance": _cron_provenance(bool(errors)),

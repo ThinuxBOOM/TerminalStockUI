@@ -16,6 +16,13 @@ router = APIRouter(prefix="/api/market_data", tags=["market_data"])
 securities_router = APIRouter(prefix="/api/securities", tags=["securities"])
 
 
+def _utcnow():  # type: ignore[no-untyped-def]
+    """Wall-clock hook (module-level so tests can pin `now` deterministically)."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    return _dt.now(_tz.utc)
+
+
 def _enrich_market_state(out: dict) -> dict:
     """M6/M7: layer exchange calendar (open/closed) over service freshness.
 
@@ -33,11 +40,14 @@ def _enrich_market_state(out: dict) -> dict:
         as_of_raw = prov.get("as_of") if isinstance(prov, dict) else None
         if not mic or not as_of_raw:
             return out
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, timezone as _tz
         as_of = _dt.fromisoformat(as_of_raw) if isinstance(as_of_raw, str) else as_of_raw
         delay = prov.get("delay_minutes", 15) if isinstance(prov, dict) else 15
+        # Wall-clock now: staleness/calendar at the present moment, never at
+        # the data timestamp (now=as_of would pin age to 0 and badge stale
+        # data MARKET OPEN).
         out["market_state"] = _calendar_market_state(
-            as_of, delay_minutes=int(delay), mic=mic, now=as_of, at=as_of
+            as_of, delay_minutes=int(delay), mic=mic, now=_utcnow()
         )
     except Exception:
         pass

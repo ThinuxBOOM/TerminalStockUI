@@ -39,7 +39,7 @@ MACD_FORMULA = (
 )
 BOLLINGER_FORMULA = (
     "middle = SMA(w); upper/lower = middle +/- k*std(w, ddof=1); "
-    "bandwidth = (upper-lower)/middle; %B = (close-middle)/(upper-lower)"
+    "bandwidth = (upper-lower)/middle; %B = (close-lower)/(upper-lower)"
 )
 ATR_FORMULA = (
     "TR_t = max(high-low, |high-close_{t-1}|, |low-close_{t-1}|); "
@@ -50,7 +50,7 @@ VOLATILITY_FORMULA = (
 )
 VOLUME_ANOMALY_FORMULA = (
     "z_t = (volume_t - mean(volume[t-w+1..t])) / std(volume[t-w+1..t], ddof=1); "
-    "z=0 where std=0; anomaly flag = z_last > threshold"
+    "z=0 where std=0; anomaly flag = |z_last| > threshold"
 )
 
 
@@ -136,7 +136,8 @@ def bollinger(close: Any, window: int = 20, num_std: float = 2.0) -> MetricResul
     width = upper - lower
     with np.errstate(divide="ignore", invalid="ignore"):
         bandwidth = (width / middle).where(middle != 0)
-        percent_b = ((series - middle) / width).where(width != 0)
+        # Standard %B: 0 at the lower band, 0.5 at the middle, 1 at upper.
+        percent_b = ((series - lower) / width).where(width != 0)
     frame = pd.DataFrame(
         {"middle": middle, "upper": upper, "lower": lower,
          "bandwidth": bandwidth, "percent_b": percent_b}

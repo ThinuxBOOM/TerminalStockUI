@@ -112,8 +112,13 @@ function MarketCard({ m }: { m: MarketBreadth }) {
         </div>
         <div className="flex items-center justify-between gap-2">
           <dt className="text-term-muted">Turnover</dt>
-          <dd className="text-term-text">{formatCompact(m.turnover)}</dd>
+          <dd className="text-term-text" title={m.turnover_note ?? undefined}>{formatCompact(m.turnover)}</dd>
         </div>
+        {m.turnover_note && (
+          <p className="text-[10px] text-term-muted" role="note">
+            Turnover sums native price×volume with no FX conversion — cross-currency totals aren&apos;t comparable.
+          </p>
+        )}
         <div className="flex items-center justify-between gap-2">
           <dt className="text-term-muted">Avg range</dt>
           <dd className="text-term-text">{formatPlainPct(m.avg_range_pct)}</dd>

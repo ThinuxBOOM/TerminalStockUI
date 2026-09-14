@@ -77,8 +77,12 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
   const hasAnyCalibration = chartRows.length > 0 || calHistory.length > 0;
   const normalizedSymbol = symbol.trim().toUpperCase();
   const recentBacktest = useMemo(
-    () => getRecentBacktests().find((r) => r.symbol === normalizedSymbol),
-    [normalizedSymbol, forecastQ.dataUpdatedAt],
+    // Match the viewed horizon: a 5d run must not vouch for the 63d tab.
+    () => getRecentBacktests().find(
+      (r) => r.symbol === normalizedSymbol
+        && (r.horizons.length === 0 || r.horizons.includes(horizon)),
+    ),
+    [normalizedSymbol, horizon, forecastQ.dataUpdatedAt],
   );
   const versions = (f?.versions ?? {}) as Record<string, unknown>;
   const inputs = (f?.inputs ?? {}) as Record<string, unknown>;
@@ -303,6 +307,18 @@ export default function ForecastDetails({ symbol }: { symbol: string }) {
             </p>
           </div>
         </div>
+        {latestMeta ? (
+          <p className="mt-1 text-[10px] text-term-muted">
+            Brier/ECE above are from the persisted calibration snapshot
+            {latestMeta.created_at ? ` (${new Date(latestMeta.created_at).toLocaleString()})` : ''}
+            {latestMeta.model_version ? ` · model ${latestMeta.model_version}` : ''} — not
+            computed from the live forecast above.
+          </p>
+        ) : (
+          <p className="mt-1 text-[10px] text-term-muted">
+            No persisted calibration snapshot yet — Brier/ECE unavailable.
+          </p>
+        )}
         <CalibrationChart rows={chartRows} title={`Calibration history · ${f?.horizon_days ?? horizon}d`} />
         {chartRows.length > 0 ? (
           <div className="mt-2 overflow-x-auto">

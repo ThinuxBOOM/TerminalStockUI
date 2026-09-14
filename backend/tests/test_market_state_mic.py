@@ -1,7 +1,9 @@
 """Phase 4c: calendar-aware market_state via MIC in get_quote.
 
-Offline, fixed dates, explicit now/at -- never wall-clock. Stub provider
-as_of is pinned by monkeypatching (stub stamps _utcnow() by default).
+Offline, fixed dates. Staleness and the exchange calendar are evaluated at
+WALL-CLOCK now (never at the data timestamp — now=as_of would pin age to 0
+and badge stale data MARKET OPEN), so tests pin BOTH as_of (stub provider)
+and now (monkeypatched module _utcnow).
 """
 
 from __future__ import annotations
@@ -69,31 +71,48 @@ def _svc_with_fixed_as_of(fixed_as_of: datetime) -> MarketDataService:
     return svc
 
 
-def test_sunday_closed_via_get_quote():
+def test_sunday_closed_via_get_quote(monkeypatch):
     """Sunday 2026-09-13: XNAS/XPAR/XSHG all closed via get_quote."""
+    import backend.market_data.service as service_module
+
     for symbol, sunday in (
         ("AAPL", SUN_XNAS),
         ("MC.PA", SUN_XPAR),
         ("600519.SS", SUN_XSHG),
     ):
+        monkeypatch.setattr(service_module, "_utcnow", lambda sunday=sunday: sunday)
         svc = _svc_with_fixed_as_of(sunday)
         out = svc.get_quote(symbol)
         assert out["market_state"] == "closed", (symbol, out["market_state"])
 
 
-def test_weekday_session_open_preserved_via_get_quote():
-    """Fresh weekday session data still reads open."""
+def test_weekday_session_open_preserved_via_get_quote(monkeypatch):
+    """Fresh weekday session data still reads open (now pinned in-session)."""
+    import backend.market_data.service as service_module
+
     for symbol, at in (
         ("AAPL", WED_XNAS),
         ("MC.PA", TUE_XPAR),
         ("600519.SS", TUE_XSHG_OPEN),
     ):
+        monkeypatch.setattr(service_module, "_utcnow", lambda at=at: at)
         svc = _svc_with_fixed_as_of(at)
         out = svc.get_quote(symbol)
         assert out["market_state"] == "open", (symbol, out["market_state"])
 
 
-def test_xshg_lunch_maps_to_closed():
+def test_stale_data_badges_stale_not_open(monkeypatch):
+    """Old data evaluated at wall-clock now reads stale (never open)."""
+    import backend.market_data.service as service_module
+
+    # WED_XNAS is long past: even mid-session, the badge must say stale.
+    monkeypatch.setattr(service_module, "_utcnow", lambda: TUE_XPAR)
+    svc = _svc_with_fixed_as_of(WED_XNAS)
+    out = svc.get_quote("AAPL")
+    assert out["market_state"] == "stale", out["market_state"]
+
+
+def test_xshg_lunch_maps_to_closed(monkeypatch):
     """XSHG lunch window maps to closed in the health contract."""
     # Calendar layer returns lunch; health/service map it to closed.
     assert market_state_at("XSHG", TUE_XSHG_LUNCH) == "lunch"
@@ -106,6 +125,11 @@ def test_xshg_lunch_maps_to_closed():
             at=TUE_XSHG_LUNCH,
         )
         == "closed"
+    )
+    import backend.market_data.service as service_module
+
+    monkeypatch.setattr(
+        service_module, "_utcnow", lambda: TUE_XSHG_LUNCH
     )
     svc = _svc_with_fixed_as_of(TUE_XSHG_LUNCH)
     out = svc.get_quote("600519.SS")
@@ -147,9 +171,12 @@ def test_stale_wins_over_calendar():
     )
 
 
-def test_unknown_mic_fallback_equals_legacy():
+def test_unknown_mic_fallback_equals_legacy(monkeypatch):
     """Unknown MICs: calendar-aware == legacy freshness-only output."""
+    import backend.market_data.service as service_module
+
     at = TUE_XSHG_OPEN
+    monkeypatch.setattr(service_module, "_utcnow", lambda: at)
     legacy = market_state(at, delay_minutes=15, now=at)
     assert (
         market_state(at, delay_minutes=15, now=at, mic="XXXX", at=at) == legacy
@@ -163,12 +190,14 @@ def test_unknown_mic_fallback_equals_legacy():
 def test_calendar_exception_falls_back_to_freshness(monkeypatch):
     """market_state_at raising -> freshness result, never a break."""
     import backend.market_data.health as health_module
+    import backend.market_data.service as service_module
 
     def _boom(mic: str, dt: datetime, **k):  # type: ignore[no-untyped-def]
         raise RuntimeError("calendar down")
 
     monkeypatch.setattr(health_module, "market_state_at", _boom)
     at = WED_XNAS
+    monkeypatch.setattr(service_module, "_utcnow", lambda: at)
     expected = market_state(at, delay_minutes=15, now=at)
     assert expected == "open"
     svc = _svc_with_fixed_as_of(at)
@@ -176,8 +205,8 @@ def test_calendar_exception_falls_back_to_freshness(monkeypatch):
     assert out["market_state"] == expected
 
 
-def test_service_passes_mic_now_at(monkeypatch):
-    """Wiring: get_quote forwards mic + now/at=as_of to market_state."""
+def test_service_passes_mic_and_wall_clock_now(monkeypatch):
+    """Wiring: get_quote forwards mic + wall-clock now to market_state."""
     import backend.market_data.service as service_module
 
     seen: dict = {}
@@ -189,16 +218,22 @@ def test_service_passes_mic_now_at(monkeypatch):
         return orig(as_of, **k)
 
     monkeypatch.setattr(service_module, "market_state", _spy)
+    pinned_now = TUE_XPAR + timedelta(minutes=5)
+    monkeypatch.setattr(service_module, "_utcnow", lambda: pinned_now)
     svc = _svc_with_fixed_as_of(TUE_XPAR)
     out = svc.get_quote("MC.PA")
     assert out["market_state"] == "open"
     assert seen.get("mic") == "XPAR"
-    assert seen.get("now") == TUE_XPAR
-    assert seen.get("at") == TUE_XPAR
+    # now is wall-clock (pinned), never the data timestamp.
+    assert seen.get("now") == pinned_now
+    assert "at" not in seen
 
 
 def test_enrich_sunday_closed_and_exception_fallback(monkeypatch):
-    """_enrich_market_state: Sunday as_of -> closed; exception -> unchanged."""
+    """_enrich_market_state: Sunday as_of + Sunday now -> closed; exception -> unchanged."""
+    import backend.api.market_data as api_md
+
+    monkeypatch.setattr(api_md, "_utcnow", lambda: SUN_XNAS)
     sunday_iso = SUN_XNAS.isoformat()
     out = {
         "market_state": "open",  # stale service value to be upgraded
@@ -207,8 +242,6 @@ def test_enrich_sunday_closed_and_exception_fallback(monkeypatch):
     }
     enriched = _enrich_market_state(dict(out))
     assert enriched["market_state"] == "closed"
-
-    import backend.api.market_data as api_md
 
     def _boom(as_of: datetime, **k):  # type: ignore[no-untyped-def]
         raise RuntimeError("calendar down")
@@ -220,3 +253,16 @@ def test_enrich_sunday_closed_and_exception_fallback(monkeypatch):
         "provenance": {"as_of": sunday_iso, "delay_minutes": 15},
     }
     assert _enrich_market_state(dict(out2))["market_state"] == "open"
+
+
+def test_enrich_stale_data_badges_stale_not_open(monkeypatch):
+    """Old as_of evaluated at wall-clock now reads stale (never open)."""
+    import backend.api.market_data as api_md
+
+    monkeypatch.setattr(api_md, "_utcnow", lambda: TUE_XPAR)
+    out = {
+        "market_state": "open",
+        "instrument": {"exchange_mic": "XNAS"},
+        "provenance": {"as_of": WED_XNAS.isoformat(), "delay_minutes": 15},
+    }
+    assert _enrich_market_state(dict(out))["market_state"] == "stale"

@@ -229,7 +229,7 @@ class MarketDataService:
                 provider_symbol = yahoo_symbol or provider_symbol
             else:
                 provider_symbol = yahoo_symbol
-        cache_key = f"quote:{provider_symbol}"
+        cache_key = f"quote:{provider_symbol}:{mic}"
         if self.cache is not None:
             try:
                 hit = self.cache.get(cache_key)  # type: ignore[union-attr]
@@ -330,10 +330,22 @@ class MarketDataService:
             expected = expected_delay_minutes(mic)
         except ValueError:
             expected = 15
-        age_min = max(0.0, (_utcnow() - as_of).total_seconds() / 60)
-        fallback = bool(quote.pop("fallback_used", False))
+        raw_age_min = (_utcnow() - as_of).total_seconds() / 60
+        if raw_age_min < -5:
+            # Future-dated data (beyond clock-skew tolerance): never badge as
+            # fresh — surface it as unusable instead of laundering it live.
+            future_dated = True
+            age_min = 0.0
+        else:
+            future_dated = False
+            age_min = max(0.0, raw_age_min)
+        fallback = bool(quote.pop("fallback_used", False)) or future_dated
+        if future_dated:
+            quote["missing_fields"] = sorted(
+                set(quote.get("missing_fields", [])) | {"as_of"}
+            )
         source = quote.pop("source", self.provider.name)
-        if fallback:
+        if fallback and not future_dated:
             # Outage path: prefer the last LIVE quote over a placeholder.
             # Grade/age below are recomputed from the stored as_of, so the
             # badge shows honest staleness instead of a fresh-looking stub.
@@ -341,6 +353,7 @@ class MarketDataService:
             if stored is not None:
                 quote = stored
                 fallback = True
+                source = quote.get("source", source)
                 as_of = quote.get("as_of") or _utcnow()
                 if not isinstance(as_of, datetime):
                     as_of = _utcnow()
@@ -356,6 +369,7 @@ class MarketDataService:
             missing_fields=quote.get("missing_fields", []),
             fallback_used=fallback,
             reconciled=False,  # single source in v1
+            invalid=future_dated,
         )
         snapshot_grade = quote.pop("_snapshot_grade", None) if fallback else None
         if snapshot_grade:
@@ -374,8 +388,11 @@ class MarketDataService:
             missing_fields=quote.get("missing_fields", []),
         )
         try:
+            # Wall-clock `now`: staleness and the exchange calendar must be
+            # evaluated at the present moment, never at the data timestamp
+            # (now=as_of would pin age to 0 and badge stale data MARKET OPEN).
             _market_state = market_state(
-                as_of, delay_minutes=expected, mic=mic, now=as_of, at=as_of
+                as_of, delay_minutes=expected, mic=mic, now=_utcnow()
             )
         except Exception:
             _market_state = market_state(as_of, delay_minutes=expected)
@@ -580,20 +597,32 @@ class MarketDataService:
                     return None
                 return self._safe_num(value)
 
-            return {
-                "symbol": provider_symbol,
-                "price": float(row.price),
+            field_values = {
                 "open": _col("open"),
                 "high": _col("high"),
                 "low": _col("low"),
                 "prev_close": _col("prev_close"),
                 "volume": row.volume if isinstance(row.volume, int) else None,
+            }
+            # Completeness is re-derived from the stored nulls (never claim
+            # a full envelope for a price-only snapshot).
+            missing = sorted(
+                name for name, value in field_values.items() if value is None
+            )
+            return {
+                "symbol": provider_symbol,
+                "price": float(row.price),
+                "open": field_values["open"],
+                "high": field_values["high"],
+                "low": field_values["low"],
+                "prev_close": field_values["prev_close"],
+                "volume": field_values["volume"],
                 "currency": row.currency or "USD",
                 "change": _col("change"),
                 "change_pct": _col("change_pct"),
                 "source": row.source or self.provider.name,
                 "as_of": as_of,
-                "missing_fields": [],
+                "missing_fields": missing,
                 "fallback_used": True,
                 "_snapshot_grade": row.quality_grade or "C",
             }

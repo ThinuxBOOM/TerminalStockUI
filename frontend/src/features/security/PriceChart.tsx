@@ -169,8 +169,9 @@ export default function PriceChart({
         </p>
       ) : (
         <p className="mt-1 text-[10px] text-term-muted">
-          live bars from /api/market_data/bars · {candles.length} bars
-          {provenance?.fallback_used ? ' · server-flagged fallback (see badge)' : ''}
+          {provenance?.fallback_used
+            ? `fallback bars from /api/market_data/bars · ${candles.length} bars (see badge — last close tracks the header quote, history is not market data)`
+            : `live bars from /api/market_data/bars · ${candles.length} bars`}
         </p>
       )}
       {provenance && !showPlaceholder && (

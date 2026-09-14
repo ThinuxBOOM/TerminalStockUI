@@ -224,7 +224,10 @@ def _collect_row(inst, svc: MarketDataService) -> dict:
     }
 
 
-def _aggregate(mic: str, universe_size: int, rows: list[dict]) -> dict:
+def _aggregate(
+    mic: str, universe_size: int, rows: list[dict],
+    turnover_note: str | None = None,
+) -> dict:
     import math as _math
 
     changes = [r["change_pct"] for r in rows if isinstance(r.get("change_pct"), (int, float)) and _math.isfinite(r["change_pct"])]
@@ -272,6 +275,7 @@ def _aggregate(mic: str, universe_size: int, rows: list[dict]) -> dict:
         "total_turnover": total_turnover,
         "avg_range_pct": avg_range,
         "market_state_counts": states,
+        "turnover_note": turnover_note,
         "provenance": _combine_provenance(
             [r["provenance"] for r in rows if isinstance(r.get("provenance"), dict)]
         ),
@@ -327,7 +331,7 @@ def markets_overview(
     all_provenance: list[dict] = []
     for mic in sorted(KNOWN_MARKETS):
         rows, universe_size = _scan_mic(mic, registry, svc, skipped)
-        agg = _aggregate(mic, universe_size, rows)
+        agg = _aggregate(mic, universe_size, rows, _turnover_note(ccy))
         markets.append(agg)
         if isinstance(agg.get("provenance"), dict):
             all_provenance.append(agg["provenance"])
@@ -357,7 +361,7 @@ def market_liquidity(
     ccy = _normalize_target_ccy(target_ccy)
     skipped: list[dict] = []
     rows, universe_size = _scan_mic(norm, registry, svc, skipped)
-    agg = _aggregate(norm, universe_size, rows)
+    agg = _aggregate(norm, universe_size, rows, _turnover_note(ccy))
     wire_rows = [
         {
             "symbol": r["symbol"],

@@ -72,12 +72,15 @@ describe('deriveMarketState (explicit-wins + provenance fallback)', () => {
   });
 
   it('falls back to provenance freshness when explicit is missing/unknown', () => {
-    expect(deriveMarketState(prov({ delay_minutes: 0 }))).toBe('open');
-    expect(deriveMarketState(prov({ delay_minutes: 5 }))).toBe('delayed');
-    expect(deriveMarketState(prov({ delay_minutes: 0, fallback_used: true }))).toBe('delayed');
-    expect(deriveMarketState(prov({ delay_minutes: 120 }))).toBe('stale');
-    expect(deriveMarketState(prov({ delay_minutes: -1 }))).toBe('stale');
-    expect(deriveMarketState(prov({ delay_minutes: 0 }), 'bogus')).toBe('open');
+    const fresh = () => new Date().toISOString();
+    expect(deriveMarketState(prov({ as_of: fresh(), delay_minutes: 0 }))).toBe('open');
+    expect(deriveMarketState(prov({ as_of: fresh(), delay_minutes: 5 }))).toBe('delayed');
+    expect(deriveMarketState(prov({ as_of: fresh(), delay_minutes: 0, fallback_used: true }))).toBe('delayed');
+    expect(deriveMarketState(prov({ as_of: fresh(), delay_minutes: 120 }))).toBe('stale');
+    expect(deriveMarketState(prov({ as_of: fresh(), delay_minutes: -1 }))).toBe('stale');
+    expect(deriveMarketState(prov({ as_of: fresh(), delay_minutes: 0 }), 'bogus')).toBe('open');
+    // Days-old as_of reads stale even when the expected delay is small.
+    expect(deriveMarketState(prov({ delay_minutes: 15 }))).toBe('stale');
   });
 
   it('never synthesizes closed/lunch from provenance alone', () => {
@@ -111,15 +114,23 @@ describe('displaySymbol (provider > exchange > symbol)', () => {
 });
 
 describe('freshnessOf', () => {
+  // Freshness uses the EFFECTIVE age: max(expected delay, actual as_of age).
+  // Cases below pin as_of to now (ms of age can't cross the 1m/30m bands);
+  // the last case pins an 8-month-old as_of to prove old data reads stale.
+  const fresh = () => new Date().toISOString();
   it('maps fallback/delay to live|delayed|stale|cached', () => {
-    expect(freshnessOf(prov({ fallback_used: true, delay_minutes: 0 }))).toBe('cached');
-    expect(freshnessOf(prov({ delay_minutes: -1 }))).toBe('stale');
-    expect(freshnessOf(prov({ delay_minutes: 0 }))).toBe('live');
-    expect(freshnessOf(prov({ delay_minutes: 1 }))).toBe('live');
-    expect(freshnessOf(prov({ delay_minutes: 2 }))).toBe('delayed');
-    expect(freshnessOf(prov({ delay_minutes: 30 }))).toBe('delayed');
-    expect(freshnessOf(prov({ delay_minutes: 31 }))).toBe('stale');
-    expect(freshnessOf(prov({ delay_minutes: 120 }))).toBe('stale');
+    expect(freshnessOf(prov({ as_of: fresh(), fallback_used: true, delay_minutes: 0 }))).toBe('cached');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: -1 }))).toBe('stale');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: 0 }))).toBe('live');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: 1 }))).toBe('live');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: 2 }))).toBe('delayed');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: 30 }))).toBe('delayed');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: 31 }))).toBe('stale');
+    expect(freshnessOf(prov({ as_of: fresh(), delay_minutes: 120 }))).toBe('stale');
+  });
+  it('reads stale for old as_of even when the expected delay is small', () => {
+    expect(freshnessOf(prov({ delay_minutes: 15 }))).toBe('stale');
+    expect(freshnessOf(prov({ delay_minutes: 0 }))).toBe('stale');
   });
 });
 

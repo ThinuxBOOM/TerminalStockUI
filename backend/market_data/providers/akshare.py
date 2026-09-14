@@ -228,7 +228,9 @@ class AKShareProvider:
             raise ProviderError(self.name, f"no data for {code}")
         try:
             last = df.iloc[-1].to_dict()
-            prev = df.iloc[-2].to_dict() if len(df) > 1 else last
+            # Single-row history has no observable prior close: leave
+            # prev_close missing (never fabricate change=0 "flat day").
+            prev = df.iloc[-2].to_dict() if len(df) > 1 else None
         except Exception as exc:
             raise ProviderError(self.name, f"{type(exc).__name__}: {exc}") from exc
         # Hist columns vary by version; try Chinese then English aliases.
@@ -241,7 +243,7 @@ class AKShareProvider:
         price = _coerce_float(_pick(last, "收盘", "close", "最新价"))
         if price is None:
             raise ProviderError(self.name, f"no data for {code}")
-        prev_close = _coerce_float(_pick(prev, "收盘", "close", "昨收"))
+        prev_close = _coerce_float(_pick(prev, "收盘", "close", "昨收")) if prev else None
         return {
             "symbol": to_yahoo_symbol(code),
             "price": price,

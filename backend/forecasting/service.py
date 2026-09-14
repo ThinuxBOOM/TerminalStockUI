@@ -43,8 +43,13 @@ from backend.forecasting.features.euronext import (
     EUX_FEATURE_VERSION,
 )
 from backend.forecasting.models.historical_drift import HistoricalDriftBaseline
+from backend.forecasting.models.historical_drift import (
+    MODEL_VERSION as HISTORICAL_DRIFT_VERSION,
+)
 from backend.forecasting.models.logistic import LogisticDirectionModel
+from backend.forecasting.models.logistic import MODEL_VERSION as LOGISTIC_VERSION
 from backend.forecasting.models.momentum import MomentumBaseline
+from backend.forecasting.models.momentum import MODEL_VERSION as MOMENTUM_VERSION
 from backend.forecasting.models.quantile_bands import (
     drawdown_probability,
     return_quantiles,
@@ -58,7 +63,7 @@ from backend.forecasting.models.euronext_drift import (
     MODEL_VERSION as EUX_DRIFT_VERSION,
     EuxDriftBaseline,
 )
-from backend.forecasting.registry import ENSEMBLE_MEMBERS, ENSEMBLE_VERSION
+from backend.forecasting.registry import ENSEMBLE_VERSION
 from backend.market_data.service import MarketDataService
 
 DISCLOSURE = "Not investment advice"
@@ -76,6 +81,16 @@ VOLATILITY_PENALTY_REGIMES = frozenset({"high", "elevated", "extreme"})
 FULL_ENSEMBLE_MIN_MODELS = 3
 SSE_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{SSE_DRIFT_VERSION}"
 EUX_BLEND_VERSION = f"{ENSEMBLE_VERSION}+{EUX_DRIFT_VERSION}"
+#: Ensemble member key (probas dict) -> stamped model version. Used to derive
+#: model_members/evidence_ids from the members that actually ran (a failed
+#: logistic fit must not be listed as evidence).
+MEMBER_VERSIONS = {
+    "historical-drift": HISTORICAL_DRIFT_VERSION,
+    "momentum": MOMENTUM_VERSION,
+    "logistic-direction": LOGISTIC_VERSION,
+    "sse-drift": SSE_DRIFT_VERSION,
+    "eux-drift": EUX_DRIFT_VERSION,
+}
 #: Bound on the in-memory record mirror (prevents unbounded growth on
 #: long-lived processes; oldest rows are dropped, newest preserved).
 MAX_RECORDS = 500
@@ -186,14 +201,63 @@ def _confidence(
     return level
 
 
-def _target_date(as_of_iso: str, horizon_days: int) -> str:
+def _target_mic(symbol: str, bars: dict, sse: bool, eux: bool) -> str:
+    """Exchange MIC for trading-day arithmetic (suffix/instrument-derived)."""
+    if sse:
+        return "XSHG"
+    sym = (symbol or "").strip().upper()
+    for suffix, mic in ((".PA", "XPAR"), (".AS", "XAMS"), (".BR", "XBRU")):
+        if sym.endswith(suffix):
+            return mic
+    try:
+        inst = str((bars or {}).get("instrument_id") or "").upper()
+    except Exception:
+        inst = ""
+    for mic in ("XPAR", "XAMS", "XBRU", "XNYS", "XSHG"):
+        if inst.startswith(mic + "-"):
+            return mic
+    return "XNAS"
+
+
+def _target_date(as_of_iso: str, horizon_days: int, mic: str = "XNAS") -> str:
+    """Advance ``horizon_days`` TRADING days (horizons are trading days).
+
+    Counts sessions via the exchange calendar (weekends/holidays skipped);
+    falls back to calendar days only when the calendar is unavailable.
+    """
     try:
         base = datetime.fromisoformat(str(as_of_iso).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         base = datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
-    return (base + timedelta(days=int(horizon_days))).date().isoformat()
+    try:
+        horizon = int(horizon_days)
+    except (TypeError, ValueError):
+        horizon = 0
+    if horizon <= 0:
+        return base.date().isoformat()
+    try:
+        from backend.instruments.calendars import _lib_is_session
+
+        day = base.date()
+        counted, guard = 0, 0
+        while counted < horizon and guard < horizon * 4 + 30:
+            guard += 1
+            day += timedelta(days=1)
+            session = _lib_is_session(day, mic)
+            if session is None:
+                # Calendar unavailable (e.g. XSHG stub decision): weekdays
+                # approximate sessions; still closer than calendar days.
+                if day.weekday() < 5:
+                    counted += 1
+            elif session:
+                counted += 1
+        if counted >= horizon:
+            return day.isoformat()
+    except Exception:
+        pass
+    return (base + timedelta(days=horizon)).date().isoformat()
 
 
 def _data_version(provenance: dict) -> str:
@@ -380,7 +444,6 @@ class ForecastService:
             )
             model_version = SSE_BLEND_VERSION
             feature_version = SSE_FEATURE_VERSION
-            model_members = list(ENSEMBLE_MEMBERS) + [SSE_DRIFT_VERSION]
         elif eux:
             # -- Euronext path: blend US ensemble 50/50 with eux drift --
             # eux-drift sees the same trailing log-returns (winsorized
@@ -422,7 +485,6 @@ class ForecastService:
             )
             model_version = EUX_BLEND_VERSION
             feature_version = EUX_FEATURE_VERSION
-            model_members = list(ENSEMBLE_MEMBERS) + [EUX_DRIFT_VERSION]
         else:
             direction = us_direction
             spread = us_spread
@@ -436,7 +498,6 @@ class ForecastService:
             )
             model_version = ENSEMBLE_VERSION
             feature_version = FEATURE_VERSION
-            model_members = list(ENSEMBLE_MEMBERS)
 
         # -- JSON safety: non-finite floats are invalid JSON (NaN/inf) ----
         # Finite inputs pass through bit-identical; only pathological model
@@ -455,9 +516,18 @@ class ForecastService:
             # Reachable only on pathological model output; direction already
             # validated finite above, so this never changes valid ensembles.
             probas[_name] = _clean_member
+        # Evidence = members that actually ran (a failed/skipped fit is never
+        # listed: its version would otherwise render as contributing evidence).
+        model_members = [
+            MEMBER_VERSIONS[name]
+            for name in sorted(probas)
+            if probas[name] is not None and name in MEMBER_VERSIONS
+        ]
 
         instrument_id = bars.get("instrument_id") or f"stub-{symbol.strip().upper()}"
-        target_date = _target_date(stamp, horizon)
+        target_date = _target_date(
+            stamp, horizon, _target_mic(symbol, bars, sse, eux)
+        )
         record = {
             "forecast_id": _deterministic_id(symbol, horizon, stamp, data_version),
             "instrument_id": instrument_id,
