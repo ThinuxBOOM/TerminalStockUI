@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import useWatchlist from "../hooks/useWatchlist";
 import { TARGET_CURRENCIES, getQuote, isFreshFxProvenance, normalizeTargetCcy, rankCrossMarket } from "../api/client";
 import CurrencyValue from "../components/CurrencyValue";
@@ -31,19 +31,25 @@ function WatchlistPage() {
   const [draft, setDraft] = useState("");
   const [targetCcy, setTargetCcy] = useState("USD");
   // Sorted key: reordering the watchlist must not bust the query cache.
-  const symbolsKey = [...symbols].sort().join(",");
+  // Use the SAME sorted array in queryFn so rows[i] always aligns.
+  const sortedSymbols = useMemo(() => [...symbols].sort(), [symbols]);
+  const symbolsKey = sortedSymbols.join(",");
   const quotesQuery = useQuery({
     queryKey: ["watchlist", "quotes", symbolsKey],
-    queryFn: ({ signal }) => fetchNativeQuotes(symbols, signal),
-    enabled: symbols.length > 0,
+    queryFn: ({ signal }) => fetchNativeQuotes(sortedSymbols, signal),
+    enabled: sortedSymbols.length > 0,
     staleTime: 3e4,
+    gcTime: 3e5,
+    placeholderData: keepPreviousData,
     retry: false
   });
   const rankQuery = useQuery({
     queryKey: ["watchlist", "rank", symbolsKey, targetCcy],
-    queryFn: ({ signal }) => rankCrossMarket(symbols, targetCcy, { signal }),
-    enabled: symbols.length > 0,
+    queryFn: ({ signal }) => rankCrossMarket(sortedSymbols, targetCcy, { signal }),
+    enabled: sortedSymbols.length > 0,
     staleTime: 3e4,
+    gcTime: 3e5,
+    placeholderData: keepPreviousData,
     retry: false
   });
   const fxProvenance = rankQuery.data?.fx_provenance ?? null;
@@ -76,12 +82,8 @@ function WatchlistPage() {
     add(sym, "manual");
     setDraft("");
   }
-  function removeSymbol(sym) {
-    remove(sym);
-  }
-  function clearWatchlist() {
-    clear();
-  }
+  const removeSymbol = useCallback((sym) => remove(sym), [remove]);
+  const clearWatchlist = useCallback(() => clear(), [clear]);
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "mb-3 text-sm tracking-widest text-term-muted" }, "WATCHLIST \xB7 CROSS-MARKET (FX-GATED)"), /* @__PURE__ */ React.createElement("div", { className: "mb-3 flex flex-wrap items-center gap-2" }, /* @__PURE__ */ React.createElement("label", { htmlFor: "target-ccy", className: "text-xs text-term-muted" }, "Target currency"), /* @__PURE__ */ React.createElement(
     "select",
     {

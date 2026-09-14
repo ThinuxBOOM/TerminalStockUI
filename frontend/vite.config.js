@@ -6,6 +6,13 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: 'dist',
+    target: 'es2020',
+    cssCodeSplit: true,
+    sourcemap: false,
+    assetsInlineLimit: 4096,
+    chunkSizeWarningLimit: 600,
+    reportCompressedSize: false,
+    cssMinify: true,
     rollupOptions: {
       output: {
         // Split slow-moving vendor code out of the app bundle so repeat

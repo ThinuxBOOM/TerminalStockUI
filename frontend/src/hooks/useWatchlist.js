@@ -3,8 +3,16 @@ const WATCHLIST_KEY = "onemarket.watchlist.v1";
 const WATCHLIST_SOURCES_KEY = "onemarket.watchlist.sources.v1";
 const DEFAULT_WATCHLIST = ["AAPL", "MSFT", "600519.SS", "ASML.AS"];
 const MAX_SYMBOLS = 30;
+const SYMBOL_RE = /^[A-Z0-9][A-Z0-9.\-:]{0,31}$/;
 function normalizeSymbol(v) {
-  return String(v ?? "").trim().toUpperCase().replace(/\s+/g, "");
+  const upper = String(v ?? "").trim().toUpperCase().replace(/\s+/g, "");
+  if (!upper) return "";
+  // Allowlist the ticker alphabet (mirrors backend/security/validation.py):
+  // strip anything outside [A-Z0-9.\-:] so localStorage content can never
+  // smuggle markup/script into rendered output, then enforce shape.
+  const clean = upper.replace(/[^A-Z0-9.\-:]/g, "").slice(0, 32);
+  if (!clean || !SYMBOL_RE.test(clean) || clean.includes("..")) return "";
+  return clean;
 }
 function dedupeCaseInsensitive(symbols) {
   const seen = /* @__PURE__ */ new Set();
@@ -72,6 +80,7 @@ function getWatchlistSources() {
 }
 function useWatchlist() {
   const [symbols, setSymbols] = useState(loadWatchlist);
+  const [lastRemoved, setLastRemoved] = useState(null);
   useEffect(() => {
     try {
       if (typeof localStorage !== "undefined") {
@@ -118,11 +127,30 @@ function useWatchlist() {
   const remove = useCallback((symbol) => {
     const key = normalizeSymbol(symbol).toUpperCase();
     if (!key) return;
-    setSymbols((prev) => prev.filter((s) => s.toUpperCase() !== key));
+    setSymbols((prev) => {
+      const found = prev.find((s) => s.toUpperCase() === key);
+      if (found) setLastRemoved(found);
+      return prev.filter((s) => s.toUpperCase() !== key);
+    });
   }, []);
   const clear = useCallback(() => {
     setSymbols([]);
   }, []);
-  return { symbols, add, remove, clear };
+  const undoRemove = useCallback(() => {
+    if (!lastRemoved) return;
+    const sym = lastRemoved;
+    setLastRemoved(null);
+    setSymbols((prev) => {
+      if (prev.map((s) => s.toUpperCase()).includes(sym.toUpperCase())) return prev;
+      return [...prev, sym].slice(0, MAX_SYMBOLS);
+    });
+  }, [lastRemoved]);
+  const exportJSON = useCallback(() => symbols, [symbols]);
+  const importJSON = useCallback((arr) => {
+    if (!Array.isArray(arr)) return;
+    const clean = dedupeCaseInsensitive(arr.map((s) => String(s ?? "")));
+    if (clean.length > 0) setSymbols(clean);
+  }, []);
+  return { symbols, add, remove, clear, lastRemoved, undoRemove, exportJSON, importJSON };
 }
 export { WATCHLIST_KEY, WATCHLIST_SOURCES_KEY, useWatchlist as default, getWatchlistSources };

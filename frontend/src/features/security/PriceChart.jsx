@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef } from "react";
-import { createChart, ColorType } from "lightweight-charts";
+import React, { memo, useEffect, useMemo, useRef } from "react";
+import { createChart } from "lightweight-charts";
 import ProvenanceBadge from "../../components/ProvenanceBadge";
 import FreshnessBadge from "../../components/FreshnessBadge";
 import Skeleton from "../../components/Skeleton";
@@ -30,16 +30,17 @@ function PriceChart({
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const roRef = useRef(null);
+  const resizeT = useRef(null);
   const sanitized = useMemo(() => (data ?? []).filter(isValidCandle), [data]);
-  const live = sanitized.length > 0 ? sanitized : null;
-  const candles = live ?? [];
+  const candles = useMemo(() => sanitized, [sanitized]);
+  const live = candles.length > 0 ? candles : null;
   // Lazily create the chart when its container attaches (works across the
   // loading -> live branch switch). Destroyed once on unmount — never
   // recreated per data change.
   const setContainerRef = (node) => {
     if (!node || chartRef.current) return;
     const chart = createChart(node, {
-      layout: { background: { type: ColorType.Solid, color: "#0f141d" }, textColor: "#8b94a7" },
+      layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
       grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
       height: 300
     });
@@ -53,12 +54,16 @@ function PriceChart({
     chartRef.current = chart;
     seriesRef.current = series;
     const ro = new ResizeObserver(() => {
-      chart.applyOptions({ width: node.clientWidth });
+      if (resizeT.current) clearTimeout(resizeT.current);
+      resizeT.current = setTimeout(() => {
+        if (chartRef.current) chartRef.current.applyOptions({ width: node.clientWidth });
+      }, 120);
     });
     ro.observe(node);
     roRef.current = ro;
   };
   useEffect(() => () => {
+    if (resizeT.current) { clearTimeout(resizeT.current); resizeT.current = null; }
     if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
     if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; seriesRef.current = null; }
   }, []);
@@ -81,10 +86,11 @@ function PriceChart({
     "div",
     {
       ref: setContainerRef,
-      className: "w-full",
+      className: "w-full min-h-[300px]",
       role: "img",
       "aria-label": `price chart for ${symbol}, ${candles.length} bars`
     }
   ), /* @__PURE__ */ React.createElement("p", { className: "mt-1 text-[10px] text-term-muted" }, provenance?.fallback_used ? `fallback bars from /api/market_data/bars \xB7 ${candles.length} bars (see badge \u2014 last close tracks the header quote, history is not market data)` : `live bars from /api/market_data/bars \xB7 ${candles.length} bars`), provenance && /* @__PURE__ */ React.createElement("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ React.createElement(FreshnessBadge, { p: provenance })));
 }
-export { PriceChart as default };
+const MemoPriceChart = memo(PriceChart);
+export { MemoPriceChart as default, PriceChart };
