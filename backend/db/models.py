@@ -225,3 +225,43 @@ class AlertEvent(Base):
 
 Index("ix_alerts_symbol_active", Alert.symbol, Alert.is_active)
 Index("ix_alert_events_alert", AlertEvent.alert_id, AlertEvent.created_at.desc())
+
+
+# --- Last-fetched market data (APPENDED at end-of-file by design) --------------
+# Parallel agents append other models to this same file: do not move this block
+# above existing models and do not edit any line above it. Mirrors
+# infra/migrations/0005_quote_snapshots.sql (Postgres NUMERIC/BIGINT map to
+# portable Numeric/BigInteger here so SQLite tests stay green).
+class QuoteSnapshot(Base):
+    """Last LIVE quote per provider symbol (last-fetched fallback store).
+
+    One row per canonical provider symbol (e.g. ``AAPL``, ``600519.SS``):
+    every live (non-fallback) ``get_quote`` upserts it, so a later provider
+    outage serves the last real market data instead of a deterministic
+    placeholder. Stub/fallback quotes are NEVER persisted (that would poison
+    the well). ``instrument_id`` is lineage-only and nullable so symbols
+    outside the registry still get coverage.
+    """
+
+    __tablename__ = "quote_snapshots"
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"), nullable=True)
+    exchange_mic: Mapped[str | None] = mapped_column(String(8))
+    price: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    open: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    high: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    low: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    prev_close: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    volume: Mapped[int | None] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    change: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    change_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="yfinance")
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    quality_grade: Mapped[str] = mapped_column(String(1), nullable=False, default="C")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_quote_snapshots_updated", QuoteSnapshot.updated_at.desc())

@@ -73,6 +73,69 @@ def _quote_is_live(quote: dict | None) -> bool:
     )
 
 
+_GRADE_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4, "U": 5}
+
+
+def _worse_grade(first: str | None, second: str | None) -> str:
+    """Worse of two quality grades (unknown grades lose)."""
+    order = _GRADE_ORDER.get((first or "U").upper(), 5)
+    other = _GRADE_ORDER.get((second or "U").upper(), 5)
+    for grade, rank in _GRADE_ORDER.items():
+        if rank == max(order, other):
+            return grade
+    return "U"
+
+
+def _provisional_instrument(symbol_text: str):
+    """Minimal registry-style instrument for symbols outside the seed list.
+
+    Lets on-demand backfill persist bars for real symbols the curated
+    registry never seeded (e.g. GOOGL): bare tickers default to XNAS (same
+    default as quotes), suffixed symbols take their market from the suffix.
+    Currency follows the market (XSHG->CNY, Euronext->EUR, else USD).
+    Never raises; returns None when the text is unusable.
+    """
+    try:
+        from backend.instruments.calendars import (
+            provider_symbol_for,
+            split_provider_symbol,
+        )
+        from backend.instruments.models import Instrument as RegistryInstrument
+    except Exception:
+        return None
+    try:
+        upper = str(symbol_text or "").strip().upper()
+    except Exception:
+        return None
+    if not upper:
+        return None
+    try:
+        base, mic_hint = split_provider_symbol(symbol_text)
+    except Exception:
+        base, mic_hint = upper, None
+    if mic_hint:
+        mic, exch = mic_hint, (base or upper)
+    else:
+        mic, exch = "XNAS", upper
+    currency = {"XSHG": "CNY", "XPAR": "EUR", "XAMS": "EUR", "XBRU": "EUR"}.get(mic, "USD")
+    try:
+        provider_symbol = provider_symbol_for(exch, mic) or upper
+    except Exception:
+        provider_symbol = upper
+    try:
+        return RegistryInstrument(
+            instrument_id=f"{mic}-{exch}",
+            exchange_mic=mic,
+            exchange_symbol=exch,
+            provider_symbol=provider_symbol,
+            company_name=exch,
+            currency=currency,
+            trading_calendar=mic,
+        )
+    except Exception:
+        return None
+
+
 class MarketDataService:
     def __init__(
         self,
@@ -226,7 +289,28 @@ class MarketDataService:
             # Canonical SSE symbol for the response envelope.
             quote["symbol"] = yahoo_symbol
         else:
-            quote = self.provider.get_quote(provider_symbol)
+            try:
+                quote = self.provider.get_quote(provider_symbol)
+            except Exception as exc:
+                from .providers.base import ProviderError as _PE
+
+                if isinstance(exc, _PE) and "empty symbol" in str(exc).lower():
+                    raise
+                # Unexpected provider failure (the stock provider normally
+                # degrades to a stub instead of raising): fall through to the
+                # snapshot/stub outage path below. Never raises.
+                quote = None
+            if quote is None:
+                quote = self._read_quote_snapshot(provider_symbol) or {
+                    "symbol": provider_symbol,
+                    "price": 100.0,
+                    "currency": "USD",
+                    "as_of": _utcnow(),
+                    "source": self.provider.name,
+                    "missing_fields": ["open", "high", "low", "prev_close", "volume"],
+                    "delay_minutes": 15,
+                    "fallback_used": True,
+                }
         as_of = quote.get("as_of") or _utcnow()
         if not isinstance(as_of, datetime):
             as_of = _utcnow()
@@ -248,6 +332,24 @@ class MarketDataService:
             expected = 15
         age_min = max(0.0, (_utcnow() - as_of).total_seconds() / 60)
         fallback = bool(quote.pop("fallback_used", False))
+        source = quote.pop("source", self.provider.name)
+        if fallback:
+            # Outage path: prefer the last LIVE quote over a placeholder.
+            # Grade/age below are recomputed from the stored as_of, so the
+            # badge shows honest staleness instead of a fresh-looking stub.
+            stored = self._read_quote_snapshot(provider_symbol)
+            if stored is not None:
+                quote = stored
+                fallback = True
+                as_of = quote.get("as_of") or _utcnow()
+                if not isinstance(as_of, datetime):
+                    as_of = _utcnow()
+                elif as_of.tzinfo is None:
+                    as_of = as_of.replace(tzinfo=timezone.utc)
+                age_min = max(0.0, (_utcnow() - as_of).total_seconds() / 60)
+        # NOTE: live-quote write-through happens below (after grading) so the
+        # snapshot stores the true live grade. Stub/fallback data is never
+        # persisted (it would poison the well).
         grade, _reasons = grade_quality(
             delay_minutes=expected,
             age_minutes=age_min,
@@ -255,8 +357,16 @@ class MarketDataService:
             fallback_used=fallback,
             reconciled=False,  # single source in v1
         )
+        snapshot_grade = quote.pop("_snapshot_grade", None) if fallback else None
+        if snapshot_grade:
+            # Never grade stored data better than it was at fetch time.
+            grade = _worse_grade(snapshot_grade, grade)
+        if not fallback:
+            self._persist_quote_snapshot(
+                provider_symbol, instrument, mic, quote, source, as_of, grade,
+            )
         provenance = build_provenance(
-            quote.pop("source", self.provider.name),
+            source,
             as_of=as_of,
             delay_minutes=expected,
             quality_grade=grade,
@@ -310,14 +420,24 @@ class MarketDataService:
         unreachable DB falls back to the deterministic stub below, so
         offline/test environments never break.
 
-        The stub is anchored to the current quote (best-effort) so its last
-        close matches the header price — an unanchored random base would
-        render a chart on a completely different scale than the quote.
+        Before the stub, an on-demand live fetch is attempted (``1d`` only):
+        the first chart view of a never-ingested symbol persists real bars,
+        so later views are DB-served real data. The stub is anchored to the
+        current quote (best-effort) so its last close matches the header
+        price — an unanchored random base would render a chart on a
+        completely different scale than the quote.
         """
         try:
             db_out = self._get_bars_from_db(symbol, timeframe, limit)
             if db_out is not None:
                 return db_out
+        except Exception:
+            pass
+        try:
+            if self._fetch_and_store_bars(symbol, timeframe):
+                db_out = self._get_bars_from_db(symbol, timeframe, limit)
+                if db_out is not None:
+                    return db_out
         except Exception:
             pass
         return self._stub_bars(symbol, timeframe, limit, anchor=self._quote_anchor(symbol))
@@ -343,11 +463,251 @@ class MarketDataService:
             return None
         return price
 
+    # -- last-fetched persistence (write-through quotes, snapshot fallback) --
+    @staticmethod
+    def _safe_num(value) -> float | None:
+        try:
+            number = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return number
+
+    def _persist_quote_snapshot(
+        self,
+        provider_symbol: str,
+        instrument,
+        mic: str,
+        quote: dict,
+        source: str,
+        as_of,
+        grade: str,
+    ) -> None:
+        """Upsert the last LIVE quote. Best-effort: never raises.
+
+        Only live quotes reach here (callers never persist fallback/stub
+        data). First write on a fresh DB creates tables once, then retries.
+        """
+        try:
+            from backend.db.models import QuoteSnapshot
+            from backend.db.session import get_session_factory, init_db
+        except Exception:
+            return
+        price = self._safe_num(quote.get("price"))
+        if not price or price <= 0:
+            return
+        try:
+            kwargs = {
+                "symbol": provider_symbol,
+                "instrument_id": getattr(instrument, "instrument_id", None),
+                "exchange_mic": mic,
+                "price": price,
+                "open": self._safe_num(quote.get("open")),
+                "high": self._safe_num(quote.get("high")),
+                "low": self._safe_num(quote.get("low")),
+                "prev_close": self._safe_num(quote.get("prev_close")),
+                "volume": quote.get("volume")
+                if isinstance(quote.get("volume"), int) else None,
+                "currency": (quote.get("currency") or "USD"),
+                "change": self._safe_num(quote.get("change")),
+                "change_pct": self._safe_num(quote.get("change_pct")),
+                "source": source or self.provider.name,
+                "as_of": as_of,
+                "quality_grade": (grade or "C"),
+                "updated_at": _utcnow(),
+            }
+        except Exception:
+            return
+        for attempt in range(2):
+            try:
+                if attempt:
+                    init_db()
+                Session = get_session_factory()
+                db = Session()
+                try:
+                    db.merge(QuoteSnapshot(**kwargs))
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    if not attempt:
+                        continue
+                    return
+                finally:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+                return
+            except Exception:
+                if not attempt:
+                    continue
+                return
+
+    def _read_quote_snapshot(self, provider_symbol: str) -> dict | None:
+        """Last live quote as a provider-shaped dict, or None. Never raises."""
+        try:
+            from backend.db.models import QuoteSnapshot
+            from backend.db.session import get_session_factory
+        except Exception:
+            return None
+        try:
+            db = get_session_factory()()
+        except Exception:
+            return None
+        try:
+            row = (
+                db.query(QuoteSnapshot)
+                .filter(QuoteSnapshot.symbol == provider_symbol)
+                .first()
+            )
+            if row is None or row.price is None:
+                return None
+            as_of = row.as_of
+            if isinstance(as_of, datetime):
+                if as_of.tzinfo is None:
+                    as_of = as_of.replace(tzinfo=timezone.utc)
+            else:
+                as_of = _utcnow()
+
+            def _col(name: str):
+                try:
+                    value = getattr(row, name)
+                except Exception:
+                    return None
+                return self._safe_num(value)
+
+            return {
+                "symbol": provider_symbol,
+                "price": float(row.price),
+                "open": _col("open"),
+                "high": _col("high"),
+                "low": _col("low"),
+                "prev_close": _col("prev_close"),
+                "volume": row.volume if isinstance(row.volume, int) else None,
+                "currency": row.currency or "USD",
+                "change": _col("change"),
+                "change_pct": _col("change_pct"),
+                "source": row.source or self.provider.name,
+                "as_of": as_of,
+                "missing_fields": [],
+                "fallback_used": True,
+                "_snapshot_grade": row.quality_grade or "C",
+            }
+        except Exception:
+            return None
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    def _remember_fetch_miss(self, miss_key: str) -> None:
+        """Negative-cache a failed on-demand bars fetch (300s). Never raises."""
+        if self.cache is None:
+            return
+        try:
+            self.cache.set(miss_key, "miss", ttl_s=300)  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+    def _fetch_and_store_bars(self, symbol: str, timeframe: str = "1d") -> bool:
+        """Fetch live daily bars and upsert them. True when DB likely serves now.
+
+        On-demand backfill for symbols the cron universe never ingested: the
+        first chart view persists real bars, later views are DB-served.
+        Only ``1d`` is fetched (storing daily bars under another timeframe
+        would be dishonest). Misses are negatively cached (300s) so an
+        unfetchable symbol does not pay a network timeout on every view.
+        Never raises.
+        """
+        if (timeframe or "1d") != "1d":
+            return False
+        try:
+            symbol_text = str(symbol or "").strip()
+        except Exception:
+            return False
+        if not symbol_text:
+            return False
+        try:
+            instrument, _, _ = self.registry.resolve(symbol_text)
+        except Exception:
+            return False
+        if instrument is None:
+            # Real symbol outside the curated seed list (e.g. GOOGL):
+            # provision a minimal instrument so its bars can persist.
+            # Junk input still fails at fetch below (miss marker, no row).
+            instrument = _provisional_instrument(symbol_text)
+            if instrument is None:
+                return False
+        provider_symbol = instrument.provider_symbol or symbol_text.upper()
+        try:
+            if _is_sse_request(instrument.exchange_mic, provider_symbol, None):
+                provider_symbol = _to_yahoo_sse_symbol(provider_symbol)
+        except Exception:
+            pass
+        miss_key = f"barsfetch:{provider_symbol}"
+        if self.cache is not None:
+            try:
+                if self.cache.get(miss_key):  # type: ignore[union-attr]
+                    return False
+            except Exception:
+                pass
+        try:
+            from backend.db.session import get_session_factory, init_db
+            from backend.market_data.ingest import (
+                _get_or_create_db_instrument,
+                _upsert_bars,
+                fetch_daily_bars,
+            )
+        except Exception:
+            return False
+        try:
+            bars = fetch_daily_bars(provider_symbol)
+        except Exception:
+            self._remember_fetch_miss(miss_key)
+            return False
+        if not bars:
+            self._remember_fetch_miss(miss_key)
+            return False
+        try:
+            init_db()
+            Session = get_session_factory()
+            db = Session()
+            try:
+                db_inst = _get_or_create_db_instrument(db, instrument)
+                _upsert_bars(db, db_inst, bars, timeframe="1d")
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                self._remember_fetch_miss(miss_key)
+                return False
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        except Exception:
+            self._remember_fetch_miss(miss_key)
+            return False
+        if self.cache is not None:
+            try:
+                self.cache.delete(miss_key)  # type: ignore[union-attr]
+            except Exception:
+                pass
+        return True
+
     def _get_bars_from_db(
         self, symbol: str, timeframe: str = "1d", limit: int = 30
     ) -> dict | None:
         """Read bars from price_bars; None when the DB path must not serve."""
-        from backend.db.models import Instrument as DBInstrument, PriceBar
+        from backend.db.models import Instrument as DBInstrument
         from backend.db.session import get_session_factory
 
         try:
@@ -355,8 +715,6 @@ class MarketDataService:
         except Exception:
             return None
         instrument, _, _ = self.registry.resolve(symbol_text)
-        if instrument is None:
-            return None
         try:
             n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
         except (TypeError, ValueError):
@@ -364,92 +722,132 @@ class MarketDataService:
         Session = get_session_factory()  # lazy per call; cached engine
         db = Session()
         try:
-            db_inst = (
-                db.query(DBInstrument)
-                .filter(
-                    DBInstrument.exchange_mic == instrument.exchange_mic,
-                    DBInstrument.exchange_symbol == instrument.exchange_symbol,
+            if instrument is not None:
+                db_inst = (
+                    db.query(DBInstrument)
+                    .filter(
+                        DBInstrument.exchange_mic == instrument.exchange_mic,
+                        DBInstrument.exchange_symbol == instrument.exchange_symbol,
+                    )
+                    .first()
                 )
-                .first()
-            )
+                response_symbol = instrument.provider_symbol
+                response_inst_id = instrument.instrument_id
+            else:
+                # Auto-provisioned symbols (first seen via on-demand
+                # backfill): locate by provider symbol directly.
+                upper = symbol_text.upper()
+                db_inst = (
+                    db.query(DBInstrument)
+                    .filter(DBInstrument.provider_symbol == upper)
+                    .first()
+                )
+                if db_inst is None:
+                    db_inst = (
+                        db.query(DBInstrument)
+                        .filter(DBInstrument.exchange_symbol == upper)
+                        .first()
+                    )
+                response_symbol = (
+                    db_inst.provider_symbol if db_inst is not None
+                    else symbol_text.upper()
+                )
+                response_inst_id = (
+                    str(db_inst.instrument_id) if db_inst is not None else None
+                )
             if db_inst is None:
                 return None
-            desc = (
-                db.query(PriceBar)
-                .filter(
-                    PriceBar.instrument_id == db_inst.instrument_id,
-                    PriceBar.timeframe == timeframe,
-                )
-                .order_by(PriceBar.ts.desc())
-                .limit(n)
-                .all()
+            return self._bars_response_from_db(
+                db, db_inst,
+                response_symbol=response_symbol,
+                response_inst_id=response_inst_id,
+                timeframe=timeframe, limit_n=n,
             )
-            if len(desc) < min(n, 100):
-                return None
-            rows = list(reversed(desc))
-            bars: list[dict] = []
-            sources: list[str] = []
-            latest_as_of = None
-            for row in rows:
-                ts = row.ts
-                if isinstance(ts, datetime):
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    ts_iso = ts.isoformat()
-                else:
-                    ts_iso = str(ts)
-                as_of = row.as_of
-                if isinstance(as_of, datetime):
-                    if as_of.tzinfo is None:
-                        as_of = as_of.replace(tzinfo=timezone.utc)
-                    if latest_as_of is None or as_of > latest_as_of:
-                        latest_as_of = as_of
-                if row.source:
-                    sources.append(str(row.source))
-                bars.append({
-                    "ts": ts_iso,
-                    "open": float(row.open) if row.open is not None else None,
-                    "high": float(row.high) if row.high is not None else None,
-                    "low": float(row.low) if row.low is not None else None,
-                    "close": float(row.close) if row.close is not None else None,
-                    "volume": int(row.volume) if row.volume is not None else None,
-                    "missing_fields": [],
-                })
-            if not bars:
-                return None
-            # Deterministic source pick: ties broken alphabetically so same
-            # inputs always yield the same provenance (set order is random).
-            source = max(sorted(set(sources)), key=sources.count) if sources else "yfinance"
-            mic = instrument.exchange_mic if instrument else "XNAS"
-            try:
-                expected = expected_delay_minutes(mic)
-            except ValueError:
-                expected = 15
-            as_of_stamp = latest_as_of or _utcnow()
-            age_min = max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
-            grade, _reasons = grade_quality(
-                delay_minutes=expected,
-                age_minutes=age_min,
-                missing_fields=[],
-                fallback_used=False,
-                reconciled=False,  # single source in v1
-            )
-            provenance = build_provenance(
-                source, as_of=as_of_stamp, delay_minutes=expected,
-                quality_grade=grade, fallback_used=False, missing_fields=[],
-            )
-            return {
-                "symbol": instrument.provider_symbol,
-                "instrument_id": instrument.instrument_id,
-                "timeframe": timeframe,
-                "bars": bars,
-                "provenance": provenance.model_dump(mode="json"),
-            }
         finally:
             try:
                 db.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _bars_response_from_db(
+        db, db_inst, *, response_symbol: str, response_inst_id,
+        timeframe: str, limit_n: int,
+    ) -> dict | None:
+        """Build the bars payload from a DB instrument row (shared tail)."""
+        from backend.db.models import PriceBar
+
+        desc = (
+            db.query(PriceBar)
+            .filter(
+                PriceBar.instrument_id == db_inst.instrument_id,
+                PriceBar.timeframe == timeframe,
+            )
+            .order_by(PriceBar.ts.desc())
+            .limit(limit_n)
+            .all()
+        )
+        if len(desc) < min(limit_n, 100):
+            return None
+        rows = list(reversed(desc))
+        bars: list[dict] = []
+        sources: list[str] = []
+        latest_as_of = None
+        for row in rows:
+            ts = row.ts
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts_iso = ts.isoformat()
+            else:
+                ts_iso = str(ts)
+            as_of = row.as_of
+            if isinstance(as_of, datetime):
+                if as_of.tzinfo is None:
+                    as_of = as_of.replace(tzinfo=timezone.utc)
+                if latest_as_of is None or as_of > latest_as_of:
+                    latest_as_of = as_of
+            if row.source:
+                sources.append(str(row.source))
+            bars.append({
+                "ts": ts_iso,
+                "open": float(row.open) if row.open is not None else None,
+                "high": float(row.high) if row.high is not None else None,
+                "low": float(row.low) if row.low is not None else None,
+                "close": float(row.close) if row.close is not None else None,
+                "volume": int(row.volume) if row.volume is not None else None,
+                "missing_fields": [],
+            })
+        if not bars:
+            return None
+        # Deterministic source pick: ties broken alphabetically so same
+        # inputs always yield the same provenance (set order is random).
+        source = max(sorted(set(sources)), key=sources.count) if sources else "yfinance"
+        mic = db_inst.exchange_mic or "XNAS"
+        try:
+            expected = expected_delay_minutes(mic)
+        except ValueError:
+            expected = 15
+        as_of_stamp = latest_as_of or _utcnow()
+        age_min = max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
+        grade, _reasons = grade_quality(
+            delay_minutes=expected,
+            age_minutes=age_min,
+            missing_fields=[],
+            fallback_used=False,
+            reconciled=False,  # single source in v1
+        )
+        provenance = build_provenance(
+            source, as_of=as_of_stamp, delay_minutes=expected,
+            quality_grade=grade, fallback_used=False, missing_fields=[],
+        )
+        return {
+            "symbol": response_symbol,
+            "instrument_id": response_inst_id,
+            "timeframe": timeframe,
+            "bars": bars,
+            "provenance": provenance.model_dump(mode="json"),
+        }
 
     def _stub_bars(
         self, symbol: str, timeframe: str = "1d", limit: int = 30,

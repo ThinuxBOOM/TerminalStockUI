@@ -260,7 +260,12 @@ def test_get_bars_db_first(isolated_db, monkeypatch):
         _teardown()
 
 
-def test_get_bars_fallback_empty_db(isolated_db):
+def test_get_bars_fallback_empty_db(isolated_db, monkeypatch):
+    # Offline: the on-demand live fetch must also fail so the stub serves.
+    monkeypatch.setattr(
+        ingest_module, "fetch_daily_bars",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
     try:
         svc = _service()
         out = svc.get_bars("AAPL", timeframe="1d", limit=5)
@@ -278,12 +283,17 @@ def test_get_bars_fallback_empty_db(isolated_db):
         _teardown()
 
 
-def test_stub_bars_anchored_to_quote(isolated_db):
+def test_stub_bars_anchored_to_quote(isolated_db, monkeypatch):
     """Regression: stub chart must end where the header quote is.
 
     (GOOGL showed $338.50 in the header with a ~$571 stub chart because the
     stub base was hash-random and unanchored.)
     """
+    # Offline: the on-demand live fetch must also fail so the stub serves.
+    monkeypatch.setattr(
+        ingest_module, "fetch_daily_bars",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
     try:
         svc = _service()
         quote = svc.get_quote("AAPL")
@@ -309,6 +319,11 @@ def test_get_bars_fallback_unreachable_db_never_raises(isolated_db, monkeypatch)
         raise RuntimeError("db down")
 
     monkeypatch.setattr(session_module, "get_session_factory", _boom)
+    # Offline: the on-demand live fetch must also fail so the stub serves.
+    monkeypatch.setattr(
+        ingest_module, "fetch_daily_bars",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
     try:
         svc = _service()
         out = svc.get_bars("AAPL", timeframe="1d", limit=7)

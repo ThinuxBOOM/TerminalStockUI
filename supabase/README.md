@@ -5,6 +5,10 @@ This folder owns the Supabase Postgres target. Files:
 | file | purpose |
 |---|---|
 | `migrations/0001_onemarket.sql` | Supabase-ready DDL derived from `infra/migrations/0001_initial.sql` (4 tables, CHECKs, indexes, RLS) |
+| `migrations/0002_calibration.sql` | calibration snapshots (walk-forward Brier/ECE + reliability) |
+| `migrations/0003_alerts.sql` | alert rules + fired-alert events |
+| `migrations/0004_provider_secrets.sql` | encrypted provider keys + monthly budget caps |
+| `migrations/0005_quote_snapshots.sql` | last-fetched live quotes (outage fallback serves real data, not placeholders) |
 | `seed.sql` | minimal smoke-test seeds (XNAS-AAPL, XSHG-600519, XPAR-MC) |
 
 ## 1. Create the project

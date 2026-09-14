@@ -290,12 +290,18 @@ def check_migration_tables(root: Path, rep: Report) -> None:
             if re.search(r"CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?" + t + r"\b", blob, re.I)]
     missing = [t for t in REQUIRED_TABLES if t not in have]
     which = ", ".join(p.name for p in candidates)
+    # Advisory: last-fetched quote persistence (0005) — outages serve stored
+    # market data instead of placeholders when present.
+    snapshot = "present" if re.search(
+        r"CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?quote_snapshots\b", blob, re.I) \
+        else "absent (outage fallback degrades to placeholders)"
     if missing:
         rep.add("FAIL", "migration defines 4 v1 tables",
                 ["files: " + which, "missing tables: " + ", ".join(missing)])
     else:
         rep.add("PASS", "migration defines 4 v1 tables (%s)" % which,
-                ["tables: " + ", ".join(have)])
+                ["tables: " + ", ".join(have),
+                 "quote_snapshots persistence: " + snapshot])
 
 
 def check_frontend_dist(root: Path, rep: Report) -> None:
