@@ -22,6 +22,7 @@ from backend.api.main import create_app
 from backend.cache import InMemoryCache
 from backend.forecasting.service import reset_forecast_service
 from backend.instruments.registry import InstrumentRegistry
+from backend.market_data import ingest as ingest_module
 from backend.market_data.health import ProviderHealthTracker
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
@@ -31,6 +32,29 @@ from backend.security.secrets import EncryptedSecretStore
 SEQUENTIAL_BUDGET_S = 30.0
 WATCHLIST_BUDGET_S = 30.0
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "600519.SS", "MC.PA", "ASML.AS"]
+
+
+def _fresh_fetch(provider_symbol: str, period: str = "2y", interval: str = "1d"):
+    """Deterministic fresh bars ending today (always covers the last
+    completed session, so the freshness gate serves DB-first, no network)."""
+    from datetime import date, datetime, timedelta, timezone
+
+    end = datetime.now(timezone.utc).date()
+    bars, price = [], 300.0
+    for i in range(260):
+        day = end - timedelta(days=259 - i)
+        o = round(price, 2)
+        c = round(price * 1.001, 2)
+        bars.append({
+            "ts": datetime(day.year, day.month, day.day, tzinfo=timezone.utc),
+            "open": o,
+            "high": round(max(o, c) * 1.002, 2),
+            "low": round(min(o, c) * 0.998, 2),
+            "close": c,
+            "volume": 1_000_000 + i,
+        })
+        price = c
+    return bars
 
 
 def _build_app():
@@ -81,7 +105,10 @@ def _teardown() -> None:
     reset_forecast_service()
 
 
-def test_load_smoke_50_sequential_quote_plus_forecast():
+def test_load_smoke_50_sequential_quote_plus_forecast(monkeypatch):
+    # Freshness gate needs live bars: fake the fetch (deterministic, fresh,
+    # no network) so forecasts serve instead of raising 502.
+    monkeypatch.setattr(ingest_module, "fetch_daily_bars", _fresh_fetch)
     app = _build_app()
     client = TestClient(app)
     try:

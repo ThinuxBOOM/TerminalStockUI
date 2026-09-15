@@ -77,7 +77,7 @@ def _enriched_stat(tracker: ProviderHealthTracker, name: str) -> dict:
     except Exception:
         stats = {
             "provider": name, "kind": "unknown", "state": "unknown",
-            "latency_p50_ms": 0.0, "latency_p95_ms": 0.0,
+            "latency_p50_ms": None, "latency_p95_ms": None,
             "error_rate_1h": 0.0, "error_rate_5m": 0.0,
             "calls_1h": 0, "calls_5m": 0, "total_calls": 0,
             "circuit": "closed", "last_check": None, "last_success": None,
@@ -138,7 +138,7 @@ def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker
         pass
     if not rows:
         rows = [{
-            "provider": "yfinance", "latency_p50_ms": 0.0, "latency_p95_ms": 0.0,
+            "provider": "yfinance", "latency_p50_ms": None, "latency_p95_ms": None,
             "error_rate_1h": 0.0, "calls_1h": 0, "total_calls": 0,
             "circuit": "closed", "last_check": None,
         }]

@@ -185,6 +185,15 @@ describe("normalizeHealthProviders (tracker rows lack name/status)", () => {
     expect(out[0]?.latency_ms).toBe(250);
     expect(out[1]?.status).toBe("open");
   });
+  it("never fabricates ok-with-0ms: unknown state stays unknown, null latency dropped", () => {
+    const out = normalizeHealthProviders([
+      { provider: "akshare", state: "unknown", latency_p50_ms: null, latency_p95_ms: null, total_calls: 0, circuit: "closed" },
+      { provider: "xai", state: "unconfigured", latency_p50_ms: null, circuit: "closed" }
+    ]);
+    expect(out[0]?.status).toBe("unknown");
+    expect(out[0]?.latency_ms).toBe(void 0);
+    expect(out[1]?.status).toBe("unconfigured");
+  });
   it("keeps explicit name/status and passes non-arrays through as empty", () => {
     const out = normalizeHealthProviders([{ name: "x", status: "degraded" }]);
     expect(out[0]?.status).toBe("degraded");

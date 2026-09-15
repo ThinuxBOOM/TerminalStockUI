@@ -430,7 +430,9 @@ class FXProvider:
         if not self.stub_mode:
             hit = self._cache_get(cache_key)
             if hit is not None:
-                self._emit(0.0, True)
+                # Cache serve: return directly WITHOUT a health sample. A
+                # cache hit performed no provider call, so recording 0.0ms
+                # would poison p50 with fabricated zero-latency samples.
                 return hit
 
         if self.stub_mode:

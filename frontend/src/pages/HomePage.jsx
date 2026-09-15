@@ -212,13 +212,15 @@ function HomePage() {
               {showProviders.map((p) => {
                 const latency = p.latency_p50_ms ?? p.latency_ms ?? p.latency_p95_ms;
                 const bad = p.status !== "ok" || (p.circuit !== undefined && p.circuit === "open");
+                // No samples: say so (never a fabricated 0ms).
+                const noSamples = (latency === void 0 || latency === null) && (p.total_calls ?? 0) === 0;
                 return (
                   <li key={p.name} className="flex justify-between gap-2 border-b border-term-border pb-1">
                     <span className="min-w-0 truncate">{p.name}</span>
                     <span className={bad ? "text-term-red" : "text-term-green"}>
                       {p.status}
                       {p.circuit ? ` · ${p.circuit}` : ""}
-                      {latency !== undefined ? ` · ${latency}ms` : ""}
+                      {latency !== void 0 && latency !== null ? ` · ${latency}ms` : noSamples ? " · no samples yet" : ""}
                     </span>
                   </li>
                 );

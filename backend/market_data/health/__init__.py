@@ -495,7 +495,9 @@ class ProviderHealthTracker:
             idx95 = min(len(lat) - 1, int(len(lat) * 0.95))
             p95 = lat[idx95]
         else:
-            p50, p95 = 0.0, 0.0
+            # No samples: None, never 0.0. A zero latency was never measured
+            # and rendering "0ms" for an uncalled provider is fabricated data.
+            p50, p95 = None, None
         try:
             now_ts = _utcnow().timestamp()
         except Exception:
@@ -576,8 +578,8 @@ class ProviderHealthTracker:
             "provider": name,
             "kind": kind,
             "state": state,
-            "latency_p50_ms": round(p50, 1),
-            "latency_p95_ms": round(p95, 1),
+            "latency_p50_ms": round(p50, 1) if isinstance(p50, (int, float)) else None,
+            "latency_p95_ms": round(p95, 1) if isinstance(p95, (int, float)) else None,
             "error_rate_1h": error_1h,
             "error_rate_5m": error_5m,
             "calls_1h": len(recent_1h),
@@ -716,7 +718,8 @@ def probe_data_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> d
     try:
         provider = _build_data_provider(key)
     except ValueError as exc:
-        return {"provider": key, "ok": False, "latency_ms": 0.0, "error": str(exc)[:280]}
+        latency = (_time.perf_counter() - started) * 1000.0
+        return {"provider": key, "ok": False, "latency_ms": round(latency, 1), "error": str(exc)[:280]}
     except Exception as exc:
         latency = (_time.perf_counter() - started) * 1000.0
         _probe_record(tracker, key, latency, False, error=f"{type(exc).__name__}: {exc}")
@@ -824,7 +827,9 @@ def probe_ai_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dic
 
     key = (name or "").strip().lower()
     if key not in AI_PROVIDERS:
-        return {"provider": key or "unknown", "ok": False, "latency_ms": 0.0,
+        # Unknown provider: no work was done, so there is no latency to
+        # report (None, never a fabricated 0.0).
+        return {"provider": key or "unknown", "ok": False, "latency_ms": None,
                 "error": f"unknown AI provider; expected one of {list(AI_PROVIDERS)}"}
     started = _time.perf_counter()
     try:
@@ -964,10 +969,10 @@ def probe_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dict:
             return probe_ai_provider(key, tracker, timeout_s=timeout_s)
         if key in DATA_PROVIDERS:
             return probe_data_provider(key, tracker, timeout_s=timeout_s)
-        return {"provider": key or "unknown", "ok": False, "latency_ms": 0.0,
+        return {"provider": key or "unknown", "ok": False, "latency_ms": None,
                 "error": f"unknown provider; expected one of {list(KNOWN_PROVIDERS)}"}
     except Exception as exc:
-        return {"provider": key or "unknown", "ok": False, "latency_ms": 0.0,
+        return {"provider": key or "unknown", "ok": False, "latency_ms": None,
                 "error": f"{type(exc).__name__}: {exc}"[:280]}
 
 
@@ -984,7 +989,7 @@ def probe_all_providers(tracker=None, *, timeout_s: float = 5.0, include_ai: boo
         try:
             out.append(probe_provider(name, tracker, timeout_s=timeout_s))
         except Exception as exc:
-            out.append({"provider": name, "ok": False, "latency_ms": 0.0,
+            out.append({"provider": name, "ok": False, "latency_ms": None,
                         "error": f"{type(exc).__name__}: {exc}"[:280]})
     return out
 

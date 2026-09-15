@@ -684,12 +684,15 @@ class MarketDataService:
         DB path: resolve via the registry, read the latest ``limit`` rows
         for ``(instrument_id, timeframe)`` ascending; trusted when at least
         ``min(limit, 100)`` rows come back (quality gate so thin histories
-        never masquerade as full coverage). Provenance then carries the
+        never masquerade as full coverage) AND the latest bar date covers
+        the last completed trading session (freshness gate so days-old
+        bars are refreshed, never served). Provenance then carries the
         stored source, ``fallback_used=False`` and a ``grade_quality`` grade.
 
-        Fail-closed: thin/empty coverage triggers an on-demand live fetch
-        (``1d`` only); when that also yields nothing the request raises
-        instead of serving synthetic stub bars. No fallbacks, ever.
+        Fail-closed: thin/empty/stale coverage triggers an on-demand live
+        fetch (``1d`` only); when that also yields nothing fresh the request
+        raises instead of serving synthetic stub bars or days-old history.
+        No fallbacks, ever.
         """
         cache_key: str | None = None
         if self.cache is not None:
@@ -702,19 +705,21 @@ class MarketDataService:
                 cache_key = None
         try:
             db_out = self._get_bars_from_db(symbol, timeframe, limit)
-            if db_out is not None:
+            if db_out is not None and self._bars_payload_is_fresh(db_out, symbol, timeframe):
                 if self.cache is not None and cache_key is not None:
                     try:
                         self.cache.set(cache_key, db_out, ttl_s=120)  # type: ignore[union-attr]
                     except Exception:
                         pass
                 return db_out
+            # Stale (not thin): fall through to the live refresh below —
+            # days-old bars are never served.
         except Exception:
             pass
         try:
             if self._fetch_and_store_bars(symbol, timeframe):
                 db_out = self._get_bars_from_db(symbol, timeframe, limit)
-                if db_out is not None:
+                if db_out is not None and self._bars_payload_is_fresh(db_out, symbol, timeframe):
                     if self.cache is not None and cache_key is not None:
                         try:
                             self.cache.set(cache_key, db_out, ttl_s=120)  # type: ignore[union-attr]
@@ -723,14 +728,82 @@ class MarketDataService:
                     return db_out
         except Exception:
             pass
-        # Fail-closed: DB thin/empty and live fetch missed — raise instead
-        # of fabricating deterministic stub bars. Routers map this to 502.
+        # Fail-closed: DB thin/empty/stale and live fetch missed — raise
+        # instead of fabricating deterministic stub bars or serving
+        # days-old history. Routers map this to 502.
         from .providers.base import ProviderError as _PE
 
         raise _PE(
             getattr(self.provider, "name", "market-data"),
-            f"no live bars for {symbol} (DB thin/empty, live fetch missed)",
+            f"no live bars for {symbol} (DB thin/empty/stale, live fetch missed)",
         )
+
+    def _bars_payload_is_fresh(self, payload: dict | None, symbol: str, timeframe: str) -> bool:
+        """Daily-only freshness gate for a bars payload.
+
+        True when the latest bar date covers the last completed trading
+        session for the symbol's MIC (weekends expect Friday, pre-open
+        Monday expects Friday, post-close Monday expects Monday). True also
+        when the verdict cannot be computed (non-``1d`` timeframe, empty /
+        unparseable payload, unknown MIC) — those keep legacy behavior and
+        never 502 on a mere calendar miss. False ONLY on proven staleness.
+        Never raises.
+        """
+        try:
+            if (timeframe or "1d") != "1d":
+                return True
+            if not isinstance(payload, dict):
+                return True
+            bars = payload.get("bars")
+            if not isinstance(bars, list) or not bars:
+                return True
+            last = bars[-1]
+            if not isinstance(last, dict):
+                return True
+            raw_ts = last.get("ts")
+            if raw_ts is None:
+                return True
+            try:
+                latest_day = str(raw_ts)[:10]
+                if len(latest_day) != 10:
+                    return True
+                from datetime import date as _date
+
+                latest = _date.fromisoformat(latest_day)
+            except (TypeError, ValueError):
+                return True
+            try:
+                symbol_text = str(symbol or "").strip()
+            except Exception:
+                return True
+            if not symbol_text:
+                return True
+            try:
+                instrument, _, _ = self.registry.resolve(symbol_text)
+            except Exception:
+                return True
+            if instrument is None:
+                return True
+            try:
+                mic = str(instrument.exchange_mic or "").strip().upper()
+            except Exception:
+                return True
+            if not mic:
+                return True
+            try:
+                from backend.instruments.calendars import last_completed_trading_day
+            except Exception:
+                try:
+                    from ..instruments.calendars import last_completed_trading_day  # type: ignore[no-redef]
+                except Exception:
+                    return True
+            try:
+                expected = last_completed_trading_day(mic)
+            except Exception:
+                return True
+            return latest >= expected
+        except Exception:
+            return True
 
     def get_bars_many(
         self, symbols: list[str], timeframe: str = "1d", limit: int = 30

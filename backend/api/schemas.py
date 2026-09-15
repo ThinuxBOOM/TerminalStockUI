@@ -78,8 +78,8 @@ class HealthResponse(BaseModel):
 
 class ProviderHealthOut(BaseModel):
     provider: str
-    latency_p50_ms: float = 0.0
-    latency_p95_ms: float = 0.0
+    latency_p50_ms: float | None = None
+    latency_p95_ms: float | None = None
     error_rate_1h: float = 0.0
     calls_1h: int = 0
     total_calls: int = 0

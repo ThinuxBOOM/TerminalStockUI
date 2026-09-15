@@ -151,15 +151,30 @@ function normalizeQuote(raw) {
     provenance: prov
   });
 }
+function healthStatusOf(row, circuit) {
+  // Backend rows carry `state` (up|degraded|down|unknown|unconfigured); legacy
+  // rows carry `status`. Never default to "ok": an uncalled provider has no
+  // samples and must read unknown, not ok-with-0ms. A measured latency sample
+  // with a closed circuit is the only implicit-ok signal.
+  if (typeof row.status === "string" && row.status.trim() !== "") return row.status;
+  const st = typeof row.state === "string" ? row.state.trim().toLowerCase() : "";
+  if (st === "up" || st === "ok") return "ok";
+  if (st === "degraded" || st === "down" || st === "unknown" || st === "unconfigured") return st;
+  if (circuit === "open") return "open";
+  const lat = row.latency_ms ?? row.latency_p50_ms ?? row.latency_p95_ms;
+  if (typeof lat === "number" && Number.isFinite(lat)) return "ok";
+  return "unknown";
+}
 function normalizeHealthProviders(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map((row) => {
     const circuit = typeof row.circuit === "string" ? row.circuit : void 0;
+    const lat = row.latency_ms ?? row.latency_p50_ms;
     return {
       ...row,
       name: row.name ?? row.provider ?? "unknown",
-      status: typeof row.status === "string" ? row.status : circuit === "open" ? "open" : "ok",
-      latency_ms: row.latency_ms ?? row.latency_p50_ms
+      status: healthStatusOf(row, circuit),
+      latency_ms: lat ?? void 0
     };
   });
 }
@@ -1015,10 +1030,11 @@ async function getProvidersHealth() {
       );
       const circuit = typeof row.circuit === "string" ? row.circuit : void 0;
       const latencyP50 = numOrUndef(row.latency_p50_ms ?? row.latency_ms);
-      const status = typeof row.status === "string" ? row.status : circuit === "open" ? "open" : "ok";
+      const status = healthStatusOf(row, circuit);
       return {
         name,
         status,
+        state: typeof row.state === "string" ? row.state : void 0,
         latency_ms: latencyP50 ?? numOrUndef(row.latency_p95_ms),
         latency_p50_ms: numOrUndef(row.latency_p50_ms),
         latency_p95_ms: numOrUndef(row.latency_p95_ms),

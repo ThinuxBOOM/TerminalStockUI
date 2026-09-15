@@ -30,7 +30,7 @@ def _fresh_session(tmp_path, name="obs.db"):
 # --- provider_metrics ------------------------------------------------------------
 
 def test_summarize_latencies_empty_and_ordered():
-    assert summarize_latencies([]) == (0.0, 0.0)
+    assert summarize_latencies([]) == (None, None)
     p50, p95 = summarize_latencies([100, 200, 300, 400])
     assert p50 > 0 and p95 >= p50
 
@@ -53,7 +53,8 @@ def test_aggregate_provider_calls_shape_and_math():
 
 def test_aggregate_provider_calls_empty():
     stats = aggregate_provider_calls("akshare", [])
-    assert stats["latency_p50_ms"] == 0.0
+    assert stats["latency_p50_ms"] is None
+    assert stats["latency_p95_ms"] is None
     assert stats["error_rate_1h"] == 0.0
     assert stats["total_calls"] == 0
 

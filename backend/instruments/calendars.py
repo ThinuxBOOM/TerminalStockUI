@@ -343,6 +343,51 @@ def is_trading_day(day: date | datetime, mic: str = "XSHG") -> bool:
     return not is_holiday(d, mic)
 
 
+#: Grace period after session close before the just-closed session's daily
+#: bar is expected to exist upstream (Yahoo daily bars land ~15-30min
+#: post-close; 60min avoids false stale verdicts right after the bell).
+BAR_CLOSE_GRACE_MIN = 60
+
+
+def last_completed_trading_day(mic: str, now: datetime | None = None) -> date:
+    """Most recent trading day whose session has fully closed (exchange-local).
+
+    Daily bars are fresh when their latest bar date is >= this day: weekends
+    expect Friday, pre-open Monday expects Friday, post-close Monday expects
+    Monday. Never raises (unknown MIC -> UTC today; walk failure -> today);
+    callers treat the verdict as advisory and fail over to a live refresh.
+    """
+    try:
+        key = (mic or "").strip().upper()
+        sessions = TRADING_SESSIONS.get(key)
+        if not sessions:
+            raise ValueError(f"unsupported exchange MIC: {mic!r}")
+        ref = now or datetime.now(timezone.utc)
+        local = _exchange_now(key, ref)
+        today = local.date()
+        close = max(end for _, end in sessions)
+        try:
+            close_plus = (datetime.combine(today, close) + timedelta(minutes=BAR_CLOSE_GRACE_MIN)).time()
+        except Exception:
+            close_plus = close
+        candidate = today
+        if not (is_trading_day(today, key) and local.time() >= close_plus):
+            candidate = today - timedelta(days=1)
+        for _ in range(14):
+            if is_trading_day(candidate, key):
+                return candidate
+            candidate -= timedelta(days=1)
+        return today
+    except Exception:
+        try:
+            ref = now or datetime.now(timezone.utc)
+            if ref.tzinfo is None:
+                return ref.date()
+            return ref.astimezone(timezone.utc).date()
+        except Exception:
+            return date.today()
+
+
 def _exchange_now(mic: str, dt: datetime) -> datetime:
     """Return ``dt`` in the exchange timezone.
 

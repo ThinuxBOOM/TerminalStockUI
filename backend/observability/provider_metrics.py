@@ -49,11 +49,11 @@ def percentile(sorted_vals: list[float], q: float) -> float:
     return float(sorted_vals[idx])
 
 
-def summarize_latencies(latencies: Iterable[float]) -> tuple[float, float]:
-    """Return (p50_ms, p95_ms); (0.0, 0.0) when empty."""
+def summarize_latencies(latencies: Iterable[float]) -> tuple[float | None, float | None]:
+    """Return (p50_ms, p95_ms); (None, None) when empty (no samples measured)."""
     lat = sorted(float(v) for v in latencies)
     if not lat:
-        return 0.0, 0.0
+        return None, None
     return round(statistics.median(lat), 1), round(percentile(lat, 0.95), 1)
 
 

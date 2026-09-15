@@ -16,6 +16,7 @@
 |---|---|---|
 | No live quote / bars (all providers down) | `502` | `yfinance: no live quote for AAPL (all providers unavailable)` |
 | No live bars (DB thin/empty, live fetch missed) | `502` | `no live bars for X (DB thin/empty, live fetch missed)` |
+| Days-old bars (DB stale, refresh missed) | `502` | `no live bars for X (DB thin/empty/stale, live fetch missed)` |
 | No live FX rate | `502` | `no live rate for EUR/USD (upstream unavailable)` |
 | AI with no key | `423` | `AI disabled: no API key configured for gemini (...)` |
 | AI live-call failure (timeout/network, stub refused) | `502` | `AI insight failed: live model call unsuccessful` |
@@ -28,8 +29,14 @@
 - **Quotes/bars** (`MarketDataService`): first live quote wins
   (US: Alpaca → yfinance → Finnhub → TwelveData → Stooq; SSE: yfinance → AKShare;
   Euronext: yfinance → Stooq). Nothing live → raise. Bars: DB-first with coverage
-  gate (`min(n,100)` rows), then on-demand live fetch (`1d` only); still nothing →
-  raise. No synthetic bars, no snapshot cover, no future-dated quotes.
+  gate (`min(n,100)` rows) AND a calendar-aware freshness gate (`1d` only):
+  the latest bar date must cover the last completed trading session
+  (`last_completed_trading_day`: weekends expect Friday, pre-open Monday
+  expects Friday, post-close Monday expects Monday; 60min post-close grace).
+  Stale DB bars trigger a live refresh; when refresh also yields nothing
+  fresh the request raises (`502`) — days-old history is never served.
+  A 15min feed delay is fine; a 2-day-old tape is not. No synthetic bars,
+  no snapshot cover, no future-dated quotes.
 - **AI** (`/api/ai`): no key → `423` before any evidence work. Live-call failure /
   stub → `502` via the wire guard (`_refuse_stub_opinion`). `ai_enabled:false`
   skips the model and returns the deterministic blend (no fake opinion).
@@ -45,7 +52,17 @@
   `422`/`502` from `/api/markets/{mic}/index` throw immediately (only `404`/`501`
   fall through to the bars chain). Liquidity-history has no client placeholder —
   errors propagate. Stale/fallback data renders `ErrorState` with retry, never a
-  table + banner.
+  table + banner. Provider health never defaults to ok-with-0ms: uncalled
+  providers read `unknown`/`unconfigured` with no latency figure ("no samples
+  yet"); only measured samples are shown.
+
+## Provider health honesty
+
+- Latency figures are measured samples only. Zero-call providers report
+  `latency_p50_ms/p95_ms: null` (never `0.0`); cache serves are not recorded
+  as provider calls; unknown/no-work probes report `latency_ms: null`.
+- State is `up|degraded|down|unknown|unconfigured` — the dashboard maps it
+  verbatim and never invents `"ok"` for providers with no samples.
 
 ## Provenance
 
