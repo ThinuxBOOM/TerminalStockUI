@@ -26,6 +26,22 @@ except ImportError:  # pragma: no cover
     except ImportError:
         AKShareProvider = None  # type: ignore[assignment]
 
+try:  # Milestone 0 live-data extension (opt-in; None when unavailable)
+    from backend.market_data.providers.alpaca import AlpacaProvider
+except ImportError:  # pragma: no cover
+    try:
+        from .providers.alpaca import AlpacaProvider  # type: ignore[no-redef]
+    except ImportError:
+        AlpacaProvider = None  # type: ignore[assignment]
+
+try:  # Milestone 0 delayed gap-filler (opt-in; None when unavailable)
+    from backend.market_data.providers.stooq import StooqProvider
+except ImportError:  # pragma: no cover
+    try:
+        from .providers.stooq import StooqProvider  # type: ignore[no-redef]
+    except ImportError:
+        StooqProvider = None  # type: ignore[assignment]
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -192,6 +208,8 @@ class MarketDataService:
         health: ProviderHealthTracker | None = None,
         cache: object | None = None,
         akshare_provider: object | None = None,
+        alpaca_provider: object | None = None,
+        stooq_provider: object | None = None,
     ) -> None:
         self.registry = registry or InstrumentRegistry()
         self.health = health or ProviderHealthTracker()
@@ -224,6 +242,32 @@ class MarketDataService:
                 )
             except Exception:
                 pass
+        # Milestone 0 live-data chain (opt-in, additive — default None keeps
+        # every existing call site on the yfinance/AKShare behavior).
+        # deps.get_market_service() wires real instances; tests pass explicit
+        # stub/live doubles. No auto-create here: auto-creating a networked
+        # Stooq inside every MarketDataService() would turn pure-outage tests
+        # into live-data tests and add network latency to hermetic suites.
+        self.alpaca_provider = alpaca_provider
+        if self.alpaca_provider is not None and getattr(
+            self.alpaca_provider, "_on_call", None
+        ) is None:
+            try:
+                self.alpaca_provider._on_call = (  # type: ignore[union-attr]
+                    lambda p, ms, ok: self.health.record(p, ms, ok)
+                )
+            except Exception:
+                pass
+        self.stooq_provider = stooq_provider
+        if self.stooq_provider is not None and getattr(
+            self.stooq_provider, "_on_call", None
+        ) is None:
+            try:
+                self.stooq_provider._on_call = (  # type: ignore[union-attr]
+                    lambda p, ms, ok: self.health.record(p, ms, ok)
+                )
+            except Exception:
+                pass
         self.cache = cache
 
     def _call_akshare(self, ak_code: str) -> dict | None:
@@ -241,6 +285,58 @@ class MarketDataService:
                 return get_quote(ak_code)
         except Exception as exc:
             # Preserve empty-symbol contract; otherwise treat as chain miss.
+            from .providers.base import ProviderError
+
+            if isinstance(exc, ProviderError) and "empty symbol" in str(exc).lower():
+                raise
+            return None
+
+    @staticmethod
+    def _is_alpaca_eligible(mic: str | None, provider_symbol: str) -> bool:
+        """Alpaca is US-only: skip SSE + Euronext before any network call."""
+        try:
+            upper_mic = (mic or "").strip().upper()
+        except Exception:
+            upper_mic = ""
+        if upper_mic in ("XSHG", "XPAR", "XAMS", "XBRU"):
+            return False
+        upper = (provider_symbol or "").strip().upper()
+        for suffix in (".SS", ".PA", ".AS", ".BR"):
+            if upper.endswith(suffix):
+                return False
+        return True
+
+    @staticmethod
+    def _is_stooq_eligible(mic: str | None, provider_symbol: str) -> bool:
+        """Stooq covers US + Euronext; SSE stays on yfinance/AKShare."""
+        try:
+            upper_mic = (mic or "").strip().upper()
+        except Exception:
+            upper_mic = ""
+        if upper_mic == "XSHG":
+            return False
+        upper = (provider_symbol or "").strip().upper()
+        if upper.endswith(".SS"):
+            return False
+        return True
+
+    def _call_chain_provider(self, prov: object, symbol: str, market: str | None) -> dict | None:
+        """Invoke one opt-in chain provider; None on miss. Never raises.
+
+        Preserves the empty-symbol contract (ProviderError propagates) so
+        ``GET /quote?symbol=`` stays a 422, never a 200 stub.
+        """
+        if prov is None:
+            return None
+        get_quote = getattr(prov, "get_quote", None)
+        if get_quote is None:
+            return None
+        try:
+            try:
+                return get_quote(symbol, market=market)
+            except TypeError:
+                return get_quote(symbol)
+        except Exception as exc:
             from .providers.base import ProviderError
 
             if isinstance(exc, ProviderError) and "empty symbol" in str(exc).lower():
@@ -346,17 +442,50 @@ class MarketDataService:
             # Canonical SSE symbol for the response envelope.
             quote["symbol"] = yahoo_symbol
         else:
-            try:
-                quote = self.provider.get_quote(provider_symbol)
-            except Exception as exc:
-                from .providers.base import ProviderError as _PE
+            # Non-SSE chain (opt-in, additive): alpaca live (US, delay 0) ->
+            # yfinance (delay 15) -> stooq (delay 15, US+Euronext) ->
+            # snapshot/stub. First live quote wins (alpaca preferred =
+            # freshest) with short-circuit so one live feed costs one call.
+            # When nothing is live, the yfinance fallback wins to preserve
+            # the pre-chain outage behavior (source yfinance, fallback True).
+            # Absent providers (None) are skipped, so every existing call
+            # site without explicit wiring behaves as before.
+            q_alpaca: dict | None = None
+            q_yf_chain: dict | None = None
+            q_stooq: dict | None = None
+            quote = None
+            if self._is_alpaca_eligible(mic, provider_symbol):
+                # Empty-symbol contract propagates (422, never a stub).
+                q_alpaca = self._call_chain_provider(
+                    self.alpaca_provider, provider_symbol, mic
+                )
+                if _quote_is_live(q_alpaca):
+                    quote = q_alpaca
+            if quote is None:
+                try:
+                    q_yf_chain = self.provider.get_quote(provider_symbol)
+                except Exception as exc:
+                    from .providers.base import ProviderError as _PE
 
-                if isinstance(exc, _PE) and "empty symbol" in str(exc).lower():
-                    raise
-                # Unexpected provider failure (the stock provider normally
-                # degrades to a stub instead of raising): fall through to the
-                # snapshot/stub outage path below. Never raises.
-                quote = None
+                    if isinstance(exc, _PE) and "empty symbol" in str(exc).lower():
+                        raise
+                    # Unexpected provider failure (the stock provider normally
+                    # degrades to a stub instead of raising): fall through to the
+                    # snapshot/stub outage path below. Never raises.
+                    q_yf_chain = None
+                if _quote_is_live(q_yf_chain):
+                    quote = q_yf_chain
+            if quote is None and self._is_stooq_eligible(mic, provider_symbol):
+                q_stooq = self._call_chain_provider(
+                    self.stooq_provider, provider_symbol, mic
+                )
+                if _quote_is_live(q_stooq):
+                    quote = q_stooq
+            if quote is None:
+                for fallback_candidate in (q_yf_chain, q_stooq, q_alpaca):
+                    if fallback_candidate is not None:
+                        quote = fallback_candidate
+                        break
             if quote is None:
                 quote = self._read_quote_snapshot(provider_symbol) or {
                     "symbol": provider_symbol,
@@ -384,9 +513,20 @@ class MarketDataService:
         else:
             mic = "XNAS"
         try:
-            expected = expected_delay_minutes(mic)
+            calendar_expected = expected_delay_minutes(mic)
         except ValueError:
-            expected = 15
+            calendar_expected = 15
+        # Live Alpaca IEX is real-time (delay 0); everything else keeps the
+        # calendar delay (15). Fallback/snapshot data never gets delay 0 —
+        # only a currently-live alpaca quote does.
+        try:
+            _live_source = (quote.get("source") or "") if isinstance(quote, dict) else ""
+        except Exception:
+            _live_source = ""
+        if _live_source == "alpaca" and _quote_is_live(quote):
+            expected = 0
+        else:
+            expected = calendar_expected
         raw_age_min = (_utcnow() - as_of).total_seconds() / 60
         if raw_age_min < -5:
             # Future-dated data (beyond clock-skew tolerance): never badge as

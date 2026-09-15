@@ -12,6 +12,11 @@ router = APIRouter(prefix="/api/providers", tags=["providers"])
 #: Reference symbol for the health probe (must exist in the seed registry).
 PROBE_SYMBOL = "AAPL"
 
+#: Market-data providers probeable via POST /api/providers/health/test.
+#: Unknown names are rejected (422) so arbitrary query values cannot
+#: bloat the health tracker with unbounded provider keys.
+MARKET_DATA_PROBE_PROVIDERS = ("yfinance", "akshare", "alpaca", "stooq")
+
 
 @router.get("/health")
 def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker)):
@@ -33,6 +38,12 @@ def test_provider(provider: str = "yfinance", svc=Depends(get_market_service)):
 
     from ..market_data.providers.base import ProviderError as _ProviderError
 
+    name = (provider or "").strip().lower() or "yfinance"
+    if name not in MARKET_DATA_PROBE_PROVIDERS:
+        raise _HTTPException(
+            status_code=422,
+            detail=f"unknown provider; expected one of {list(MARKET_DATA_PROBE_PROVIDERS)}",
+        )
     try:
         svc.get_quote(PROBE_SYMBOL)
     except _HTTPException:
@@ -45,11 +56,11 @@ def test_provider(provider: str = "yfinance", svc=Depends(get_market_service)):
         raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
     try:
         tracker = get_health_tracker()
-        stats = tracker.stats(provider)
+        stats = tracker.stats(name)
     except Exception as exc:
         raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
     if stats["total_calls"] == 0:
-        stats = {**stats, "provider": provider}
+        stats = {**stats, "provider": name}
     return stats
 
 

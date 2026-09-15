@@ -44,7 +44,7 @@ class ProviderHealthTracker:
         if not math.isfinite(latency) or latency < 0:
             latency = 0.0
         # Bound distinct provider keys (fixed set in practice: yfinance,
-        # akshare, fx); drop oldest-inserted on overflow, newest preserved.
+        # akshare, alpaca, stooq, fx); drop oldest-inserted on overflow, newest preserved.
         if key not in self._calls and len(self._calls) >= 64:
             try:
                 self._calls.pop(next(iter(self._calls)), None)

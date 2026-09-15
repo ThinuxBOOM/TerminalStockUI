@@ -6,7 +6,7 @@ circuit is open. Alert rule (README): error_rate > 5% over 5 minutes
 (fallback: 1h rate from ProviderHealthTracker) triggers an alert entry.
 
 M8: the dashboard always includes rows for the known providers (market-data:
-yfinance/akshare/fx; AI: gemini/openai/anthropic/xai) even before they have
+yfinance/akshare/alpaca/stooq/fx; AI: gemini/openai/anthropic/xai) even before they have
 recorded calls, so GET /health (via build_dashboard) shows FX + AKShare + AI
 coverage. Output is JSON-serializable (no datetime objects leak).
 """
@@ -28,6 +28,8 @@ from backend.observability.provider_metrics import (
 KNOWN_PROVIDERS: tuple[str, ...] = (
     "yfinance",
     "akshare",
+    "alpaca",
+    "stooq",
     "fx",
     "gemini",
     "openai",
