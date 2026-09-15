@@ -860,9 +860,10 @@ def probe_ai_provider(name: str, tracker=None, *, timeout_s: float = 60.0) -> di
     except Exception:
         api_key = None
     if not (isinstance(api_key, str) and api_key.strip()):
-        latency = (_time.perf_counter() - started) * 1000.0
-        _probe_record(tracker, key, latency, False, error="unconfigured (no API key)",
-                      quota_limited=True)
+        # No key: mark unconfigured WITHOUT a latency sample. There was no
+        # network call to time — recording ~0ms here fabricated the "0ms"
+        # rows. record_quota alone drives state=unconfigured with
+        # total_calls=0 and null latencies ("no samples yet").
         try:
             if tracker is not None and hasattr(tracker, "record_quota"):
                 tracker.record_quota(key, limited=True, reason="unconfigured")

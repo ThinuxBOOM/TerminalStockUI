@@ -108,29 +108,6 @@ class YFinanceProvider:
             except Exception:
                 price = None
             hist = ticker.history(period="2d", auto_adjust=True)
-            if hist is None or len(hist) == 0:
-                if price is None:
-                    raise ProviderError(self.name, f"no data for {symbol}")
-                # History empty but fast_info has a price: keep its currency
-                # (hardcoding USD here once mislabeled Euronext quotes).
-                ccy_only = "USD"
-                try:
-                    ccy_only = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                return {"symbol": symbol.upper(), "price": float(price),
-                        "currency": ccy_only, "as_of": _utcnow()}
-            last = hist.iloc[-1]
-            # Single-row history has no observable prior close: leave
-            # prev_close missing (never fabricate change=0 "flat day").
-            prev = hist.iloc[-2] if len(hist) > 1 else None
-            currency = getattr(ticker, "fast_info", None)
-            ccy = "USD"
-            try:
-                ccy = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            _ = currency
             def _safe_volume(value: object) -> int | None:
                 # None/inf/str must not kill a live quote (int(None) raises).
                 try:
@@ -155,6 +132,49 @@ class YFinanceProvider:
                     return None
                 return number
 
+            # Yahoo appends today's still-forming bar with NaN OHLC (volume
+            # only) while the session develops or before it finalizes. The
+            # latest row is therefore NOT always usable: scan back for the
+            # last COMPLETE row (finite close) instead of dying on NaNs.
+            # (2026-09-15: 600519.SS served NaN-today + Sept-14-complete;
+            # blindly taking iloc[-1] 502'd every SSE quote.)
+            last = None
+            prev = None
+            if hist is not None and len(hist) > 0:
+                for back in range(len(hist)):
+                    idx = len(hist) - 1 - back
+                    try:
+                        candidate = hist.iloc[idx]
+                    except (IndexError, KeyError):
+                        break
+                    try:
+                        if _safe_price(candidate["Close"]) is not None:
+                            last = candidate
+                            prev = hist.iloc[idx - 1] if idx - 1 >= 0 else None
+                            break
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        continue
+            if last is None:
+                if price is None:
+                    raise ProviderError(self.name, f"no data for {symbol}")
+                # History empty but fast_info has a price: keep its currency
+                # (hardcoding USD here once mislabeled Euronext quotes).
+                ccy_only = "USD"
+                try:
+                    ccy_only = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                return {"symbol": symbol.upper(), "price": float(price),
+                        "currency": ccy_only, "as_of": _utcnow()}
+            # Complete row found above; single-row history has no observable
+            # prior close (prev stays None: never fabricate change=0).
+            currency = getattr(ticker, "fast_info", None)
+            ccy = "USD"
+            try:
+                ccy = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            _ = currency
             close = _safe_price(last["Close"])
             if close is None:
                 raise ProviderError(self.name, f"no data for {symbol}")

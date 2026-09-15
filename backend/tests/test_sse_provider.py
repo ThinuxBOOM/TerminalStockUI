@@ -402,3 +402,91 @@ def test_shanghai_display_utc_storage():
     assert "14:30" in disp
     assert utc.tzinfo is not None
     assert utc.isoformat().endswith("+00:00")
+
+def test_yfinance_nan_today_row_uses_last_complete_bar(monkeypatch):
+    """Prod 2026-09-15 regression: Yahoo appends today'"'"'s still-forming bar
+    with NaN OHLC (volume only). The quote must use the last COMPLETE row,
+    not raise "no data" (which 502'"'"'d every SSE quote while AKShare was
+    uninstallable). Offline: fake Ticker only."""
+    import pandas as _pd
+
+    from backend.market_data.providers import yfinance as yfmod
+    from backend.market_data.providers.yfinance import YFinanceProvider
+
+    idx = _pd.to_datetime(["2026-09-14", "2026-09-15"])
+    hist = _pd.DataFrame(
+        {"Open": [1277.27, float("nan")], "High": [1285.53, float("nan")],
+         "Low": [1270.36, float("nan")], "Close": [1277.96, float("nan")],
+         "Volume": [1657146, 1376172]},
+        index=idx,
+    )
+
+    class _Fast:
+        last_price = None
+        currency = "CNY"
+
+    class _Ticker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        @property
+        def fast_info(self):
+            return _Fast()
+
+        def history(self, period="2d", auto_adjust=True):
+            assert period == "2d"
+            return hist
+
+    class _FakeYF:
+        @staticmethod
+        def Ticker(symbol):
+            return _Ticker(symbol)
+
+    monkeypatch.setattr(yfmod, "yf", _FakeYF())
+    quote = YFinanceProvider().get_quote("600519.SS")
+    assert quote["fallback_used"] is False
+    assert quote["price"] == 1277.96
+    assert quote["currency"] == "CNY"
+    assert quote["prev_close"] is None  # only one complete row: no flat-day fake
+
+
+def test_yfinance_all_nan_history_falls_back_to_fast_info(monkeypatch):
+    """All-NaN history + finite fast_info price -> live ccy-only quote."""
+    import pandas as _pd
+
+    from backend.market_data.providers import yfinance as yfmod
+    from backend.market_data.providers.yfinance import YFinanceProvider
+
+    idx = _pd.to_datetime(["2026-09-14", "2026-09-15"])
+    hist = _pd.DataFrame(
+        {"Open": [float("nan")] * 2, "High": [float("nan")] * 2,
+         "Low": [float("nan")] * 2, "Close": [float("nan")] * 2,
+         "Volume": [100, 200]},
+        index=idx,
+    )
+
+    class _Fast:
+        last_price = 1272.75
+        currency = "CNY"
+
+    class _Ticker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        @property
+        def fast_info(self):
+            return _Fast()
+
+        def history(self, period="2d", auto_adjust=True):
+            return hist
+
+    class _FakeYF:
+        @staticmethod
+        def Ticker(symbol):
+            return _Ticker(symbol)
+
+    monkeypatch.setattr(yfmod, "yf", _FakeYF())
+    quote = YFinanceProvider().get_quote("600519.SS")
+    assert quote["fallback_used"] is False
+    assert quote["price"] == 1272.75
+    assert quote["currency"] == "CNY"

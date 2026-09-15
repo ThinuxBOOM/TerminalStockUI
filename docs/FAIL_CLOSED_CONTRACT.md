@@ -63,6 +63,15 @@
   as provider calls; unknown/no-work probes report `latency_ms: null`.
 - State is `up|degraded|down|unknown|unconfigured` — the dashboard maps it
   verbatim and never invents `"ok"` for providers with no samples.
+- `GET /api/providers/health` pings sample-less providers on demand
+  (parallel lightweight quote / FX pair / AI model-list; skipped under
+  pytest) because passive per-process stats are always empty on serverless.
+  AI without a key short-circuits to `unconfigured` with no network and no
+  latency sample.
+- Keys: yfinance / akshare / stooq / FX need none. Alpaca / Finnhub /
+  TwelveData need free-tier keys for redundancy (skipped without them; US
+  coverage falls back to yfinance). AI keys (Gemini/OpenAI/Anthropic/xAI)
+  enable opinions only — the deterministic forecast never needs them.
 
 ## Provenance
 

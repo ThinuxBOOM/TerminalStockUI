@@ -226,3 +226,47 @@ def test_health_lightweight_and_known_coverage():
     assert elapsed_ms < 1000.0, f"/health took {elapsed_ms:.0f}ms (must stay lightweight)"
     names = {p["provider"] for p in resp.json()["providers"]}
     assert {"yfinance", "fx", "gemini"} <= names
+
+def test_ai_unconfigured_probe_leaves_no_latency_sample(monkeypatch):
+    """Unconfigured AI ping marks unconfigured with zero samples (no fake ms)."""
+    import os
+
+    from backend.market_data.health import ProviderHealthTracker, probe_ai_provider
+
+    for env in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    tracker = ProviderHealthTracker()
+    out = probe_ai_provider("gemini", tracker)
+    assert out["state"] == "unconfigured"
+    stats = tracker.stats("gemini")
+    assert stats["state"] == "unconfigured"
+    assert stats["total_calls"] == 0
+    assert stats["latency_p50_ms"] is None
+    assert stats["latency_p95_ms"] is None
+
+
+def test_providers_health_probes_zero_sample_providers(monkeypatch):
+    """Probe-on-empty pings only sample-less providers (measured, not unknown)."""
+    import backend.api.providers as providers_module
+    from backend.market_data.health import ProviderHealthTracker
+
+    tracker = ProviderHealthTracker()
+    tracker.record("yfinance", 120.0, True)  # sampled -> must NOT be probed
+    calls: list[str] = []
+
+    def _fake_probe(name, trk=None, **kw):
+        calls.append(name)
+        assert trk is tracker
+        trk.record(name, 42.0, True)
+        return trk.stats(name)
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # enable probing
+    monkeypatch.setattr(
+        "backend.market_data.health.probe_provider", _fake_probe)
+    out = providers_module.providers_health(tracker)
+    rows = {p["provider"]: p for p in out["providers"]}
+    assert "yfinance" not in calls
+    assert {"akshare", "fx", "gemini"} <= set(calls)
+    assert rows["akshare"]["total_calls"] == 1
+    assert rows["akshare"]["latency_p50_ms"] == 42.0
+    assert rows["yfinance"]["latency_p50_ms"] == 120.0

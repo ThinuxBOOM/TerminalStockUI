@@ -95,6 +95,48 @@ def _enriched_stat(tracker: ProviderHealthTracker, name: str) -> dict:
     return stats
 
 
+def _probe_zero_sample_providers(tracker: ProviderHealthTracker, names: list[str]) -> None:
+    """Actively ping sample-less providers so the dashboard shows measured
+    data instead of unknown everywhere.
+
+    Passive tracker stats are per-process: on serverless every instance
+    starts empty, so a purely read-only dashboard reports all providers
+    unknown even while quotes flow on sibling instances. Pinging just the
+    zero-sample providers (parallel lightweight single quote / FX pair /
+    AI model-list; AI without a key short-circuits to unconfigured with no
+    network) fixes that. Skipped under pytest (PYTEST_CURRENT_TEST) to keep
+    the suite offline and deterministic. Never raises.
+    """
+    import os as _os
+
+    try:
+        if _os.getenv("PYTEST_CURRENT_TEST"):
+            return
+        todo: list[str] = []
+        for _n in names or []:
+            try:
+                if int((tracker.stats(_n) or {}).get("total_calls") or 0) == 0:
+                    todo.append(_n)
+            except Exception:
+                continue
+        if not todo:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        from backend.market_data.health import probe_provider as _probe
+
+        def _one(_name: str) -> None:
+            try:
+                _probe(_name, tracker)
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=max(1, min(11, len(todo)))) as _pool:
+            list(_pool.map(_one, todo))
+    except Exception:
+        pass
+
+
 @router.get("/health")
 def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker)):
     """GET /api/providers/health -> per-provider latency/error/circuit state.
@@ -104,13 +146,19 @@ def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker
     calls_1h/total_calls/circuit/last_check) and adds kind/state/
     error_rate_5m/calls_5m/last_success/consecutive_failures/quota
     (+ configured for authenticated providers). Rows cover every known
-    provider even before their first call. Read-only: never probes, never
-    blocks on upstream networks.
+    provider even before their first call. Zero-sample providers are
+    actively pinged (parallel, lightweight) so serverless instances report
+    measured rows instead of unknown everywhere; uncalled/unprobed rows
+    report null latencies, never fabricated 0ms.
     """
     try:
         from backend.market_data.health import KNOWN_PROVIDERS as _KNOWN
     except Exception:
         _KNOWN = ALL_PROBE_PROVIDERS
+    try:
+        _probe_zero_sample_providers(tracker, list(_KNOWN))
+    except Exception:
+        pass
     rows: list[dict] = []
     seen: set[str] = set()
     for _name in _KNOWN:
