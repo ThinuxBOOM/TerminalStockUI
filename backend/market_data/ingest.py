@@ -344,17 +344,27 @@ def _grade_for_ingest() -> str:
 
 
 def _get_or_create_db_instrument(db, registry_instrument):
-    """Map a registry instrument to its DB row (create on first ingest)."""
+    """Map a registry instrument to its DB row (create on first ingest).
+
+    Race-safe: concurrent fan-outs (screener/markets/ingest) can all miss
+    the SELECT and INSERT the same (mic, symbol) — the losers hit the
+    ``uq_instruments_mic_symbol`` UNIQUE constraint. On any flush failure
+    roll back and re-SELECT the winner's row instead of raising (which
+    previously produced 23505 errors plus ShareLock pile-ups on Postgres).
+    """
     from backend.db.models import Instrument as DBInstrument
 
-    row = (
-        db.query(DBInstrument)
-        .filter(
-            DBInstrument.exchange_mic == registry_instrument.exchange_mic,
-            DBInstrument.exchange_symbol == registry_instrument.exchange_symbol,
+    def _find():
+        return (
+            db.query(DBInstrument)
+            .filter(
+                DBInstrument.exchange_mic == registry_instrument.exchange_mic,
+                DBInstrument.exchange_symbol == registry_instrument.exchange_symbol,
+            )
+            .first()
         )
-        .first()
-    )
+
+    row = _find()
     if row is not None:
         return row
     row = DBInstrument(
@@ -373,7 +383,19 @@ def _get_or_create_db_instrument(db, registry_instrument):
         is_active=True,
     )
     db.add(row)
-    db.flush()  # assign the UUID PK before bar upserts
+    try:
+        db.flush()  # assign the UUID PK before bar upserts
+    except Exception:
+        # Lost the create race (or any flush failure): roll back to clear
+        # the failed state, then return the winner's row.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        existing = _find()
+        if existing is not None:
+            return existing
+        raise
     return row
 
 

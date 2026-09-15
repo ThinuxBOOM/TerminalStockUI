@@ -236,3 +236,21 @@ def test_write_through_persists_live_quote_only(isolated_db):
         assert row.source == "yfinance"
     finally:
         _teardown()
+
+
+def test_snapshot_instrument_id_never_registry_string(isolated_db):
+    """Prod 22P02 regression: quote_snapshots.instrument_id is a UUID FK.
+
+    The registry id ("XNAS-AAPL"-style) must never reach the UUID column —
+    every live quote used to emit ``invalid input syntax for type uuid`` on
+    Postgres (SQLite silently stored the string, hiding the bug).
+    """
+    try:
+        svc = _service(_FlipProvider())
+        quote = svc.get_quote("AAPL")
+        assert quote["provenance"]["fallback_used"] is False
+        row = _snapshot_row("AAPL")
+        assert row is not None
+        assert row.instrument_id is None
+    finally:
+        _teardown()

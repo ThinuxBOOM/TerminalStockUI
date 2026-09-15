@@ -296,3 +296,58 @@ def test_get_bars_unreachable_db_raises_provider_error(isolated_db, monkeypatch)
             svc.get_bars("AAPL", timeframe="1d", limit=7)
     finally:
         _teardown()
+
+def test_get_or_create_survives_create_race(isolated_db):
+    """Prod 23505/ShareLock regression: concurrent first-ingests of the same
+    symbol must not raise -- the flush loser rolls back and returns the
+    winner's row (exactly one row exists afterwards)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.db.models import Instrument as DBInstrument
+    from backend.db.session import get_session_factory, init_db
+    from backend.market_data.ingest import _get_or_create_db_instrument
+
+    init_db()
+    Session = get_session_factory()
+    registry = InstrumentRegistry()
+    inst, _, _ = registry.resolve("AAPL")
+    assert inst is not None
+
+    db = Session()
+    try:
+        real_flush = db.flush
+
+        def _racy_flush():
+            # Release our read snapshot so the "concurrent worker" can
+            # commit, then simulate losing the UNIQUE race on flush.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            winner = Session()
+            try:
+                _get_or_create_db_instrument(winner, inst)
+                winner.commit()
+            finally:
+                winner.close()
+            raise IntegrityError(
+                "INSERT INTO instruments", {}, Exception("duplicate key"))
+
+        db.flush = _racy_flush  # type: ignore[method-assign]
+        row = _get_or_create_db_instrument(db, inst)
+        assert row is not None
+        assert row.exchange_mic == "XNAS"
+        assert row.exchange_symbol == "AAPL"
+        db.flush = real_flush  # type: ignore[method-assign]
+        db.rollback()
+    finally:
+        db.close()
+
+    checker = Session()
+    try:
+        n = checker.query(DBInstrument).filter(
+            DBInstrument.exchange_mic == "XNAS",
+            DBInstrument.exchange_symbol == "AAPL").count()
+        assert n == 1
+    finally:
+        checker.close()

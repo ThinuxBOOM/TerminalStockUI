@@ -865,7 +865,13 @@ class MarketDataService:
         try:
             kwargs = {
                 "symbol": provider_symbol,
-                "instrument_id": getattr(instrument, "instrument_id", None),
+                # instrument_id is a UUID FK (nullable, lineage-only). The
+                # registry instrument carries a STRING id ("XNAS-AAPL") which
+                # Postgres rejects with 22P02 — so never forward it. Snapshots
+                # are keyed by provider symbol; lineage can re-join on
+                # (exchange_mic, symbol) when needed. No extra SELECT here:
+                # this runs on every live quote (hot path).
+                "instrument_id": None,
                 "exchange_mic": mic,
                 "price": price,
                 "open": self._safe_num(quote.get("open")),
