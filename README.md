@@ -322,10 +322,10 @@ Provider latency/error dashboard data: `GET /api/providers/health`
 > Delays are honest (`delay_minutes`, grade). Stale data and fallbacks are refused, never served.
 
 - Live data or an honest error: `502` no live data · `423` AI disabled / FX refused · `422` bad input · `404` unknown. Never `200` with synthetic/stub/stale/cached-as-fresh. `fallback_used` is always `false` on success.
-- Quotes/bars: first live wins (US: Alpaca → yfinance → Finnhub → TwelveData → Stooq; SSE: yfinance → AKShare; Euronext: yfinance → Stooq), else `502`. Bars DB-first with coverage gate, then live fetch, else `502`.
+- Quotes/bars: first live wins (US: Alpaca → yfinance → Finnhub → TwelveData → Stooq; SSE: yfinance → AKShare; Euronext: yfinance → Stooq), else `502`. Bars DB-first with coverage gate plus a calendar-aware freshness gate (latest bar must cover the last completed session; 15min delay fine, days-old → refresh-or-`502`).
 - AI: no key → `423`; live failure / stub → `502` (wire guard). `ai_enabled:false` returns the deterministic blend with no fake opinion.
 - FX: Frankfurter → yfinance FX → `502`. No stub table served.
-- Frontend: missing provenance throws to `ErrorState`; `422`/`502` throw immediately (only `404`/`501` fall through); stale/fallback renders `ErrorState` with retry, never a table + banner.
+- Frontend: missing provenance throws to `ErrorState`; `422`/`502` throw immediately (only `404`/`501` fall through); stale/fallback renders `ErrorState` with retry, never a table + banner. Provider health shows measured latency only (uncalled → `unknown`, no fake `0ms`).
 - Normative: `docs/FAIL_CLOSED_CONTRACT.md`.
 
 ## v1 status summary (M8 docs verification)
@@ -387,9 +387,9 @@ equal until `market_cap` is exposed) · Welcome/Login/tier stubs (no gating) DON
 
 Verification at lock-in (final commit — all green, no failures):
 
-- Frontend: `npm run test -- --run` → **128 passed (7 files)**; `npm run build`
+- Frontend: `npm run test -- --run` → **129 passed (7 files)**; `npm run build`
   → clean (`vite build`, 196 modules).
-- Backend: `python -m pytest backend/tests -q -p no:cacheprovider` → **621 passed, 0 failed**
+- Backend: `python -m pytest backend/tests -q -p no:cacheprovider` → **627 passed, 0 failed**
   (45 test files incl. hardening; fail-closed contract: 502/423/422, never stub 200).
 - Full-route check: 54 `@router` endpoints in `backend/api/`; 6 migrations apply
   (`0006_revamp.sql` last).
