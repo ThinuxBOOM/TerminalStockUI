@@ -170,7 +170,7 @@ function LiquidationSection({ mics }) {
   const list = Array.isArray(mics) && mics.length > 0 ? mics : ["XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"];
   const [open, setOpen] = useState(false);
   return (
-    <section className="term-panel min-w-0 p-4 md:col-span-3" aria-labelledby="home-liquidation" id="market-liquidation">
+    <section className="term-panel min-w-0 p-4" aria-labelledby="home-liquidation" id="market-liquidation">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 id="home-liquidation" className="term-label">Liquidation proxy per market · PROXY</h2>
         <button type="button" className="term-btn-ghost text-xs" onClick={() => setOpen((v) => !v)} aria-expanded={open}>

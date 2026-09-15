@@ -198,7 +198,7 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
   if (isLoading) {
     return (
       <section
-        className="term-panel min-w-0 p-4 md:col-span-3 md:row-start-2"
+        className="term-panel min-w-0 p-4"
         aria-labelledby="home-liquidity"
       >
         <h2 id="home-liquidity" className="term-label">
@@ -213,7 +213,7 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
   if (isError) {
     return (
       <section
-        className="term-panel min-w-0 p-4 md:col-span-3 md:row-start-2"
+        className="term-panel min-w-0 p-4"
         aria-labelledby="home-liquidity"
       >
         <h2 id="home-liquidity" className="term-label">
@@ -229,7 +229,7 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
   if (markets.length === 0) {
     return (
       <section
-        className="term-panel min-w-0 p-4 md:col-span-3 md:row-start-2"
+        className="term-panel min-w-0 p-4"
         aria-labelledby="home-liquidity"
       >
         <h2 id="home-liquidity" className="term-label">
@@ -270,7 +270,7 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
   }
   return (
     <section
-      className="term-panel min-w-0 p-4 md:col-span-3 md:row-start-2"
+      className="term-panel min-w-0 p-4"
       aria-labelledby="home-liquidity"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">

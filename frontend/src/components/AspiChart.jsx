@@ -602,7 +602,7 @@ function MarketIndicesSection({ userId = null, tier = null }) {
   const [all, setAll] = useState(false);
   const [tick, setTick] = useState(0);
   return (
-    <section className="term-panel min-w-0 p-4 md:col-span-3" aria-labelledby="home-indices" id="market-indices">
+    <section className="term-panel min-w-0 p-4" aria-labelledby="home-indices" id="market-indices">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 id="home-indices" className="term-label">
           Market indices &amp; Top-20 composites
