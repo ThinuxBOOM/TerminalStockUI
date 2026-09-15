@@ -5,7 +5,6 @@ import {
   TURNOVER_COMPARABILITY_NOTE,
   breadthRatios,
   canRankCrossCurrency,
-  computeBreadthFromScreener,
   deriveMarketCardState,
   dominantMarketState,
   isStaleLiquidity,
@@ -13,6 +12,7 @@ import {
   normalizeLiquidityHistory,
   normalizeLiquidityHistoryWindow,
   normalizeMarketBreadth,
+  normalizeMarketsOverview,
 } from "./markets";
 
 const TS = "2026-01-15T12:00:00.000Z";
@@ -60,53 +60,29 @@ describe("market venue set (6 MICs, no hardcoded prices)", () => {
   });
 });
 
-describe("computeBreadthFromScreener (adv/dec from change_pct)", () => {
-  it("counts advancers/decliners/unchanged from change_pct sign", () => {
-    const out = computeBreadthFromScreener("XNYS", [
-      screenerRow({ symbol: "A", change_pct: 1.2 }),
-      screenerRow({ symbol: "B", change_pct: -0.4 }),
-      screenerRow({ symbol: "C", change_pct: 0 }),
-      screenerRow({ symbol: "D", change_pct: null }),
-    ]);
-    expect(out.mic).toBe("XNYS");
-    expect(out.advancers).toBe(1);
-    expect(out.decliners).toBe(1);
-    expect(out.unchanged).toBe(1);
-    expect(out.total).toBe(4);
-    expect(out.avg_change_pct).toBeCloseTo((1.2 - 0.4 + 0) / 3, 10);
+describe("fail-closed provenance (no fallbacks)", () => {
+  it("normalizeMarketBreadth throws on missing provenance (never synthesizes)", () => {
+    expect(() => normalizeMarketBreadth({ mic: "XNYS" })).toThrow("provenance missing");
+    expect(() => normalizeMarketBreadth({ mic: "XNYS", provenance: null })).toThrow("provenance missing");
+    expect(() => normalizeMarketBreadth(null)).toThrow("provenance missing");
   });
-  it("computes turnover as native price*volume with no FX", () => {
-    const out = computeBreadthFromScreener("XPAR", [
-      screenerRow({ symbol: "MC.PA", price: 10, volume: 100, change_pct: 0.5 }),
-      screenerRow({ symbol: "BN.PA", price: 20, volume: 50, change_pct: -0.5 }),
-    ]);
-    // 10*100 + 20*50 = 2000 native (EUR) — no conversion applied.
-    expect(out.turnover).toBe(2000);
-    expect(out.total_volume).toBe(150);
-    expect(out.turnover_note).toContain("no FX");
+  it("normalizeMarketsOverview throws on missing provenance", () => {
+    expect(() => normalizeMarketsOverview({ markets: [] })).toThrow("provenance missing");
+    expect(() => normalizeMarketsOverview(null)).toThrow("provenance missing");
   });
-  it("averages high-low range and counts market states", () => {
-    const out = computeBreadthFromScreener("XSHG", [
-      screenerRow({ symbol: "A", range_pct: 2, market_state: "open" }),
-      screenerRow({ symbol: "B", range_pct: 4, market_state: "lunch" }),
-    ]);
-    expect(out.avg_range_pct).toBeCloseTo(3, 10);
-    expect(out.market_state_counts).toMatchObject({ open: 1, lunch: 1 });
-  });
-  it("marks client fallback provenance grade D + stale", () => {
-    const out = computeBreadthFromScreener("XNAS", [screenerRow({})]);
-    expect(out.provenance.fallback_used).toBe(true);
-    expect(out.provenance.quality_grade).toBe("D");
-    expect(isStaleLiquidity(out.provenance)).toBe(true);
+  it("normalizeLiquidityHistory throws on missing provenance", () => {
+    expect(() => normalizeLiquidityHistory({ mic: "XNYS", points: [] }, "XNYS")).toThrow(
+      "provenance missing"
+    );
+    expect(normalizeLiquidityHistory(null, "XNYS")).toBeNull();
   });
   it("never stands absolute change in for change_pct", () => {
-    const out = computeBreadthFromScreener("XNYS", [
-      { symbol: "Z", price: 50, change: 1.75, volume: 10, market_state: "open", provenance: prov() },
-    ]);
-    expect(out.advancers).toBe(0);
-    expect(out.decliners).toBe(0);
-    expect(out.unchanged).toBe(0);
-    expect(out.avg_change_pct).toBeNull();
+    const out = normalizeMarketBreadth({
+      mic: "XNYS",
+      rows: [{ symbol: "Z", price: 50, change: 1.75, volume: 10, market_state: "open" }],
+      provenance: prov(),
+    });
+    expect(out.rows[0].change_pct).toBeNull();
   });
 });
 

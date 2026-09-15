@@ -1,5 +1,5 @@
-"""Last-fetched persistence: live quotes write through to quote_snapshots,
-outages serve the stored market data (not placeholders), and first-view bars
+"""Fail-closed persistence: live quotes write through to quote_snapshots,
+outages raise (no snapshot cover, no placeholders), and first-view bars
 are backfilled on demand. Offline only (no network)."""
 
 from __future__ import annotations
@@ -108,34 +108,37 @@ def test_live_quote_persists_snapshot(isolated_db):
         _teardown()
 
 
-def test_outage_serves_last_live_quote_not_placeholder(isolated_db):
+def test_outage_raises_despite_snapshot(isolated_db):
+    # Fail-closed: a stored snapshot is never served as cover. Live first
+    # (write-through persists), then outage raises ProviderError.
     try:
         provider = _FlipProvider()
         svc = _service(provider)
         live = svc.get_quote("GOOGL")
         assert live["provenance"]["fallback_used"] is False
+        assert live["price"] == 338.50
+        # Write-through persisted the live quote...
+        assert _snapshot_row("GOOGL") is not None
 
         provider.live = False  # outage from here on
-        out = svc.get_quote("GOOGL")
-        assert out["price"] == 338.50  # last real data, not the $100 stub
-        assert out["provenance"]["fallback_used"] is True
-        assert out["provenance"]["source"] == "yfinance"
-        # Header + stored OHLC survive the outage too.
-        assert out["open"] == 335.00
-        assert out["prev_close"] == 332.60
+        # ...but the outage still raises instead of serving the snapshot.
+        with pytest.raises(ProviderError):
+            svc.get_quote("GOOGL")
     finally:
         _teardown()
 
 
-def test_outage_without_history_still_stubbed(isolated_db):
-    """No snapshot ever stored -> honest flagged stub (never a crash)."""
+def test_outage_without_history_raises_provider_error(isolated_db):
+    """No snapshot ever stored -> fail-closed raise (never a stub)."""
     try:
         provider = _FlipProvider()
         provider.live = False
         svc = _service(provider)
-        out = svc.get_quote("GOOGL")
-        assert out["provenance"]["fallback_used"] is True
-        assert out["price"] == 100.0
+        with pytest.raises(ProviderError):
+            svc.get_quote("GOOGL")
+        # Outage before any live quote leaves no row behind (stubs never
+        # persist).
+        assert _snapshot_row("GOOGL") is None
     finally:
         _teardown()
 
@@ -209,11 +212,27 @@ def test_bars_miss_is_negatively_cached(isolated_db, monkeypatch):
             health=tracker,
             cache=InMemoryCache(),
         )
-        # AAPL resolves in-registry; fetch fails -> anchored stub fallback.
-        out = svc.get_bars("AAPL", timeframe="1d", limit=5)
-        assert out["provenance"]["fallback_used"] is True
+        # AAPL resolves in-registry; fetch fails -> fail-closed raise.
+        with pytest.raises(ProviderError):
+            svc.get_bars("AAPL", timeframe="1d", limit=5)
         assert len(calls) == 1
-        svc.get_bars("AAPL", timeframe="1d", limit=5)
+        with pytest.raises(ProviderError):
+            svc.get_bars("AAPL", timeframe="1d", limit=5)
         assert len(calls) == 1  # second view skipped the doomed fetch
+    finally:
+        _teardown()
+
+
+def test_write_through_persists_live_quote_only(isolated_db):
+    """_persist_quote_snapshot stores live-shaped quotes, never outages."""
+    try:
+        svc = _service(_FlipProvider())
+        quote = svc.get_quote("GOOGL")
+        assert quote["provenance"]["fallback_used"] is False
+        row = _snapshot_row("GOOGL")
+        assert row is not None
+        assert float(row.price) == 338.50
+        assert row.currency == "USD"
+        assert row.source == "yfinance"
     finally:
         _teardown()

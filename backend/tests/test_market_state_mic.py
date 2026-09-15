@@ -33,52 +33,31 @@ TUE_XSHG_LUNCH = datetime(2026, 9, 8, 12, 0, tzinfo=SH)  # lunch break
 
 
 def _svc_with_fixed_as_of(fixed_as_of: datetime) -> MarketDataService:
-    """Stub-mode service whose quotes all stamp ``fixed_as_of``.
+    """Live-double service whose quotes all stamp ``fixed_as_of``.
 
-    Wraps the real stub so price/currency/missing-field shape stays
-    realistic; only ``as_of`` is pinned for determinism.
-
-    Also neutralizes the quote-snapshot read-through: on the fallback path
-    get_quote prefers the last LIVE snapshot from the CWD sqlite DB, which
-    would discard the pinned ``as_of`` and make results depend on whatever
-    rows earlier runs left behind (e.g. a same-day AAPL snapshot turns the
-    stale test below into "closed"). Snapshot persistence itself is covered
-    by the snapshot tests; here it is orthogonal noise.
+    Fail-closed: uses live quotes (``fallback_used=False``) so
+    ``MarketDataService.get_quote`` serves them instead of raising.
+    Wraps the real stub shape then flips to live; only ``as_of`` is
+    pinned for determinism.
     """
     tracker = ProviderHealthTracker()
     provider = YFinanceProvider(
         stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
     )
-    svc = MarketDataService(
-        registry=InstrumentRegistry(), provider=provider, health=tracker, cache=None
-    )
-    try:
-        svc._read_quote_snapshot = lambda *a, **k: None  # type: ignore[method-assign]
-    except Exception:
-        pass
     orig_get = provider.get_quote
 
     def _fixed(symbol: str, *a, **k):  # type: ignore[no-untyped-def]
         q = dict(orig_get(symbol, *a, **k))
         q["as_of"] = fixed_as_of
+        q["fallback_used"] = False
+        q.pop("fallback", None)
         return q
 
     provider.get_quote = _fixed  # type: ignore[method-assign]
-    # SSE chain uses a secondary provider; pin it too for determinism.
-    try:
-        orig_ak = svc._call_akshare
-
-        def _fixed_ak(ak_code: str):  # type: ignore[no-untyped-def]
-            q = orig_ak(ak_code)
-            if q is None:
-                return None
-            q = dict(q)
-            q["as_of"] = fixed_as_of
-            return q
-
-        svc._call_akshare = _fixed_ak  # type: ignore[method-assign]
-    except Exception:
-        pass
+    svc = MarketDataService(
+        registry=InstrumentRegistry(), provider=provider, health=tracker,
+        cache=None, akshare_provider=None,
+    )
     return svc
 
 

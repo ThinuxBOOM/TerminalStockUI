@@ -144,8 +144,11 @@ def market_liquidation_proxy(
     rows = rows[: max(1, int(limit))]
     try:
         provenance = _combine_provenance(scan.get("rows") or [])
-    except Exception:
-        provenance = {"source": "scan", "quality_grade": "C", "fallback_used": True}
+    except Exception as exc:
+        # Fail-closed: no honest provenance envelope, no response.
+        raise HTTPException(
+            status_code=502, detail=sanitize_error(exc, prefix="liquidation scan failed")
+        ) from exc
     try:
         missing = list(provenance.get("missing_fields") or [])
         if "liquidation-feed" not in missing:

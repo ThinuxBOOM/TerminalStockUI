@@ -3,7 +3,8 @@
 Covers: Fernet round-trip + wrong-key failure, EncryptedSecretStore
 ciphertext-at-rest + safe describe(), redacted logs (mapping + string),
 and an end-to-end scan of insight / forecast / audit JSON for planted
-``sk-`` secrets.
+``sk-`` secrets. Fail-closed paths (423 AI-disabled, 502 outage) must
+also be key-free.
 """
 
 from __future__ import annotations
@@ -41,10 +42,26 @@ def _fresh_key(monkeypatch):
 
 
 def _stub_service() -> MarketDataService:
+    """Live double: stub quotes marked live (fail-closed contract)."""
     tracker = ProviderHealthTracker()
     provider = YFinanceProvider(
         stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
     )
+    _orig = provider.get_quote
+
+    def _live_get_quote(symbol: str, *args, **kwargs) -> dict:  # type: ignore[no-untyped-def]
+        upper = (symbol or "").strip().upper() if isinstance(symbol, str) else ""
+        if not upper:
+            return _orig(symbol, *args, **kwargs)
+        q = dict(_orig(symbol, *args, **kwargs))
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        q.pop("circuit_open", None)
+        if q.get("price") is None:
+            q["price"] = 150.0
+        return q
+
+    provider.get_quote = _live_get_quote  # type: ignore[method-assign]
     return MarketDataService(
         registry=InstrumentRegistry(), provider=provider,
         health=tracker, cache=InMemoryCache(),
@@ -112,24 +129,45 @@ def test_redacted_logs(_fresh_key):
 
 
 def test_keys_never_in_api_responses(_fresh_key):
-    """Plant live-looking keys, then scan insight/forecast/audit JSON."""
+    """Plant live-looking keys, then scan 200/423/502 JSON for leaks."""
     store = EncryptedSecretStore()
     gemini_secret = "sk-live-m8-gemini-abc123"
     openai_secret = "sk-live-m8-openai-xyz789"
     store.put("openai", "api_key", openai_secret)
     # NOTE: gemini key is planted only for the health/describe scan below.
-    # The insight call itself uses the openai-key-only store so it stays on
-    # the fast no-key stub path (a configured gemini key would attempt a
-    # live HTTPS call first).
+    # The insight call itself uses the openai-key-only store so the gemini
+    # profile has no key and takes the fail-closed 423 path (never a stub
+    # opinion, never a live HTTPS call).
     client = _client_with_store(store)
     try:
-        # Insight (gemini stub) must not leak the planted openai key.
+        # Insight without a gemini key -> 423, key-free (fail-closed).
         resp = client.post(
             "/api/ai/insight", json={"symbol": "AAPL", "profile": "quick_insight"}
         )
-        assert resp.status_code == 200, resp.text
-        for secret in (openai_secret,):
+        assert resp.status_code == 423, resp.text
+        for secret in (openai_secret, gemini_secret):
             assert secret not in resp.text
+        assert "sk-live" not in resp.text
+
+        # AI forecast_opinion without keys but ai_enabled=True -> 423, key-free.
+        resp = client.post(
+            "/api/ai/forecast_opinion",
+            json={"symbol": "AAPL", "horizon": 21, "quant_prob": 0.6},
+        )
+        assert resp.status_code == 423, resp.text
+        assert openai_secret not in resp.text
+        assert gemini_secret not in resp.text
+        assert "sk-live" not in resp.text
+
+        # AI-disabled blend still works without keys (deterministic intact).
+        resp = client.post(
+            "/api/ai/forecast_opinion",
+            json={"symbol": "AAPL", "horizon": 21, "quant_prob": 0.6,
+                  "ai_enabled": False},
+        )
+        assert resp.status_code == 200, resp.text
+        assert openai_secret not in resp.text
+        assert gemini_secret not in resp.text
 
         # Forecast + audit surfaces never carry key material.
         for path, kwargs in [
@@ -142,6 +180,13 @@ def test_keys_never_in_api_responses(_fresh_key):
             assert r.status_code == 200, (path, r.text)
             assert openai_secret not in r.text
             assert gemini_secret not in r.text  # never stored, never returned
+
+        # 502 outage path (unknown symbol has no live bars) is also key-free.
+        r = client.get("/api/forecast/ZZZ_NOPE_123", params={"horizon": 21})
+        assert r.status_code in (404, 422, 502), r.text
+        assert openai_secret not in r.text
+        assert gemini_secret not in r.text
+        assert "sk-live" not in r.text
 
         # Health/describe path with a gemini key configured: names only.
         store.put("gemini", "api_key", gemini_secret)

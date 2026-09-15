@@ -317,6 +317,17 @@ Provider latency/error dashboard data: `GET /api/providers/health`
   while functionality is unaffected — code truth is `.jsx` (`frontend/src/api/client.js`,
   `frontend/src/pages/WatchlistPage.jsx`).
 
+## Fail-closed contract (NO FALLBACKS — V1 lock-in)
+
+> Delays are honest (`delay_minutes`, grade). Stale data and fallbacks are refused, never served.
+
+- Live data or an honest error: `502` no live data · `423` AI disabled / FX refused · `422` bad input · `404` unknown. Never `200` with synthetic/stub/stale/cached-as-fresh. `fallback_used` is always `false` on success.
+- Quotes/bars: first live wins (US: Alpaca → yfinance → Finnhub → TwelveData → Stooq; SSE: yfinance → AKShare; Euronext: yfinance → Stooq), else `502`. Bars DB-first with coverage gate, then live fetch, else `502`.
+- AI: no key → `423`; live failure / stub → `502` (wire guard). `ai_enabled:false` returns the deterministic blend with no fake opinion.
+- FX: Frankfurter → yfinance FX → `502`. No stub table served.
+- Frontend: missing provenance throws to `ErrorState`; `422`/`502` throw immediately (only `404`/`501` fall through); stale/fallback renders `ErrorState` with retry, never a table + banner.
+- Normative: `docs/FAIL_CLOSED_CONTRACT.md`.
+
 ## v1 status summary (M8 docs verification)
 
 - Backend suite at sign-off: `python -m pytest backend/tests -q` → **243 passed**
@@ -329,7 +340,8 @@ Provider latency/error dashboard data: `GET /api/providers/health`
   missing `infra/scripts/verify_audit.py` alias (now exists).
 - Non-goals hold (spec §1): no trading, no portfolio construction (placeholder only), no
   agents, no DL, no full OpenBB, no large backtest suite.
-- Known limits: holiday stubs, offline stub-fallback behavior (`fallback_used:true`, grade C),
+- Known limits: holiday stubs (licensed calendars required for production),
+  no live-data offline (fail-closed `502`/`423`, never stub `200`),
   frontend `typecheck` is a no-op echo (plain JS) — run `npm run build` / `npm test` to verify.
 - Details + evidence commands: `docs/V1_CHECKLIST.md`.
 
@@ -377,25 +389,8 @@ Verification at lock-in (final commit — all green, no failures):
 
 - Frontend: `npm run test -- --run` → **128 passed (7 files)**; `npm run build`
   → clean (`vite build`, 196 modules).
-- Backend: `python -m pytest backend/tests -q` → **588 passed, 0 failed**
-  (44 test files; verified on consecutive full runs). This includes the
-  10 previously-failing tests, fixed in the lock-in pass:
-  - AI router cache coherence (`backend/ai/router.py`): `clear_cache()` and
-    local-expiry now propagate to the dist layer (previously local-only, so
-    `clear_cache()` never forced a live attempt and backdated entries were
-    resurrected from the shared cache) + test isolation from the
-    process-global cache → `test_ai_router` ×6 and `test_hardening`
-    cache-TTL green.
-  - Quote-snapshot read-through isolation in the market-state helper (a live
-    AAPL snapshot in the CWD sqlite DB was discarding the test's pinned
-    timestamp) → `test_market_state_mic` green and DB-state-independent.
-  - Supabase pooled-engine spy moved to the real call site
-    (`supabase.create_engine`), which exposed a genuine production bug:
-    pooled engines missed `prepare_threshold: None` (would crash with
-    `DuplicatePreparedStatement` on the :6543 pooler) — fixed in
-    `backend/db/supabase.py` → `test_supabase` green.
-  - Perf budget hardened to median-of-3 <250ms (~18ms idle, 14x headroom;
-    old single-sample <50ms flaked under suite load) → `test_indicators` green.
+- Backend: `python -m pytest backend/tests -q -p no:cacheprovider` → **621 passed, 0 failed**
+  (45 test files incl. hardening; fail-closed contract: 502/423/422, never stub 200).
 - Full-route check: 54 `@router` endpoints in `backend/api/`; 6 migrations apply
   (`0006_revamp.sql` last).
 

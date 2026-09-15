@@ -195,6 +195,58 @@ def _check_horizon(horizon: Any) -> int:
     return value
 
 
+def _require_live_provider(ai: AIRouter, profile: str) -> tuple[str, str]:
+    """Fail-closed AI gate: the profile's provider must hold a usable key.
+
+    No key -> HTTP 423 (AI disabled: explicit, honest, never a fake
+    opinion). Deterministic forecasting is unaffected.
+    """
+    try:
+        provider_name, model = ai.resolve(profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    configured = False
+    try:
+        provider = ai.providers.get(provider_name)
+        health = provider.health() if provider is not None else {}
+        configured = bool(health.get("configured", False))
+    except Exception:
+        configured = False
+    if not configured:
+        raise HTTPException(
+            status_code=423,
+            detail=(
+                f"AI disabled: no API key configured for {provider_name} ({model}). "
+                "Add a key in Provider Settings to enable AI opinions; "
+                "the deterministic forecast is unaffected."
+            ),
+        )
+    return provider_name, model
+
+
+def _refuse_stub_opinion(opinion: Any, *, context: str) -> None:
+    """Wire guard: a stub opinion must never reach the API response.
+
+    With a configured provider, a stub means the live call failed
+    (timeout/network/validation) — that is a 502, not a 200 with
+    fabricated content.
+    """
+    try:
+        is_stub = bool(getattr(opinion, "stub", False))
+    except Exception:
+        is_stub = True
+    if not is_stub:
+        return
+    try:
+        reasons = " ".join(getattr(opinion, "limitations", []) or [])
+    except Exception:
+        reasons = ""
+    detail = f"AI {context} failed: live model call unsuccessful"
+    if reasons:
+        detail += f" ({str(reasons)[:200]})"
+    raise HTTPException(status_code=502, detail=detail)
+
+
 def _build_packet(symbol: str) -> EvidencePacket:
     """Assemble a bounded evidence packet from deterministic services.
 
@@ -202,6 +254,10 @@ def _build_packet(symbol: str) -> EvidencePacket:
     included (see backend/ai/evidence.py forbidden keys). The market-data
     lookup is blocking (yfinance is sync I/O); async callers below run this
     helper in a worker thread via :func:`asyncio.to_thread`.
+
+    Fail-closed: when market data is unavailable there is no honest
+    evidence to ground an opinion on, so the request raises instead of
+    assembling a degraded stub packet.
     """
     clean = (symbol or "").strip().upper()
     if not clean:
@@ -215,13 +271,13 @@ def _build_packet(symbol: str) -> EvidencePacket:
         quote = service.get_quote(clean)
     except HTTPException:
         raise
-    except Exception as exc:  # market data unavailable -> minimal degraded packet
-        logger.warning("ai packet degraded for %s: %s", clean, redact_mapping({"error": str(exc)}))
-        return build_evidence_packet(
-            clean,
-            {"quote_unavailable": True, "limitations": ["market data unavailable; AI opinion is low-confidence stub-grade"]},
-            {"source": "unknown", "quality_grade": "F", "delay_minutes": 15, "fallback_used": True},
-        )
+    except Exception as exc:
+        from backend.market_data.providers.base import ProviderError as _PE
+
+        logger.warning("ai packet failed for %s: %s", clean, redact_mapping({"error": str(exc)}))
+        if isinstance(exc, _PE):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=f"evidence packet failed: {exc}") from exc
     try:
         return _build_packet_from_quote(clean, quote)
     except HTTPException:
@@ -265,12 +321,6 @@ def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
                 })
     except Exception:
         pass
-    if provenance.get("fallback_used"):
-        risks.append({
-            "label": "Fallback/cached data in use",
-            "detail": "quote served from cache after provider issue; freshness reduced",
-            "source": str(provenance.get("source", "market-data")),
-        })
     deterministic["top_bullish"] = bullish
     deterministic["top_risks"] = risks
     deterministic["events"] = [{
@@ -285,6 +335,8 @@ def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
 @router.post("/insight")
 async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router)) -> dict[str, Any]:
     profile = _check_profile(body.profile)
+    # Fail-closed gate first: no key -> 423 before any evidence work.
+    _require_live_provider(ai, profile)
     # get_quote/yfinance are blocking sync I/O — keep the event loop free.
     packet = await asyncio.to_thread(_build_packet, body.symbol)
     try:
@@ -299,6 +351,7 @@ async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router))
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ai insight failed: {exc}") from exc
+    _refuse_stub_opinion(opinion, context="insight")
     logger.info("ai insight %s", redact_mapping({"symbol": packet.symbol, "profile": profile, "cached": cached}))
     _persist_ledger(
         ai, provider=opinion.provider, model=opinion.model, profile=profile,
@@ -337,6 +390,49 @@ async def post_forecast_opinion(
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ai weight failed: {exc}") from exc
+    _lbl = body.quant_confidence_label
+    if _lbl is not None:
+        _lbl = str(_lbl).strip().lower()
+        if _lbl not in ("low", "moderate", "high"):
+            raise HTTPException(status_code=422, detail="quant_confidence_label must be low|moderate|high")
+    # AI-disabled mode skips the model call entirely: the deterministic
+    # forecast passes through intact (blend handles opinion=None). No fake
+    # opinion is requested or served.
+    if not body.ai_enabled:
+        packet = await asyncio.to_thread(_build_packet, body.symbol)
+        quant_prob = float(body.quant_prob) if body.quant_prob is not None else 0.5
+        try:
+            blend = blend_forecast(
+                quant_prob, None, ai_weight=body.ai_weight, ai_enabled=False,
+                quant_confidence_label=_lbl,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"ai blend failed: {exc}") from exc
+        provider_name, model = ai.resolve(profile)
+        try:
+            provenance = packet.freshness.model_dump(mode="json")
+        except Exception:
+            provenance = {}
+        return {
+            "symbol": packet.symbol,
+            "profile": profile,
+            "provider": provider_name,
+            "model": model,
+            "opinion": None,
+            "blend": blend,
+            "quant_source": "request" if body.quant_prob is not None else "unspecified-placeholder",
+            "ai_weight_requested": body.ai_weight,
+            "ai_weight_applied": 0.0,
+            "packet_id": packet.packet_id,
+            "evidence_hash": packet.evidence_hash,
+            "cached": False,
+            "provenance": provenance,
+            "disclaimer": DISCLAIMER,
+        }
+    # Fail-closed gate: no key -> 423 before any evidence work.
+    _require_live_provider(ai, profile)
     # Blocking market-data lookup — run off the event loop (see post_insight).
     packet = await asyncio.to_thread(_build_packet, body.symbol)
     try:
@@ -351,12 +447,8 @@ async def post_forecast_opinion(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ai insight failed: {exc}") from exc
+    _refuse_stub_opinion(opinion, context="forecast opinion")
     quant_prob = float(body.quant_prob) if body.quant_prob is not None else 0.5
-    _lbl = body.quant_confidence_label
-    if _lbl is not None:
-        _lbl = str(_lbl).strip().lower()
-        if _lbl not in ("low", "moderate", "high"):
-            raise HTTPException(status_code=422, detail="quant_confidence_label must be low|moderate|high")
     try:
         blend = blend_forecast(
             quant_prob, opinion, ai_weight=body.ai_weight, ai_enabled=body.ai_enabled,
@@ -445,7 +537,19 @@ class DeepResearchJobBody(BaseModel):
 
 async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str | None,
                         call_type: str | None, token_credits: int | None) -> None:
-    """Background deep_research worker (never raises; writes job doc)."""
+    """Background deep_research worker (never raises; writes job doc).
+
+    Fail-closed throughout: no key -> error doc (never a stub opinion);
+    live-call failure -> error doc (never a fabricated opinion).
+    """
+    try:
+        ai = get_ai_router()
+        _require_live_provider(ai, "deep_research")
+    except HTTPException as exc:
+        _job_put(job_id, {"job_id": job_id, "status": "error",
+                          "error": str(exc.detail)[:280],
+                          "symbol": symbol, "horizon": horizon})
+        return
     try:
         packet = await asyncio.to_thread(_build_packet, symbol)
     except Exception as exc:
@@ -454,12 +558,18 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
                           "symbol": symbol, "horizon": horizon})
         return
     try:
-        ai = get_ai_router()
         opinion, cached = await ai.get_insight(
             packet, profile="deep_research", horizon=horizon,
             user_tier=user_tier, call_type=call_type or "deep_research",
             token_credits=token_credits,
         )
+        try:
+            _refuse_stub_opinion(opinion, context="deep research")
+        except HTTPException as exc:
+            _job_put(job_id, {"job_id": job_id, "status": "error",
+                              "error": str(exc.detail)[:280],
+                              "symbol": symbol, "horizon": horizon})
+            return
         _persist_ledger(ai, provider=opinion.provider, model=opinion.model,
                         profile="deep_research", call_type="evidence",
                         packet=packet, cached=cached,

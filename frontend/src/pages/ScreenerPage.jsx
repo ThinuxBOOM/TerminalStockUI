@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { FORECAST_HORIZONS, getScreener } from "../api/client";
 import CurrencyValue from "../components/CurrencyValue";
 import EmptyState from "../components/EmptyState";
-import ErrorState, { StaleBanner } from "../components/ErrorState";
+import ErrorState from "../components/ErrorState";
 import MarketStateBadge from "../components/MarketStateBadge";
 import ProvenanceBadge from "../components/ProvenanceBadge";
 import Skeleton from "../components/Skeleton";
@@ -84,10 +84,6 @@ function ScreenerPage() {
     [data]
   );
   const skippedOverflow = skippedCount > skippedSymbols.length;
-  const anyFallback = useMemo(
-    () => rows.some((r) => r.provenance?.fallback_used === true),
-    [rows]
-  );
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "mb-3 text-sm tracking-widest text-term-muted" }, "SCREENER \xB7 RANKED BY FORECAST DIRECTION"), /* @__PURE__ */ React.createElement("section", { className: "term-panel p-4" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-end gap-3" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("label", { className: "term-label", htmlFor: "screener-market" }, "Market"), /* @__PURE__ */ React.createElement(
     "select",
     {
@@ -149,12 +145,7 @@ function ScreenerPage() {
       detail: screenerErrorDetail(screen.error),
       onRetry: () => void screen.refetch()
     }
-  ), !screen.isLoading && !screen.isError && data && /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, anyFallback && /* @__PURE__ */ React.createElement(
-    StaleBanner,
-    {
-      detail: "screener rows include fallback data \u2014 prices/probabilities are stale-marked, not live"
-    }
-  ), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-term-muted", role: "status" }, data.count, " of ", data.filtered_total ?? data.universe_size, " pass \xB7 page ", Math.floor((data.offset ?? offset) / SCREENER_LIMIT) + 1, skippedCount > 0 && ` \xB7 ${skippedCount} skipped (see below)`), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
+  ), !screen.isLoading && !screen.isError && data && /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-term-muted", role: "status" }, data.count, " of ", data.filtered_total ?? data.universe_size, " pass \xB7 page ", Math.floor((data.offset ?? offset) / SCREENER_LIMIT) + 1, skippedCount > 0 && ` \xB7 ${skippedCount} skipped (see below)`), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
     "button",
     {
       className: "term-btn-ghost text-xs",

@@ -1,14 +1,17 @@
-"""M8 E2E journey: Search -> Quote -> Forecast -> Analytics -> Backtest -> AI (stub) -> Audit.
+"""M8 E2E journey: Search -> Quote -> Forecast -> Analytics -> Backtest -> AI -> Audit.
 
 Full-stack walk through ``backend.api.main.create_app`` with TestClient.
-No network: market data uses a stub-mode YFinanceProvider injected into both
-the FastAPI dependency graph AND the ``deps`` singleton (AI packet building
-reads the singleton directly). AI uses an empty secret store so insight calls
-take the marked-stub path (DoD 7: app runs with AI completely disabled).
+No network: market data uses live doubles (deterministic stub quotes
+marked live: fallback_used=False, price present) injected into both the
+FastAPI dependency graph AND the ``deps`` singleton (AI packet building
+reads the singleton directly). Bars come from the seeded DB (live
+provenance, fallback_used False). AI uses an empty secret store so
+opinion calls without keys take the fail-closed 423 path (deterministic
+forecasting is unaffected — DoD 7).
 
-Asserts: every step 200, full provenance envelope where the contract
-requires it, and "Not investment advice" disclosure on forecast + audit +
-AI outputs.
+Asserts: every deterministic step 200, full provenance envelope where the
+contract requires it, "Not investment advice" disclosure on forecast +
+audit + AI outputs, AI-disabled blend passes quant through intact.
 """
 
 from __future__ import annotations
@@ -36,10 +39,26 @@ REQUIRED_PROVENANCE = {
 
 
 def _stub_service() -> MarketDataService:
+    """Live double: stub quotes marked live (fail-closed contract)."""
     tracker = ProviderHealthTracker()
     provider = YFinanceProvider(
         stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
     )
+    _orig = provider.get_quote
+
+    def _live_get_quote(symbol: str, *args, **kwargs) -> dict:  # type: ignore[no-untyped-def]
+        upper = (symbol or "").strip().upper() if isinstance(symbol, str) else ""
+        if not upper:
+            return _orig(symbol, *args, **kwargs)
+        q = dict(_orig(symbol, *args, **kwargs))
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        q.pop("circuit_open", None)
+        if q.get("price") is None:
+            q["price"] = 150.0
+        return q
+
+    provider.get_quote = _live_get_quote  # type: ignore[method-assign]
     return MarketDataService(
         registry=InstrumentRegistry(), provider=provider,
         health=tracker, cache=InMemoryCache(),
@@ -47,7 +66,7 @@ def _stub_service() -> MarketDataService:
 
 
 def _client() -> TestClient:
-    """Full app with stub market data (no network) + stub AI (no keys)."""
+    """Full app with live market data (no network) + no-key AI (423 path)."""
     from backend.api import deps as deps_module
 
     reset_deps()
@@ -100,14 +119,15 @@ def test_e2e_journey_search_to_audit():
         assert search["results"][0]["exchange_symbol"] == "AAPL"
         _assert_provenance(search, "search")
 
-        # 2. Quote.
+        # 2. Quote (live only).
         resp = client.get("/api/market_data/quote", params={"symbol": "AAPL"})
         assert resp.status_code == 200, resp.text
         quote = resp.json()
         assert quote["symbol"] == "AAPL"
-        assert quote["price"] is not None  # usable number, even on fallback
+        assert quote["price"] is not None  # live number, never a stub fallback
         assert quote["currency"] == "USD"
         _assert_provenance(quote, "quote")
+        assert quote["provenance"]["fallback_used"] is False
 
         # 3. Forecast (deterministic core, no AI).
         resp = client.get("/api/forecast/AAPL", params={"horizon": 21})
@@ -149,19 +169,13 @@ def test_e2e_journey_search_to_audit():
         assert len(hist["runs"]) == 1
         _assert_provenance(hist, "backtest-history")
 
-        # 6. AI insight (no keys -> marked stub, never crash; DoD 7).
+        # 6. AI insight without keys -> 423 (fail-closed, never a stub opinion).
         resp = client.post(
             "/api/ai/insight",
             json={"symbol": "AAPL", "profile": "quick_insight"},
         )
-        assert resp.status_code == 200, resp.text
-        insight = resp.json()
-        assert insight["symbol"] == "AAPL"
-        assert insight["opinion"]["stub"] is True
-        assert insight["opinion"]["evidence_ids"]
-        assert "Not investment advice" in insight["disclaimer"]
-        assert insight["evidence_hash"] and insight["packet_id"]
-        assert isinstance(insight.get("provenance"), dict)
+        assert resp.status_code == 423, resp.text
+        assert "no API key" in resp.text or "AI disabled" in resp.text
 
         # AI-disabled blend preview: quant core passes through intact.
         resp = client.post(
@@ -173,6 +187,7 @@ def test_e2e_journey_search_to_audit():
         blend_body = resp.json()
         assert blend_body["blend"]["blended_prob"] == 0.64
         assert blend_body["blend"]["ai_applied"] is False
+        assert blend_body["ai_weight_applied"] == 0.0
         assert "Not investment advice" in blend_body["disclaimer"]
 
         # 7. Audit logs (empty on a fresh DB is fine; never 500).
@@ -192,16 +207,25 @@ def test_e2e_ai_disabled_leaves_forecast_intact():
     """DoD 7: disabling AI leaves the deterministic forecast untouched."""
     client = _client()
     try:
-        before = client.get("/api/forecast/MSFT", params={"horizon": 21}).json()
+        before_resp = client.get("/api/forecast/MSFT", params={"horizon": 21})
+        assert before_resp.status_code == 200, before_resp.text
+        before = before_resp.json()
         disabled = client.post(
             "/api/ai/forecast_opinion",
             json={"symbol": "MSFT", "horizon": 21, "quant_prob": 0.64,
                   "ai_enabled": False},
         )
         assert disabled.status_code == 200, disabled.text
-        assert disabled.json()["blend"]["blended_prob"] == 0.64
-        after = client.get("/api/forecast/MSFT", params={"horizon": 21}).json()
+        disabled_body = disabled.json()
+        assert disabled_body["blend"]["blended_prob"] == 0.64
+        assert disabled_body["blend"]["ai_applied"] is False
+        assert disabled_body["ai_weight_applied"] == 0.0
+        after_resp = client.get("/api/forecast/MSFT", params={"horizon": 21})
+        assert after_resp.status_code == 200, after_resp.text
+        after = after_resp.json()
         assert after["direction_probability"] == before["direction_probability"]
         assert after["model_version"] == before["model_version"]
+        # Deterministic engine carries ai_weight 0 (no AI influence).
+        assert after.get("record", {}).get("ai_weight", 0) == 0
     finally:
         _teardown()

@@ -1,6 +1,6 @@
-"""M8 failure-mode tests: outage fallback, breaker isolation, bad input, AI
-fail-safe, FX gate, missing symbols. No network; all outages simulated via
-stub providers / monkeypatched fetch / open breakers.
+"""M8 failure-mode tests: fail-closed outages, breaker isolation, bad input,
+AI fail-safe, FX gate, missing symbols. No network; all outages simulated
+via stub providers / monkeypatched fetch / open breakers.
 """
 
 from __future__ import annotations
@@ -49,6 +49,44 @@ def _stub_service(provider=None, akshare_provider=None) -> MarketDataService:
     return MarketDataService(**kwargs)  # type: ignore[arg-type]
 
 
+def _live_market_service() -> MarketDataService:
+    """Live double: stub quotes flipped to fallback_used False."""
+    tracker = ProviderHealthTracker()
+    base = YFinanceProvider(
+        stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
+    )
+    _orig = base.get_quote
+
+    def _live(symbol: str, *args, **kwargs) -> dict:  # noqa: ANN002, ANN003, ANN202
+        q = dict(_orig(symbol))
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        return q
+
+    base.get_quote = _live  # type: ignore[method-assign]
+    return MarketDataService(
+        registry=InstrumentRegistry(), provider=base,
+        health=tracker, cache=InMemoryCache(),
+    )
+
+
+def _live_fx(*, stale_hours: float | None = None) -> FXProvider:
+    prov = FXProvider(stub_mode=False)
+
+    def _fetch(base: str, quote: str) -> dict:
+        from backend.market_data.fx.provider import stub_rate as _stub
+
+        asof = _utcnow() - timedelta(hours=stale_hours) if stale_hours else _utcnow()
+        return {
+            "base": base, "quote": quote, "rate": _stub(base, quote),
+            "as_of": asof, "source": "frankfurter",
+        }
+
+    prov._fetch_raw = _fetch  # type: ignore[method-assign]
+    prov._get_ecb_table = lambda: None  # type: ignore[method-assign]
+    return prov
+
+
 def _client(market=None, fx_provider=None) -> TestClient:
     from backend.api import deps as deps_module
 
@@ -82,10 +120,12 @@ def _teardown() -> None:
     reset_backtest_history()
 
 
-# --- provider outage -> flagged fallback + usable ---------------------------
+# --- provider outage -> raise + HTTP 502 (fail-closed) ------------------------
 
 
-def test_provider_outage_flagged_fallback_usable():
+def test_provider_outage_raises_and_http_502():
+    """Outage is fail-closed: service raises, HTTP maps to 502, never a
+    flagged fallback 200."""
     provider = YFinanceProvider(stub_mode=False)
 
     def _boom(symbol: str) -> dict:
@@ -93,19 +133,31 @@ def test_provider_outage_flagged_fallback_usable():
 
     provider._fetch_raw = _boom  # type: ignore[method-assign]
     svc = _stub_service(provider=provider)
-    quote = svc.get_quote("AAPL")
-    assert quote["price"] is not None  # page stays usable
-    assert quote["provenance"]["fallback_used"] is True
+    with pytest.raises(ProviderError):
+        svc.get_quote("AAPL")
 
     client = _client(market=svc)
     try:
         resp = client.get("/api/market_data/quote", params={"symbol": "AAPL"})
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["price"] is not None
-        assert body["provenance"]["fallback_used"] is True
+        assert resp.status_code == 502, resp.text
+        # Live double still serves fallback False.
+        live = _live_market_service()
+        quote = live.get_quote("AAPL")
+        assert quote["price"] is not None
+        assert quote["provenance"]["fallback_used"] is False
     finally:
         _teardown()
+
+
+def test_breaker_open_service_raises_fail_closed():
+    """Open breaker at the service layer raises (provider stub is refused)."""
+    breaker = CircuitBreaker(failure_threshold=1)
+    breaker.record_failure()
+    assert breaker.state == "open"
+    provider = YFinanceProvider(stub_mode=False, breaker=breaker)
+    svc = _stub_service(provider=provider)
+    with pytest.raises(ProviderError):
+        svc.get_quote("AAPL")
 
 
 def test_breaker_open_returns_flagged_stub_usable():
@@ -163,6 +215,29 @@ def test_sse_chain_survives_yfinance_outage_via_akshare():
     assert yf.breaker.state == "open" and ak.breaker.state == "closed"
 
 
+def test_fx_outage_maps_502_not_retryable_maps_400():
+    """FX ProviderError -> 400 when not retryable else 502 (rate + convert)."""
+    class _BadInput(FXProvider):
+        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
+            raise ProviderError("fx", "bad input", retryable=False)
+
+    class _Downstream(FXProvider):
+        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
+            raise ProviderError("fx", "upstream down", retryable=True)
+
+    for provider, expected in ((_BadInput(), 400), (_Downstream(), 502)):
+        client = _client(market=_live_market_service(), fx_provider=provider)
+        try:
+            assert client.get(
+                "/api/fx/rate", params={"base": "EUR", "quote": "USD"}
+            ).status_code == expected
+            assert client.post(
+                "/api/fx/convert", json={"amount": 10, "from": "EUR", "to": "USD"}
+            ).status_code == expected
+        finally:
+            _teardown()
+
+
 # --- invalid horizon -> 422 -------------------------------------------------
 
 
@@ -203,19 +278,30 @@ def test_malformed_ai_json_fails_safe():
         })
 
 
-# --- FX stale -> rank 423 ----------------------------------------------------
+# --- FX stale -> rank 423 (fail-closed gate) ----------------------------------
 
 
-class _StaleFX(FXProvider):
-    def get_rate(self, base: str, quote: str) -> dict:
-        out = super().get_rate(base, quote)
-        out["as_of"] = _utcnow() - timedelta(hours=30)
-        out["fallback_used"] = False
-        return out
+class _StaleLiveFX(FXProvider):
+    """Live rates stamped 30h old: gate must refuse even with the flag."""
+
+    def __init__(self) -> None:
+        super().__init__(stub_mode=False)
+
+        def _fetch(base: str, quote: str) -> dict:
+            from backend.market_data.fx.provider import stub_rate as _stub
+
+            return {
+                "base": base, "quote": quote, "rate": _stub(base, quote),
+                "as_of": _utcnow() - timedelta(hours=30),
+                "source": "frankfurter",
+            }
+
+        self._fetch_raw = _fetch  # type: ignore[method-assign]
+        self._get_ecb_table = lambda: None  # type: ignore[method-assign]
 
 
 def test_fx_stale_rank_423():
-    client = _client(fx_provider=_StaleFX(stub_mode=True))
+    client = _client(market=_live_market_service(), fx_provider=_StaleLiveFX())
     try:
         resp = client.post(
             "/api/fx/rank",
@@ -224,36 +310,66 @@ def test_fx_stale_rank_423():
         )
         assert resp.status_code == 423, resp.text
         assert resp.json()["error"]["code"] == "FX_PROVENANCE_MISSING"
+        # Without the flag the stale gate also refuses.
+        resp2 = client.post(
+            "/api/fx/rank",
+            json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD"},
+        )
+        assert resp2.status_code == 423, resp2.text
     finally:
         _teardown()
 
 
-def test_fx_fallback_without_flag_rank_423():
-    client = _client(fx_provider=FXProvider(stub_mode=True))  # stub = fallback
+def test_fx_live_rank_200_and_stub_outage_502():
+    """Live FX + live market -> 200 fallback False; stub FX outage -> 502;
+    stale -> 423 (flag inert for live)."""
+    # Live passes with and without the flag.
+    for flag in (False, True):
+        client = _client(market=_live_market_service(), fx_provider=_live_fx())
+        try:
+            ok = client.post(
+                "/api/fx/rank",
+                json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
+                      "allow_fallback": flag},
+            )
+            assert ok.status_code == 200, ok.text
+            assert ok.json()["provenance"]["fallback_used"] is False
+        finally:
+            _teardown()
+    # Stub FX outage for cross-currency -> 502.
+    client = _client(
+        market=_live_market_service(), fx_provider=FXProvider(stub_mode=True)
+    )
     try:
         resp = client.post(
             "/api/fx/rank",
             json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD"},
         )
-        assert resp.status_code == 423, resp.text
-        assert resp.json()["error"]["code"] == "FX_PROVENANCE_MISSING"
-        ok = client.post(
-            "/api/fx/rank",
-            json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
-                  "allow_fallback": True},
-        )
-        assert ok.status_code == 200, ok.text
+        assert resp.status_code == 502, resp.text
     finally:
         _teardown()
 
 
-# --- missing symbol -> 404 / empty, never 500 -------------------------------
+def test_fx_rank_no_quotable_symbols_502():
+    """No quotable symbols (all quotes fail) -> 502, never empty 200."""
+    client = _client(market=_stub_service(), fx_provider=_live_fx())
+    try:
+        resp = client.post(
+            "/api/fx/rank",
+            json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD"},
+        )
+        assert resp.status_code == 502, resp.text
+    finally:
+        _teardown()
+
+
+# --- missing symbol -> 404 / 502 / 422, never 500 -------------------------------
 
 
 def test_missing_symbol_404_or_empty_not_500():
     client = _client()
     try:
-        resp = client.get("/api/instruments/resolve", params={"symbol": "ZZZ_NOPE_123"})
+        resp = client.get("/api/instruments/resolve", params={"symbol": "ZZZNOPE123"})
         assert resp.status_code == 404, resp.text
 
         resp = client.get("/api/instruments/does-not-exist-123")
@@ -262,14 +378,22 @@ def test_missing_symbol_404_or_empty_not_500():
         resp = client.get("/api/securities/does-not-exist-123/quote")
         assert resp.status_code == 404, resp.text
 
-        # Unknown symbols in logs/history return empty payloads, not 500.
-        resp = client.get("/api/audit/forecasts", params={"symbol": "ZZZ_NOPE_123"})
+        # Unknown symbols in audit logs return empty payloads, not 500.
+        resp = client.get("/api/audit/forecasts", params={"symbol": "ZZZNOPE123"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["count"] == 0
 
-        resp = client.get("/api/backtest/ZZZ_NOPE_123")
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["runs"] == []
+        # Fail-closed: unknown-symbol history/bars have no live data -> 502.
+        resp = client.get("/api/backtest/ZZZNOPE123")
+        assert resp.status_code == 502, resp.text
+        assert resp.status_code != 500
+
+        resp = client.get("/api/market_data/quote", params={"symbol": "ZZZNOPE123"})
+        assert resp.status_code == 502, resp.text
+
+        # Underscore symbols fail validation (422), never 500/502-with-stub.
+        resp = client.get("/api/market_data/quote", params={"symbol": "ZZZ_NOPE_123"})
+        assert resp.status_code == 422, resp.text
 
         # Empty symbol is a client error (422), never a 500.
         resp = client.get("/api/market_data/quote", params={"symbol": ""})

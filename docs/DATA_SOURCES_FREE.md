@@ -6,24 +6,23 @@ predictions across **XNYS/XNAS (US)**, **XSHG (SSE)**, and
 vendor docs/pricing pages in September 2026; re-check before signing
 anything, free tiers move.
 
-Design rule used throughout: every source degrades to a flagged stub
-(`fallback_used=True`, honest `delay_minutes`, `missing_fields`) — never
-a fabricated live price. Provenance + grade logic is untouched; new
-providers only extend the fallback chain.
+Fail-closed rule (NO FALLBACKS): every source either serves live data or the
+request raises (`ProviderError` → HTTP 502/503) — never a flagged stub, never
+stale/cached-as-fresh, never a fabricated price. Provenance + grade describe
+live data only; new providers only extend the live chain. See
+`docs/FAIL_CLOSED_CONTRACT.md`.
 
 ## Recommended priority per market (implemented in `MarketDataService`)
 
-| Market (MIC) | Priority (first live wins) | Notes |
+| Market (MIC) | Priority (first live wins, else 502) | Notes |
 |---|---|---|
-| XNYS / XNAS (US) | **Alpaca → yfinance → Finnhub → TwelveData → Stooq** → snapshot/stub | 3 independent real-time legs + 2 delayed legs |
-| XSHG (SSE) | **yfinance (`.SS`) → AKShare** → snapshot/stub | Finnhub/TwelveData/Stooq/Alpaca never routed here (US/EU-only or wrong feed) |
-| XPAR / XAMS / XBRU (Euronext) | **yfinance → Stooq** → snapshot/stub | Free Finnhub/TwelveData tiers are EOD-only outside the US, so they stay out of the Euronext live path |
-| FX (USD/EUR/CNY) | **Frankfurter → yfinance FX → ECB stub** (unchanged) | Daily ECB reference; reconciled flag drives grade A/B |
+| XNYS / XNAS (US) | **Alpaca → yfinance → Finnhub → TwelveData → Stooq** → raise | 3 independent real-time legs + 2 delayed legs |
+| XSHG (SSE) | **yfinance (`.SS`) → AKShare** → raise | Finnhub/TwelveData/Stooq/Alpaca never routed here (US/EU-only or wrong feed) |
+| XPAR / XAMS / XBRU (Euronext) | **yfinance → Stooq** → raise | Free Finnhub/TwelveData tiers are EOD-only outside the US, so they stay out of the Euronext live path |
+| FX (USD/EUR/CNY) | **Frankfurter → yfinance FX** → raise | Daily ECB reference; reconciled flag drives grade A/B |
 
-Outage fallback preference (nothing live) is
-`yfinance → finnhub → twelvedata → stooq → alpaca`, i.e. yfinance first,
-preserving the pre-chain outage behavior (`source=yfinance`,
-`fallback_used=True`).
+Outage behavior (nothing live): raise `ProviderError` (HTTP 502) with the
+provider name + symbol. No preference loop, no snapshot cover, no stub.
 
 ## Source ranking (free tiers)
 

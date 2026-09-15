@@ -93,18 +93,21 @@ def _data_version(now: Optional[datetime] = None) -> str:
 
 
 def build_provenance(job: str, **extra: Any) -> dict:
-    """Spec Sec 4 style provenance envelope + versions block for a job run."""
+    """Spec Sec 4 style provenance envelope + versions block for a job run.
+
+    Job envelopes describe the RUN, not market data: they are never
+    fallbacks (``fallback_used=False``). Success or failure is carried by
+    the result's ``ok`` flag — a failed job is ``ok=False`` with a reason,
+    never a fake-healthy envelope.
+    """
     now = _utcnow()
-    # Stub jobs do no real work: grade C + fallback_used=True so scheduler
-    # monitoring never reads them as healthy live runs.
-    is_stub = True
     prov: dict[str, Any] = {
         "source": f"worker:{job}",
         "as_of": now.isoformat(),
         "delay_minutes": 0,
-        "quality_grade": "C" if is_stub else "B",
-        "fallback_used": True,
-        "missing_fields": ["live bars/forecast not wired (stub)"],
+        "quality_grade": "B",
+        "fallback_used": False,
+        "missing_fields": [],
         "actor": f"worker:{job}",
         "versions": {
             "backend": BACKEND_VERSION,
@@ -151,37 +154,96 @@ def _log_result(result: dict) -> dict:
 # ---------------------------------------------------------------- jobs ---
 
 def ingest_bars(symbol: str, db: Any = None, **kwargs: Any) -> dict:
-    """Stub: ingest/normalize OHLCV bars for *symbol* (no network, no Redis)."""
+    """Ingest/normalize OHLCV bars for *symbol* via the real ingest chain.
+
+    Fail-closed: per-symbol fetch/DB problems land in ``errors`` with
+    ``ok=False`` when nothing was ingested — never a fake success.
+    Optional kwargs (tests): ``registry``, ``fetch_fn``, ``db_url``.
+    """
     job = "ingest_bars"
     sym = (symbol or "").strip().upper() or "AAPL"
     provenance = build_provenance(job, symbol=sym)
+    try:
+        from backend.market_data.ingest import ingest_symbols
+
+        ingested, errors = ingest_symbols(
+            [sym],
+            db_url=kwargs.get("db_url"),
+            registry=kwargs.get("registry"),
+            fetch_fn=kwargs.get("fetch_fn"),
+        )
+    except Exception as exc:
+        result = {
+            "job": job, "ok": False, "symbol": sym,
+            "bars_ingested": 0,
+            "errors": {"_batch": f"{type(exc).__name__}: {str(exc)[:200]}"},
+            "provenance": provenance,
+        }
+        _audit(db, job=job, entity_id=sym,
+               payload={"ok": False, "error": type(exc).__name__})
+        return _log_result(result)
+    n_bars = sum(int(v) for v in (ingested or {}).values() if isinstance(v, (int, float)))
+    ok = n_bars > 0 and not errors
     result = {
-        "job": job, "ok": True, "symbol": sym,
-        "bars_ingested": 0, "stub": True,
-        "detail": "in-memory stub: no provider call; wire MarketDataService here in prod",
+        "job": job, "ok": ok, "symbol": sym,
+        "bars_ingested": n_bars,
+        "errors": dict(errors or {}),
+        "detail": "ingested via backend.market_data.ingest.ingest_symbols",
         "provenance": provenance,
     }
-    _audit(db, job=job, entity_id=sym, payload={"symbol": sym, "stub": True})
+    _audit(db, job=job, entity_id=sym,
+           payload={"symbol": sym, "bars_ingested": n_bars, "ok": ok})
     return _log_result(result)
 
 
 def refresh_forecast(symbol: str, db: Any = None, **kwargs: Any) -> dict:
-    """Stub: refresh the deterministic forecast for *symbol* (no training)."""
+    """Refresh the deterministic forecast for *symbol* (all horizons).
+
+    Runs the real deterministic engine via :class:`ForecastService`.
+    Fail-closed: engine failures (no bars, thin history) land in
+    ``errors`` with ``ok=False`` — never a fake forecast. Optional
+    kwargs (tests): ``forecast`` (ForecastService), ``market``.
+    """
     job = "refresh_forecast"
     sym = (symbol or "").strip().upper() or "AAPL"
     provenance = build_provenance(job, symbol=sym)
+    svc = kwargs.get("forecast")
+    if svc is None:
+        try:
+            from backend.forecasting.service import ForecastService
+
+            svc = ForecastService(market_service=kwargs.get("market"))
+        except Exception as exc:
+            result = {
+                "job": job, "ok": False, "symbol": sym,
+                "errors": {"_batch": f"{type(exc).__name__}: {str(exc)[:200]}"},
+                "provenance": provenance,
+            }
+            _audit(db, job=job, entity_id=sym,
+                   payload={"ok": False, "error": type(exc).__name__})
+            return _log_result(result)
+    horizons = [5, 21, 63]
+    ran: dict[int, dict] = {}
+    errors: dict[str, str] = {}
+    for horizon in horizons:
+        try:
+            ran[horizon] = svc.forecast(sym, horizon)
+        except Exception as exc:
+            errors[str(horizon)] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    ok = bool(ran) and not errors
     result = {
-        "job": job, "ok": True, "symbol": sym,
-        "horizons_days": [5, 21, 63], "stub": True,
-        "detail": "in-memory stub: deterministic engine owns forecasts; AI disabled",
+        "job": job, "ok": ok, "symbol": sym,
+        "horizons_days": horizons,
+        "horizons_completed": sorted(ran),
+        "errors": errors,
         "model_version": _MODEL_VERSION,
         "feature_version": _FEATURE_VERSION,
         "data_version": provenance["versions"]["data"],
+        "detail": "deterministic engine refresh (no AI)",
         "provenance": provenance,
     }
     _audit(db, job=job, entity_id=sym,
-           payload={"symbol": sym, "model_version": _MODEL_VERSION,
-                    "feature_version": _FEATURE_VERSION, "stub": True})
+           payload={"symbol": sym, "horizons_completed": sorted(ran), "ok": ok})
     return _log_result(result)
 
 
@@ -198,11 +260,14 @@ def evaluate_alerts(db: Any = None, **kwargs: Any) -> dict:
     """
     job = "evaluate_alerts"
     if db is None:
+        # No alert definitions without a DB: report honestly instead of a
+        # fake-healthy zero-check run.
         provenance = build_provenance(job)
         result = {
-            "job": job, "ok": True,
-            "alerts_checked": 0, "alerts_fired": 0, "stub": True,
-            "detail": "in-memory stub: alert rules evaluated; delivery lives outside workers",
+            "job": job, "ok": False,
+            "alerts_checked": 0, "alerts_fired": 0,
+            "errors": {"db": "no database: alert rules live in the alerts table"},
+            "detail": "alert evaluation needs stored alert definitions",
             "provenance": provenance,
         }
         return _log_result(result)
@@ -261,7 +326,12 @@ REPORT_PROFILES = ("quick_insight", "deep_research", "forecast_assist", "report"
 
 def generate_report(symbol: str, profile: str = "quick_insight",
                     db: Any = None, **kwargs: Any) -> dict:
-    """Stub: build a scheduled report for *symbol* under task *profile*."""
+    """Scheduled AI report for *symbol* under task *profile* — NOT wired.
+
+    Reports need a configured AI provider; until the report assembler
+    lands, this job honestly reports ``ok=False`` instead of a fake
+    success. Reachable via CLI only (no cron route, no UI).
+    """
     job = "generate_report"
     sym = (symbol or "").strip().upper() or "AAPL"
     prof = (profile or "quick_insight").strip().lower()
@@ -269,14 +339,14 @@ def generate_report(symbol: str, profile: str = "quick_insight",
         prof = "quick_insight"
     provenance = build_provenance(job, symbol=sym, profile=prof)
     result = {
-        "job": job, "ok": True, "symbol": sym, "profile": prof,
-        "stub": True,
-        "detail": "in-memory stub: evidence packet + bounded AI opinion assembled in prod",
+        "job": job, "ok": False, "symbol": sym, "profile": prof,
+        "errors": {"report": "not implemented: AI report assembler unwired"},
+        "detail": "scheduled reports need a configured AI provider (V2)",
         "disclosure": "Not investment advice. For informational purposes only.",
         "provenance": provenance,
     }
     _audit(db, job=job, entity_id=f"{sym}:{prof}",
-           payload={"symbol": sym, "profile": prof, "stub": True})
+           payload={"symbol": sym, "profile": prof, "ok": False})
     return _log_result(result)
 
 
@@ -284,11 +354,12 @@ def capture_snapshot(symbol: str, timeframe: str = "1d", db: Any = None,
                      **kwargs: Any) -> dict:
     """Capture a compressed market snapshot for *symbol*/*timeframe*.
 
-    Fetches bars via ``MarketDataService.get_bars`` (offline stub fallback),
-    compresses with :mod:`backend.market_data.snapshot_store` (smallest of
-    gzip+json / delta-q100+gzip wins) and persists to ``market_snapshots``
-    when the table exists — otherwise the bounded in-memory fallback (graceful
-    degrade before migration 0006). Optional kwargs: ``market`` (fake/service
+    Fetches live bars via ``MarketDataService.get_bars`` (raises when no
+    live data — recorded as ``ok=False``, never stubbed), compresses with
+    :mod:`backend.market_data.snapshot_store` (smallest of gzip+json /
+    delta-q100+gzip wins) and persists to ``market_snapshots`` when the
+    table exists — otherwise the bounded in-memory store (graceful degrade
+    before migration 0006). Optional kwargs: ``market`` (fake/service
     injection, tests), ``interval_min`` (cadence override; defaults to
     :func:`snapshot_interval_min`). Never raises on missing data: zero
     usable bars is ``ok=False`` with a reason, never an exception.

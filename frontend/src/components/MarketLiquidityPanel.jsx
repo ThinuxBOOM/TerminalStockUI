@@ -60,9 +60,28 @@ function errorMessage(err) {
 
 // Memoized: `m` is a stable normalized object per market, so expanding
 // one card's graphs doesn't re-render every other card.
+// Fail-closed: stale/fallback provenance never renders a table —
+// isStaleLiquidity is an error gate to ErrorState, never a badge+table.
 function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
+  if (isStaleLiquidity(m?.provenance)) {
+    return (
+      <article
+        className="min-w-0 rounded border border-term-border bg-term-bg p-3"
+        aria-label={`${m?.label || m?.mic} liquidity unavailable`}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="min-w-0 truncate text-sm font-bold text-term-text">{m?.label || m?.mic}</h3>
+        </div>
+        <div className="mt-2">
+          <ErrorState
+            title="Market data unavailable"
+            detail="Market data unavailable (no live feed). Retry."
+          />
+        </div>
+      </article>
+    );
+  }
   const total = m.total > 0 ? m.total : m.advancers + m.decliners + m.unchanged;
-  const stale = isStaleLiquidity(m.provenance);
   const avg = formatSignedPct(m.avg_change_pct);
   const stateEntries = Object.entries(m.market_state_counts ?? {});
   const currency = m.currency ?? MARKET_CURRENCIES[m.mic] ?? "USD";
@@ -139,11 +158,6 @@ function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
         <FreshnessBadge p={m.provenance} />
         <ProvenanceBadge p={m.provenance} />
       </div>
-      {stale && (
-        <p className="mt-1.5 text-[10px] text-term-amber" role="note">
-          Stale/fallback figures — shown for context, never ranked.
-        </p>
-      )}
     </article>
   );
 }
@@ -279,15 +293,6 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
         </h2>
         {data && <FreshnessBadge p={data.provenance} />}
       </div>
-      {data?.fallback_used && (
-        <p
-          className="mt-2 rounded border border-term-amber p-2 text-[11px] text-term-amber"
-          role="note"
-        >
-          Client-side fallback — breadth computed from screener snapshots (backend
-          /api/markets/overview not deployed). Figures may be delayed/partial; markets are NOT ranked.
-        </p>
-      )}
       <div className="mt-3">
         <CrossMarketChart markets={markets} />
       </div>

@@ -1,13 +1,16 @@
-"""Honesty-audit regression tests: provenance envelope + disclosure coverage.
+"""Honesty-audit regression tests: fail-closed provenance envelope.
 
-Every data-bearing response must carry the 6-field provenance envelope
+Every data-bearing live response carries the 6-field provenance envelope
 ``{source, as_of, delay_minutes, quality_grade, fallback_used,
-missing_fields}`` and decision-grade outputs must carry the
-"Not investment advice" disclosure. Stub/offline paths must stay flagged
-(``fallback_used=True`` + honest grade), never silent.
+missing_fields}`` with ``fallback_used=False``, and decision-grade outputs
+carry the "Not investment advice" disclosure. Outages never produce
+flagged 200s: live data is served or the request raises / maps to
+502/503/423 — never a silent stub.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -25,6 +28,7 @@ from backend.forecasting.service import reset_forecast_service
 from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.fx.convert import compare_cross_market, rank_cross_market
 from backend.market_data.health import ProviderHealthTracker
+from backend.market_data.providers.base import ProviderError
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
 
@@ -43,6 +47,47 @@ def _stub_service() -> MarketDataService:
         registry=InstrumentRegistry(), provider=provider,
         health=tracker, cache=InMemoryCache(),
     )
+
+
+def _live_service() -> MarketDataService:
+    """Live double: stub quotes flipped to fallback_used False (price present)."""
+    tracker = ProviderHealthTracker()
+    base = YFinanceProvider(
+        stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
+    )
+    _orig = base.get_quote
+
+    def _live(symbol: str, *args, **kwargs) -> dict:  # noqa: ANN002, ANN003, ANN202
+        q = dict(_orig(symbol))
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        return q
+
+    base.get_quote = _live  # type: ignore[method-assign]
+    return MarketDataService(
+        registry=InstrumentRegistry(), provider=base,
+        health=tracker, cache=InMemoryCache(),
+    )
+
+
+def _live_fx_provider(*, stale_hours: float | None = None):
+    from backend.market_data.fx.provider import FXProvider, stub_rate as _stub
+
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
+    prov = FXProvider(stub_mode=False)
+
+    def _live(base: str, quote: str) -> dict:
+        asof = _utcnow() - timedelta(hours=stale_hours) if stale_hours else _utcnow()
+        return {
+            "base": base, "quote": quote, "rate": _stub(base, quote),
+            "as_of": asof, "source": "frankfurter",
+        }
+
+    prov._fetch_raw = _live  # type: ignore[method-assign]
+    prov._get_ecb_table = lambda: None  # type: ignore[method-assign]
+    return prov
 
 
 def _teardown() -> None:
@@ -134,6 +179,12 @@ def test_audit_ai_decisions_has_disclosure(tmp_path):
 def _screener_client(svc=None, registry=None) -> TestClient:
     reset_deps()
     reset_forecast_service()
+    try:
+        from backend.cache import get_cache
+
+        get_cache().clear()
+    except Exception:
+        pass
     stub = svc or _stub_service()
     reg = registry or stub.registry
     deps_module._service = stub
@@ -146,19 +197,37 @@ def _screener_client(svc=None, registry=None) -> TestClient:
     return TestClient(app)
 
 
-def test_screener_top_level_provenance_envelope_flagged_on_stub():
-    client = _screener_client()
+def test_screener_outage_is_honest_empty_not_flagged():
+    """Fail-closed: outage yields empty results + honest non-fallback
+    envelope + skipped reasons — never a flagged stub 200 with fake rows."""
+    client = _screener_client(svc=_stub_service())
     try:
         resp = client.get("/api/screener", params={"min_direction": 0.0, "limit": 5})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert PROVENANCE_KEYS <= set(body["provenance"]), body["provenance"]
-        # Stub market data: the scan-level envelope must stay flagged.
-        assert body["provenance"]["fallback_used"] is True
-        assert body["provenance"]["quality_grade"] == "C"
+        assert body["provenance"]["fallback_used"] is False
+        assert body["results"] == []
+        assert len(body.get("skipped", [])) > 0
         assert str(body["disclosure"]).startswith("Not investment advice")
+    finally:
+        _teardown()
+
+
+def test_screener_live_carries_fallback_false():
+    """Live screener rows and the scan envelope all carry fallback False."""
+    client = _screener_client(svc=_live_service())
+    try:
+        resp = client.get("/api/screener", params={"min_direction": 0.0, "limit": 5})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert PROVENANCE_KEYS <= set(body["provenance"])
+        assert body["provenance"]["fallback_used"] is False
+        assert str(body["disclosure"]).startswith("Not investment advice")
+        assert len(body["results"]) > 0
         for row in body["results"]:
             assert PROVENANCE_KEYS <= set(row["provenance"])
+            assert row["provenance"]["fallback_used"] is False
     finally:
         _teardown()
 
@@ -203,47 +272,118 @@ def test_fx_rank_and_compare_carry_disclosure_and_provenance():
     assert str(compared["disclosure"]).startswith("Not investment advice")
 
 
-def test_fx_rank_http_stub_stays_flagged_with_disclosure():
+def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
+    """Fail-closed wire invariant: live 200 fallback False; stub outage 502;
+    stale 423 — never a flagged fallback 200."""
     from fastapi import FastAPI as _FastAPI
 
     from backend.api import fx as fxapi
     from backend.market_data.fx.provider import FXProvider
 
+    # Live: 200 with fallback False + disclosure.
     reset_deps()
     fxapi.reset_fx_provider()
-    stub_fx = FXProvider(stub_mode=True)
+    live_fx = _live_fx_provider()
     app = _FastAPI()
     app.include_router(fxapi.router)
-    app.dependency_overrides[fxapi.get_fx_provider] = lambda: stub_fx
-    app.dependency_overrides[get_market_service] = _stub_service
+    app.dependency_overrides[fxapi.get_fx_provider] = lambda: live_fx
+    app.dependency_overrides[get_market_service] = _live_service
     client = TestClient(app)
     try:
-        # Cross-currency pair forces a (stub) EUR/USD rate into the mix,
-        # so the combined envelope must stay flagged even with opt-in.
         resp = client.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
             "allow_fallback": True,
         })
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["provenance"]["fallback_used"] is True
+        assert body["provenance"]["fallback_used"] is False
         assert str(body["disclosure"]).startswith("Not investment advice")
     finally:
         fxapi.reset_fx_provider()
         _teardown()
 
+    # Stub outage: cross-currency rank cannot be served -> 502.
+    reset_deps()
+    fxapi.reset_fx_provider()
+    stub_fx = FXProvider(stub_mode=True)
+    app2 = _FastAPI()
+    app2.include_router(fxapi.router)
+    app2.dependency_overrides[fxapi.get_fx_provider] = lambda: stub_fx
+    app2.dependency_overrides[get_market_service] = _live_service
+    client2 = TestClient(app2)
+    try:
+        resp2 = client2.post("/api/fx/rank", json={
+            "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
+            "allow_fallback": True,
+        })
+        assert resp2.status_code == 502, resp2.text
+    finally:
+        fxapi.reset_fx_provider()
+        _teardown()
 
-# --- stub-flag assertions ------------------------------------------------------
+    # Stale live rates: 423 even with the flag.
+    reset_deps()
+    fxapi.reset_fx_provider()
+    stale_fx = _live_fx_provider(stale_hours=30.0)
+    app3 = _FastAPI()
+    app3.include_router(fxapi.router)
+    app3.dependency_overrides[fxapi.get_fx_provider] = lambda: stale_fx
+    app3.dependency_overrides[get_market_service] = _live_service
+    client3 = TestClient(app3)
+    try:
+        resp3 = client3.post("/api/fx/rank", json={
+            "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
+            "allow_fallback": True,
+        })
+        assert resp3.status_code == 423, resp3.text
+        assert resp3.json()["error"]["code"] == "FX_PROVENANCE_MISSING"
+    finally:
+        fxapi.reset_fx_provider()
+        _teardown()
 
-def test_stub_quote_and_bars_stay_flagged():
+
+# --- fail-closed service assertions --------------------------------------------
+
+def test_live_quote_and_bars_carry_fallback_false():
+    """Live doubles serve with fallback_used False (the only servable shape)."""
+    svc = _live_service()
+    try:
+        quote = svc.get_quote("AAPL")
+        assert quote["price"] is not None
+        assert quote["provenance"]["fallback_used"] is False
+        # Direct provider live double also carries fallback False.
+        prov = svc.provider
+        raw = prov.get_quote("AAPL")
+        assert raw["fallback_used"] is False
+        assert raw.get("price") is not None
+    finally:
+        _teardown()
+
+
+def test_outage_quote_and_bars_raise_fail_closed():
+    """Stub/outage service raises ProviderError — never flagged stubs."""
     svc = _stub_service()
     try:
-        quote = svc.get_quote("ZZZ_UNKNOWN_123")
-        assert quote["provenance"]["fallback_used"] is True
-        assert quote["provenance"]["quality_grade"] == "C"
-        bars = svc.get_bars("ZZZ_UNKNOWN_123", timeframe="1d", limit=10)
-        assert bars["provenance"]["fallback_used"] is True
-        assert bars["provenance"]["quality_grade"] == "C"
-        assert len(bars["bars"]) == 10
+        try:
+            svc.get_quote("AAPL")
+        except ProviderError:
+            pass
+        else:
+            raise AssertionError("get_quote must raise fail-closed on outage")
+        # Bars for an unknown symbol have no DB coverage and no live fetch:
+        # fail-closed raise (AAPL may be DB-served, so use an unknown name).
+        try:
+            svc.get_bars("ZZZNOPE123", timeframe="1d", limit=10)
+        except ProviderError:
+            pass
+        else:
+            raise AssertionError("get_bars must raise fail-closed on outage")
+        # Unknown symbols also raise (never a fake 100.0 stub).
+        try:
+            svc.get_quote("ZZZNOPE123")
+        except ProviderError:
+            pass
+        else:
+            raise AssertionError("unknown-symbol quote must raise fail-closed")
     finally:
         _teardown()

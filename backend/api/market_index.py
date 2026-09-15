@@ -149,14 +149,11 @@ def market_index(
             continue
         prov = payload.get("provenance") if isinstance(payload, dict) else None
         if not isinstance(prov, dict):
-            prov = {
-                "source": "market-index",
-                "as_of": _utcnow_iso(),
-                "delay_minutes": 15,
-                "quality_grade": "C",
-                "fallback_used": True,
-                "missing_fields": ["provenance"],
-            }
+            # Fail-closed: bars without a provenance envelope are unusable —
+            # skip this candidate instead of fabricating an envelope.
+            last_error = f"bars for {sym} missing provenance envelope"
+            saw_empty = True
+            continue
         return {
             "mic": upper,
             "label": f"{cfg['venue']} — {cfg['label']}",

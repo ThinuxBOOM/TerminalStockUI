@@ -4,7 +4,7 @@ import ProvenanceBadge from "../../components/ProvenanceBadge";
 import FreshnessBadge from "../../components/FreshnessBadge";
 import CurrencyValue from "../../components/CurrencyValue";
 import Skeleton from "../../components/Skeleton";
-import ErrorState, { StaleBanner } from "../../components/ErrorState";
+import ErrorState from "../../components/ErrorState";
 
 const h = React.createElement;
 
@@ -30,7 +30,7 @@ const h = React.createElement;
 //                          VWAP/ATR14). Drives the legend + empty-state copy.
 //   indicatorsLoading    bool - indicator request in flight (per-pane skeleton)
 //   indicatorsError      string|null - indicator failure (ErrorState, chart ok)
-//   indicatorsProvenance object|null - indicator provenance (StaleBanner if set)
+//   indicatorsProvenance object|null - indicator provenance (badge only)
 //   currency             string - ISO code for legend CurrencyValue formatting
 //   onRetryIndicators    func|null - retry callback for indicator ErrorState
 //
@@ -459,7 +459,6 @@ function PriceChart({
   const indicatorStatus = /* @__PURE__ */ h(
     React.Fragment,
     null,
-    indicatorsProvenance && indicatorsProvenance.fallback_used ? /* @__PURE__ */ h(StaleBanner, { detail: `indicators via ${indicatorsProvenance.source || "unknown"} - fallback series, treat overlays as stale` }) : null,
     indicatorsError && !hasPriceOverlayData && !hasOscData && priceOverlaysRequested ? /* @__PURE__ */ h("div", { className: "mb-2" }, /* @__PURE__ */ h(ErrorState, { title: "Indicators unavailable", detail: `${indicatorsError} - price candles unaffected, no lines fabricated.`, onRetry: onRetryIndicators || void 0 })) : null,
     !indicatorsLoading && !indicatorsError && priceOverlaysRequested && !hasPriceOverlayData && legendEntries.some((e) => e.pane === "price") ? /* @__PURE__ */ h("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "Indicator series unavailable - the analytics endpoint returned snapshot values only (no plottable points). No lines fabricated.") : null
   );
@@ -483,7 +482,7 @@ function PriceChart({
     indicatorStatus,
     /* @__PURE__ */ h("div", { ref: setContainerRef, className: "w-full min-h-[300px]", role: "img", "aria-label": `price chart for ${symbol}, ${candles.length} bars` }),
     oscPane,
-    /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, provenance && provenance.fallback_used ? `fallback bars from /api/market_data/bars · ${sanitized.length} bars received, ${candles.length} shown${decimatedCount > 0 ? ` (bucket-merged to ${MAX_DISPLAY_CANDLES}, extremes preserved)` : ""} (see badge - last close tracks the header quote, history is not market data)` : `live bars from /api/market_data/bars · ${sanitized.length} received, ${candles.length} shown${decimatedCount > 0 ? ` (bucket-merged to ${MAX_DISPLAY_CANDLES}, extremes preserved)` : ""}`),
+    /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, `live bars from /api/market_data/bars · ${sanitized.length} received, ${candles.length} shown${decimatedCount > 0 ? ` (bucket-merged to ${MAX_DISPLAY_CANDLES}, extremes preserved)` : ""}`),
     provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance }), indicatorsProvenance && (hasPriceOverlayData || hasOscData) ? /* @__PURE__ */ h(ProvenanceBadge, { p: indicatorsProvenance }) : null)
   );
 }

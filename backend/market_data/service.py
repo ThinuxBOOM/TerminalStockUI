@@ -1,7 +1,10 @@
 """Quote service: registry -> provider -> normalize -> quality -> provenance.
 
 Single place where the provenance envelope is attached to market data.
-Deterministic stub bars (seeded by symbol) keep charts working offline.
+Fail-closed: only live provider data is ever served. When no provider in
+the chain serves a live quote (or no live bars exist), the request raises
+ProviderError — routers map that to 502/503. No stubs, no snapshots-as-cover,
+no stale data. Ever.
 """
 
 from __future__ import annotations
@@ -192,34 +195,6 @@ def _provisional_instrument_cached(upper: str):
         )
     except Exception:
         return None
-
-
-@lru_cache(maxsize=1024)
-def _stub_base_rows(
-    provider_symbol: str, n: int, day_iso: str
-) -> tuple[tuple[float, float, float, float, int], ...]:
-    """Deterministic unanchored OHLCV random-walk (cached base for stubs).
-
-    Pure function of ``(provider_symbol, n, day_iso)``: seeded ``random``
-    (NOT ``secrets`` — this is chart filler, never crypto) so offline charts
-    are stable within a day. Returns immutable ``(o, h, l, c, volume)``
-    tuples; callers copy into fresh dicts and apply the quote anchor +
-    today's timestamps. ``day_iso`` is a cache-buster key only.
-    """
-    _ = day_iso
-    seed = int(hashlib.sha256((provider_symbol or "UNKNOWN").encode()).hexdigest(), 16) % (2**32)
-    rng = random.Random(seed)
-    price = 100.0 + (seed % 900)
-    out: list[tuple[float, float, float, float, int]] = []
-    for _ in range(max(1, min(int(n), 250))):
-        drift = rng.uniform(-0.015, 0.015)
-        o = price
-        c = round(o * (1 + drift), 2)
-        h = round(max(o, c) * (1 + rng.uniform(0, 0.008)), 2)
-        low = round(min(o, c) * (1 - rng.uniform(0, 0.008)), 2)
-        out.append((round(o, 2), h, low, c, rng.randint(100_000, 60_000_000)))
-        price = c
-    return tuple(out)
 
 
 class MarketDataService:
@@ -476,46 +451,33 @@ class MarketDataService:
                 pass
 
         if sse:
-            # SSE fallback chain: yfinance(.SS) -> akshare(6-digit) -> stub.
-            # Each provider has an independent breaker (isolation); the first
-            # live (non-fallback) quote wins and sets provenance source.
+            # SSE live chain: yfinance(.SS) -> akshare(6-digit), first LIVE
+            # quote wins. Fail-closed: when neither provider serves live data
+            # the request raises instead of serving a synthetic stub — no
+            # fallbacks, no stale snapshots, no fabricated prices.
+            # Each provider has an independent breaker (isolation).
+            from .providers.base import ProviderError as _PE
+
             yahoo_symbol = _to_yahoo_sse_symbol(provider_symbol)
             ak_code = _to_akshare_code(yahoo_symbol)
             quote: dict | None = None
-            yf_fallback: dict | None = None
             try:
                 q_yf = self.provider.get_quote(yahoo_symbol)
             except Exception as exc:
-                from .providers.base import ProviderError as _PE
-
                 if isinstance(exc, _PE) and "empty symbol" in str(exc).lower():
                     raise
                 q_yf = None
             if _quote_is_live(q_yf):
                 quote = q_yf
             else:
-                yf_fallback = q_yf
                 q_ak = self._call_akshare(ak_code)
                 if _quote_is_live(q_ak):
                     quote = q_ak
-                elif q_ak is not None:
-                    quote = q_ak
-                elif yf_fallback is not None:
-                    quote = yf_fallback
-                else:
-                    # Both providers unavailable: deterministic flagged stub (CNY).
-                    quote = {
-                        "symbol": yahoo_symbol,
-                        "price": 100.0,
-                        "currency": "CNY",
-                        "as_of": _utcnow(),
-                        "source": getattr(self.akshare_provider, "name", "akshare")
-                        if self.akshare_provider is not None
-                        else self.provider.name,
-                        "missing_fields": ["open", "high", "low", "prev_close", "volume"],
-                        "delay_minutes": 15,
-                        "fallback_used": True,
-                    }
+            if quote is None:
+                raise _PE(
+                    getattr(self.provider, "name", "yfinance"),
+                    f"no live quote for {yahoo_symbol} (yfinance+akshare unavailable)",
+                )
             assert quote is not None
             # Currency must be CNY for XSHG (never USD), even on yfinance path.
             quote["currency"] = "CNY"
@@ -531,9 +493,8 @@ class MarketDataService:
             # twelvedata live (US free, delay 0) -> stooq (delay 15,
             # US+Euronext) -> snapshot/stub. First live quote wins (alpaca
             # preferred = freshest) with short-circuit so one live feed
-            # costs one call. When nothing is live, the yfinance fallback
-            # wins to preserve the pre-chain outage behavior (source
-            # yfinance, fallback True). Absent providers (None) are
+            # costs one call. When nothing is live the request raises
+            # (fail-closed — see below). Absent providers (None) are
             # skipped, so every existing call site without explicit wiring
             # behaves as before.
             q_alpaca: dict | None = None
@@ -581,24 +542,16 @@ class MarketDataService:
                 )
                 if _quote_is_live(q_stooq):
                     quote = q_stooq
+            # Fail-closed: no fallback preference loop, no snapshot cover,
+            # no synthetic stub. Either a live quote won above or the
+            # request raises — routers map this to 502, never 200+stale.
             if quote is None:
-                for fallback_candidate in (
-                    q_yf_chain, q_finnhub, q_twelvedata, q_stooq, q_alpaca,
-                ):
-                    if fallback_candidate is not None:
-                        quote = fallback_candidate
-                        break
-            if quote is None:
-                quote = self._read_quote_snapshot(provider_symbol) or {
-                    "symbol": provider_symbol,
-                    "price": 100.0,
-                    "currency": "USD",
-                    "as_of": _utcnow(),
-                    "source": self.provider.name,
-                    "missing_fields": ["open", "high", "low", "prev_close", "volume"],
-                    "delay_minutes": 15,
-                    "fallback_used": True,
-                }
+                from .providers.base import ProviderError as _PE
+
+                raise _PE(
+                    getattr(self.provider, "name", "market-data"),
+                    f"no live quote for {provider_symbol} (all providers unavailable)",
+                )
         as_of = quote.get("as_of") or _utcnow()
         if not isinstance(as_of, datetime):
             as_of = _utcnow()
@@ -632,53 +585,42 @@ class MarketDataService:
             expected = calendar_expected
         raw_age_min = (_utcnow() - as_of).total_seconds() / 60
         if raw_age_min < -5:
-            # Future-dated data (beyond clock-skew tolerance): never badge as
-            # fresh — surface it as unusable instead of laundering it live.
-            future_dated = True
-            age_min = 0.0
-        else:
-            future_dated = False
-            age_min = max(0.0, raw_age_min)
-        fallback = bool(quote.pop("fallback_used", False)) or future_dated
-        if future_dated:
-            quote["missing_fields"] = sorted(
-                set(quote.get("missing_fields", [])) | {"as_of"}
+            # Future-dated data (beyond clock-skew tolerance) is unusable:
+            # fail closed instead of laundering it as live.
+            from .providers.base import ProviderError as _PE
+
+            raise _PE(
+                getattr(self.provider, "name", "market-data"),
+                f"future-dated quote for {provider_symbol} (as_of ahead of now)",
             )
+        future_dated = False
+        age_min = max(0.0, raw_age_min)
+        # Fail-closed invariant: only live quotes reach this point (the chain
+        # above raises otherwise). Any lingering fallback flag is a contract
+        # violation, never something to serve.
+        lingering = bool(quote.pop("fallback_used", False))
+        if lingering or not _quote_is_live(quote):
+            from .providers.base import ProviderError as _PE
+
+            raise _PE(
+                getattr(self.provider, "name", "market-data"),
+                f"no live quote for {provider_symbol} (non-live data refused)",
+            )
+        fallback = False
         source = quote.pop("source", self.provider.name)
-        if fallback and not future_dated:
-            # Outage path: prefer the last LIVE quote over a placeholder.
-            # Grade/age below are recomputed from the stored as_of, so the
-            # badge shows honest staleness instead of a fresh-looking stub.
-            stored = self._read_quote_snapshot(provider_symbol)
-            if stored is not None:
-                quote = stored
-                fallback = True
-                source = quote.get("source", source)
-                as_of = quote.get("as_of") or _utcnow()
-                if not isinstance(as_of, datetime):
-                    as_of = _utcnow()
-                elif as_of.tzinfo is None:
-                    as_of = as_of.replace(tzinfo=timezone.utc)
-                age_min = max(0.0, (_utcnow() - as_of).total_seconds() / 60)
         # NOTE: live-quote write-through happens below (after grading) so the
-        # snapshot stores the true live grade. Stub/fallback data is never
-        # persisted (it would poison the well).
+        # snapshot stores the true live grade.
         grade, _reasons = grade_quality(
             delay_minutes=expected,
             age_minutes=age_min,
             missing_fields=quote.get("missing_fields", []),
-            fallback_used=fallback,
+            fallback_used=False,
             reconciled=False,  # single source in v1
-            invalid=future_dated,
+            invalid=False,
         )
-        snapshot_grade = quote.pop("_snapshot_grade", None) if fallback else None
-        if snapshot_grade:
-            # Never grade stored data better than it was at fetch time.
-            grade = _worse_grade(snapshot_grade, grade)
-        if not fallback:
-            self._persist_quote_snapshot(
-                provider_symbol, instrument, mic, quote, source, as_of, grade,
-            )
+        self._persist_quote_snapshot(
+            provider_symbol, instrument, mic, quote, source, as_of, grade,
+        )
         provenance = build_provenance(
             source,
             as_of=as_of,
@@ -724,7 +666,7 @@ class MarketDataService:
     def provenance_for(self, payload: dict) -> Provenance:
         return Provenance(**payload["provenance"])
 
-    # -- bars (DB-first, deterministic offline-capable stub fallback) ---
+    # -- bars (DB-first, then on-demand live fetch, else raise) ---
     def _bars_cache_key(self, symbol: str, timeframe: str, limit: int) -> str:
         try:
             sym = str(symbol or "").strip().upper()
@@ -744,20 +686,10 @@ class MarketDataService:
         ``min(limit, 100)`` rows come back (quality gate so thin histories
         never masquerade as full coverage). Provenance then carries the
         stored source, ``fallback_used=False`` and a ``grade_quality`` grade.
-        ANY exception, unknown instrument, thin/empty coverage, or an
-        unreachable DB falls back to the deterministic stub below, so
-        offline/test environments never break.
 
-        Before the stub, an on-demand live fetch is attempted (``1d`` only):
-        the first chart view of a never-ingested symbol persists real bars,
-        so later views are DB-served real data. The stub is anchored to the
-        current quote (best-effort) so its last close matches the header
-        price — an unanchored random base would render a chart on a
-        completely different scale than the quote.
-
-        Results are cached 120s (bars move slowly; quote anchor is already
-        quote-cached) so screener/forecast/backtest fan-outs sharing a
-        symbol pay one DB/stub build per two minutes, not one per horizon.
+        Fail-closed: thin/empty coverage triggers an on-demand live fetch
+        (``1d`` only); when that also yields nothing the request raises
+        instead of serving synthetic stub bars. No fallbacks, ever.
         """
         cache_key: str | None = None
         if self.cache is not None:
@@ -791,13 +723,14 @@ class MarketDataService:
                     return db_out
         except Exception:
             pass
-        out = self._stub_bars(symbol, timeframe, limit, anchor=self._quote_anchor(symbol))
-        if self.cache is not None and cache_key is not None:
-            try:
-                self.cache.set(cache_key, out, ttl_s=120)  # type: ignore[union-attr]
-            except Exception:
-                pass
-        return out
+        # Fail-closed: DB thin/empty and live fetch missed — raise instead
+        # of fabricating deterministic stub bars. Routers map this to 502.
+        from .providers.base import ProviderError as _PE
+
+        raise _PE(
+            getattr(self.provider, "name", "market-data"),
+            f"no live bars for {symbol} (DB thin/empty, live fetch missed)",
+        )
 
     def get_bars_many(
         self, symbols: list[str], timeframe: str = "1d", limit: int = 30
@@ -895,28 +828,7 @@ class MarketDataService:
                     out[sym] = payload
         return out
 
-    def _quote_anchor(self, symbol: str) -> float | None:
-        """Best-effort reference price for anchoring stub bars.
-
-        Returns the current quote price (live or stub — either way it is the
-        same number the header shows) or None when no usable price exists.
-        Never raises: the bars fallback must survive quote failures.
-        """
-        try:
-            quote = self.get_quote(symbol)
-        except Exception:
-            return None
-        if not isinstance(quote, dict):
-            return None
-        try:
-            price = float(quote.get("price"))
-        except (TypeError, ValueError):
-            return None
-        if not price or price <= 0 or price != price or price == float("inf"):
-            return None
-        return price
-
-    # -- last-fetched persistence (write-through quotes, snapshot fallback) --
+    # -- last-fetched persistence (write-through live quotes) --
     @staticmethod
     def _safe_num(value) -> float | None:
         try:
@@ -999,76 +911,6 @@ class MarketDataService:
                 if not attempt:
                     continue
                 return
-
-    def _read_quote_snapshot(self, provider_symbol: str) -> dict | None:
-        """Last live quote as a provider-shaped dict, or None. Never raises."""
-        try:
-            from backend.db.models import QuoteSnapshot
-            from backend.db.session import get_session_factory
-        except Exception:
-            return None
-        try:
-            db = get_session_factory()()
-        except Exception:
-            return None
-        try:
-            row = (
-                db.query(QuoteSnapshot)
-                .filter(QuoteSnapshot.symbol == provider_symbol)
-                .first()
-            )
-            if row is None or row.price is None:
-                return None
-            as_of = row.as_of
-            if isinstance(as_of, datetime):
-                if as_of.tzinfo is None:
-                    as_of = as_of.replace(tzinfo=timezone.utc)
-            else:
-                as_of = _utcnow()
-
-            def _col(name: str):
-                try:
-                    value = getattr(row, name)
-                except Exception:
-                    return None
-                return self._safe_num(value)
-
-            field_values = {
-                "open": _col("open"),
-                "high": _col("high"),
-                "low": _col("low"),
-                "prev_close": _col("prev_close"),
-                "volume": row.volume if isinstance(row.volume, int) else None,
-            }
-            # Completeness is re-derived from the stored nulls (never claim
-            # a full envelope for a price-only snapshot).
-            missing = sorted(
-                name for name, value in field_values.items() if value is None
-            )
-            return {
-                "symbol": provider_symbol,
-                "price": float(row.price),
-                "open": field_values["open"],
-                "high": field_values["high"],
-                "low": field_values["low"],
-                "prev_close": field_values["prev_close"],
-                "volume": field_values["volume"],
-                "currency": row.currency or "USD",
-                "change": _col("change"),
-                "change_pct": _col("change_pct"),
-                "source": row.source or self.provider.name,
-                "as_of": as_of,
-                "missing_fields": missing,
-                "fallback_used": True,
-                "_snapshot_grade": row.quality_grade or "C",
-            }
-        except Exception:
-            return None
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
 
     def _remember_fetch_miss(self, miss_key: str) -> None:
         """Negative-cache a failed on-demand bars fetch (300s). Never raises."""
@@ -1344,57 +1186,4 @@ class MarketDataService:
             "provenance": provenance.model_dump(mode="json"),
         }
 
-    def _stub_bars(
-        self, symbol: str, timeframe: str = "1d", limit: int = 30,
-        anchor: float | None = None,
-    ) -> dict:
-        try:
-            symbol_text = str(symbol or "").strip()
-        except Exception:
-            symbol_text = ""
-        instrument, _, _ = self.registry.resolve(symbol_text)
-        provider_symbol = instrument.provider_symbol if instrument else symbol_text.upper()
-        try:
-            n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            n = 30
-        day = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        base_rows = _stub_base_rows(provider_symbol or "UNKNOWN", n, day.date().isoformat())
-        rows: list[dict] = [
-            {
-                "ts": (day - timedelta(days=(n - 1 - i))).isoformat(),
-                "open": o, "high": h, "low": low, "close": c,
-                "volume": vol,
-                "missing_fields": [],
-            }
-            for i, (o, h, low, c, vol) in enumerate(base_rows)
-        ]
-        if anchor is not None and anchor > 0 and rows:
-            # Rescale so the last close lands exactly on the quote price.
-            # A constant factor preserves % returns and OHLC ordering, so
-            # downstream return-based features are unaffected in relative terms.
-            last_close = rows[-1].get("close") or 0
-            if last_close and last_close > 0:
-                factor = anchor / last_close
-                for row in rows:
-                    for key in ("open", "high", "low", "close"):
-                        value = row.get(key)
-                        if isinstance(value, (int, float)) and value > 0:
-                            row[key] = round(value * factor, 2)
-                rows[-1]["close"] = round(anchor, 2)
-        mic = instrument.exchange_mic if instrument else "XNAS"
-        try:
-            expected = expected_delay_minutes(mic)
-        except ValueError:
-            expected = 15
-        provenance = build_provenance(
-            "yfinance", as_of=_utcnow(), delay_minutes=expected,
-            quality_grade="C", fallback_used=True, missing_fields=[],
-        )
-        return {
-            "symbol": provider_symbol,
-            "instrument_id": instrument.instrument_id if instrument else None,
-            "timeframe": timeframe,
-            "bars": rows,
-            "provenance": provenance.model_dump(mode="json"),
-        }
+

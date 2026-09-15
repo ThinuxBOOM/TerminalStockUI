@@ -21,7 +21,7 @@ import MarketStateBadge from "./MarketStateBadge";
 import CurrencyValue from "./CurrencyValue";
 import Skeleton from "./Skeleton";
 import EmptyState from "./EmptyState";
-import ErrorState, { StaleBanner } from "./ErrorState";
+import ErrorState from "./ErrorState";
 
 const GREEN = "#3ddc84";
 const RED = "#ff5c5c";
@@ -146,8 +146,8 @@ function IndexLineSvg({ points, ariaSummary, valueLabel = "value" }) {
 
 // ---------------------------------------------------------------------------
 // (a) Per-market ASPI/index chart: benchmark bars + timeframe selector +
-// ProvenanceBadge + FreshnessBadge + MarketStateBadge, StaleBanner on
-// fallback. No hardcoded prices — every number comes from the bars/quote
+// ProvenanceBadge + FreshnessBadge + MarketStateBadge. No hardcoded prices —
+// every number comes from the bars/quote
 // payloads (or "unavailable" states when they don't).
 function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" }) {
   const cfg = benchmarkForMic(mic);
@@ -255,11 +255,7 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
           <ProvenanceBadge p={series.data?.provenance ?? badgeProvenance} />
         </div>
       )}
-      {d?.fallback_used && (
-        <div className="mt-2">
-          <StaleBanner detail={`${cfg.mic} index bars served with fallback_used=true`} />
-        </div>
-      )}
+
       <p className="mt-1 text-[10px] text-term-muted">
         Source: GET /api/markets/{cfg.mic}/index (fallback GET /api/market_data/bars) · symbol {d?.usedSymbol ?? cfg.indexSymbol}
         {d?.isProxy ? ` (proxy — canonical ${cfg.indexSymbol} needs backend ^-symbol support)` : ""} · {tf}.
@@ -500,11 +496,7 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
           <ProvenanceBadge p={constituents.data.provenance} />
         </div>
       )}
-      {constituents.data?.fallback_used && (
-        <div className="mt-2">
-          <StaleBanner detail={`${cfg.mic} Top-20 served with fallback_used=true`} />
-        </div>
-      )}
+
       <p className="mt-1 text-[10px] text-term-muted">
         Native currency only — constituents are ordered within {cfg.mic}, never ranked across currencies (FX gate).
         Line is {composite?.weighting ?? (weighting === "cap" ? "cap-weighted (fallback equal until market_cap lands)" : "equal-weighted")};

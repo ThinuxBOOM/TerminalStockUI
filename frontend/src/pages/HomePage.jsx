@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { getAuditForecasts, getHealth, getProvidersHealth, getQuote } from "../api/client";
+import { getAuditForecasts, getProvidersHealth, getQuote } from "../api/client";
 import ProvenanceBadge from "../components/ProvenanceBadge";
 import FreshnessBadge from "../components/FreshnessBadge";
 import MarketStateBadge from "../components/MarketStateBadge";
@@ -15,7 +15,7 @@ import CurrencyValue from "../components/CurrencyValue";
 import { formatPct1 } from "../utils/format";
 import Skeleton from "../components/Skeleton";
 import EmptyState from "../components/EmptyState";
-import ErrorState, { StaleBanner } from "../components/ErrorState";
+import ErrorState from "../components/ErrorState";
 
 function normalizeSymbolInput(v) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
@@ -97,7 +97,6 @@ const WatchlistRow = memo(WatchlistRowInner);
 // The only 3-column row (watchlist / providers / research) has exactly
 // three equal children that stretch to equal height.
 function HomePage() {
-  const health = useQuery({ queryKey: ["health"], queryFn: getHealth, retry: false });
   const providers = useQuery({
     queryKey: ["providers-health"],
     queryFn: getProvidersHealth,
@@ -120,26 +119,10 @@ function HomePage() {
     setDraft("");
   }
   const removeSymbol = useCallback((sym) => removeWatchSymbol(sym), [removeWatchSymbol]);
-  const degraded = health.isError || health.data?.status !== "ok";
-  const providerRows = providers.data ?? null;
-  const healthProviders = useMemo(() => health.data?.providers ?? [], [health.data]);
-  const showProviders = useMemo(
-    () =>
-      providerRows ??
-      healthProviders.map((p) => ({
-        name: p.name,
-        status: p.status,
-        latency_ms: p.latency_ms,
-        latency_p50_ms: p.latency_ms,
-        latency_p95_ms: undefined,
-        error_rate_1h: undefined,
-        calls_1h: undefined,
-        total_calls: undefined,
-        circuit: undefined,
-        last_check: p.last_check,
-      })),
-    [providerRows, healthProviders]
-  );
+  // Fail-closed: provider rows come from GET /api/providers/health only.
+  // No fallback mapping from /health, no cached-values banner — an
+  // unreachable endpoint is an explicit error with retry.
+  const showProviders = useMemo(() => providers.data ?? [], [providers.data]);
   const reports = useMemo(() => research.data?.forecasts ?? [], [research.data]);
   return (
     <div className="grid max-w-full gap-4">
@@ -206,14 +189,22 @@ function HomePage() {
           <h2 id="home-provider-health" className="term-label">
             Provider health
           </h2>
-          {(degraded || providers.isError) && (
-            <div className="mt-2">
-              <StaleBanner detail="health endpoint degraded — cached values shown" />
-            </div>
-          )}
-          {(providers.isLoading || health.isLoading) && (
+          {providers.isLoading && (
             <div className="mt-2">
               <Skeleton label="loading provider health…" lines={3} />
+            </div>
+          )}
+          {providers.isError && (
+            <div className="mt-2">
+              <ErrorState
+                title="Provider health unavailable"
+                detail={
+                  providers.error instanceof Error
+                    ? providers.error.message
+                    : "Backend /api/providers/health unreachable."
+                }
+                onRetry={() => void providers.refetch()}
+              />
             </div>
           )}
           {showProviders.length > 0 ? (
@@ -234,18 +225,12 @@ function HomePage() {
               })}
             </ul>
           ) : (
-            !health.isLoading &&
-            !providers.isLoading && (
-              <p className="mt-2 text-xs text-term-muted">
-                yfinance · AKShare · FX — no live data (backend offline?).
+            !providers.isLoading &&
+            !providers.isError && (
+              <p className="mt-2 text-xs text-term-muted" role="status">
+                No provider data — the health endpoint returned no rows.
               </p>
             )
-          )}
-          {providers.isError && (
-            <p className="mt-2 text-[11px] text-term-amber">
-              ⚠ /api/providers/health unreachable
-              {providers.error instanceof Error ? ` (${providers.error.message})` : ""} — showing /health summary.
-            </p>
           )}
         </section>
         <section className="term-panel min-w-0 p-4" aria-labelledby="home-research">

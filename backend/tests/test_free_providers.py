@@ -455,10 +455,10 @@ def test_service_twelvedata_live_wins_when_yfinance_and_finnhub_fail(isolated_db
     assert out["price"] == 233.30
 
 
-def test_service_full_outage_with_new_stubs_preserves_yfinance_fallback(isolated_db):
-    out = _all_stub_service().get_quote("AAPL")
-    assert out["provenance"]["fallback_used"] is True
-    assert out["provenance"]["source"] == "yfinance"
+def test_service_full_outage_with_new_stubs_raises_provider_error(isolated_db):
+    # Fail-closed: all fallback-flagged stubs are refused -> ProviderError.
+    with pytest.raises(ProviderError):
+        _all_stub_service().get_quote("AAPL")
 
 
 def test_service_sse_never_touches_finnhub_or_twelvedata(isolated_db):
@@ -468,12 +468,21 @@ def test_service_sse_never_touches_finnhub_or_twelvedata(isolated_db):
         calls.append(symbol)
         raise ProviderError("unreachable", "must not be called for SSE")
 
+    def _live_yf_cny(symbol: str) -> dict:
+        return {
+            "symbol": symbol, "price": 1685.0, "open": 1678.0, "high": 1690.0,
+            "low": 1675.0, "prev_close": 1680.0, "volume": 3_100_000,
+            "currency": "CNY", "as_of": _utcnow(),
+        }
+
+    yf = YFinanceProvider(stub_mode=False)
+    yf._fetch_raw = _live_yf_cny  # type: ignore[method-assign]
     finnhub = FinnhubProvider(stub_mode=False, api_key="k")
     finnhub._fetch_raw = _spy  # type: ignore[method-assign]
     td = TwelveDataProvider(stub_mode=False, api_key="k")
     td._fetch_raw = _spy  # type: ignore[method-assign]
     svc = MarketDataService(
-        provider=YFinanceProvider(stub_mode=True),
+        provider=yf,
         finnhub_provider=finnhub,
         twelvedata_provider=td,
     )
@@ -481,6 +490,130 @@ def test_service_sse_never_touches_finnhub_or_twelvedata(isolated_db):
     assert out["currency"] == "CNY"
     assert calls == []
     assert out["provenance"]["source"] in ("yfinance", "akshare")
+    assert out["provenance"]["fallback_used"] is False
+
+
+def _live_wrap_get_quote(prov, source: str, price: float):
+    """Wrap provider.get_quote to return live-shaped dicts with a distinct source.
+
+    Keeps chain-precedence coverage explicit under fail-closed: each double
+    is live (fallback_used False, price present) with its own source marker.
+    """
+    def _live(symbol: str, market=None) -> dict:
+        upper = (symbol or "").strip().upper() or "AAPL"
+        return {
+            "symbol": upper,
+            "price": price,
+            "open": price - 1.0,
+            "high": price + 1.0,
+            "low": price - 2.0,
+            "prev_close": price - 2.5,
+            "volume": 1_000_000,
+            "currency": "USD",
+            "as_of": _utcnow(),
+            "source": source,
+            "missing_fields": [],
+            "fallback_used": False,
+        }
+
+    prov.get_quote = _live  # type: ignore[method-assign]
+    return prov
+
+
+def test_service_full_chain_precedence_alpaca_first(isolated_db):
+    """alpaca > yfinance > finnhub > twelvedata > stooq when all live."""
+    from backend.market_data.providers.alpaca import AlpacaProvider
+
+    yf = _live_wrap_get_quote(YFinanceProvider(stub_mode=False), "yfinance", 232.50)
+    alpaca = _live_wrap_get_quote(
+        AlpacaProvider(stub_mode=False, api_key="k", api_secret="s"), "alpaca", 233.10
+    )
+    finnhub = _live_wrap_get_quote(
+        FinnhubProvider(stub_mode=False, api_key="k"), "finnhub", 233.20
+    )
+    td = _live_wrap_get_quote(
+        TwelveDataProvider(stub_mode=False, api_key="k"), "twelvedata", 233.30
+    )
+    stooq = _live_wrap_get_quote(StooqProvider(stub_mode=False), "stooq", 232.40)
+    svc = MarketDataService(
+        provider=yf, alpaca_provider=alpaca, finnhub_provider=finnhub,
+        twelvedata_provider=td, stooq_provider=stooq,
+    )
+    out = svc.get_quote("AAPL")
+    assert out["provenance"]["source"] == "alpaca"
+    assert out["price"] == 233.10
+    assert out["provenance"]["fallback_used"] is False
+    assert out["provenance"]["delay_minutes"] == 0
+
+
+def test_service_chain_precedence_yfinance_over_free_tiers(isolated_db):
+    """yfinance wins over finnhub/twelvedata/stooq when alpaca is out."""
+    from backend.market_data.providers.alpaca import AlpacaProvider
+
+    yf = _live_wrap_get_quote(YFinanceProvider(stub_mode=False), "yfinance", 232.50)
+    finnhub = _live_wrap_get_quote(
+        FinnhubProvider(stub_mode=False, api_key="k"), "finnhub", 233.20
+    )
+    td = _live_wrap_get_quote(
+        TwelveDataProvider(stub_mode=False, api_key="k"), "twelvedata", 233.30
+    )
+    stooq = _live_wrap_get_quote(StooqProvider(stub_mode=False), "stooq", 232.40)
+    svc = MarketDataService(
+        provider=yf,
+        alpaca_provider=AlpacaProvider(stub_mode=True),
+        finnhub_provider=finnhub,
+        twelvedata_provider=td,
+        stooq_provider=stooq,
+    )
+    out = svc.get_quote("AAPL")
+    assert out["provenance"]["source"] == "yfinance"
+    assert out["price"] == 232.50
+    assert out["provenance"]["fallback_used"] is False
+
+
+def test_service_chain_precedence_finnhub_over_twelvedata(isolated_db):
+    """finnhub wins over twelvedata/stooq when alpaca+yfinance miss."""
+    yf = YFinanceProvider(stub_mode=False)
+    yf._fetch_raw = _boom_yf  # type: ignore[method-assign]
+    # yfinance failure degrades to a flagged stub internally; the service
+    # refuses it and moves down-chain, so finnhub (live) must win over a
+    # live twelvedata/stooq pair.
+    finnhub = _live_wrap_get_quote(
+        FinnhubProvider(stub_mode=False, api_key="k"), "finnhub", 233.20
+    )
+    td = _live_wrap_get_quote(
+        TwelveDataProvider(stub_mode=False, api_key="k"), "twelvedata", 233.30
+    )
+    stooq = _live_wrap_get_quote(StooqProvider(stub_mode=False), "stooq", 232.40)
+    svc = MarketDataService(
+        provider=yf, finnhub_provider=finnhub,
+        twelvedata_provider=td, stooq_provider=stooq,
+    )
+    out = svc.get_quote("AAPL")
+    assert out["provenance"]["source"] == "finnhub"
+    assert out["price"] == 233.20
+    assert out["provenance"]["fallback_used"] is False
+
+
+def test_service_chain_precedence_twelvedata_over_stooq(isolated_db):
+    """twelvedata wins over stooq when alpaca+yfinance+finnhub miss."""
+    yf = YFinanceProvider(stub_mode=False)
+    yf._fetch_raw = _boom_yf  # type: ignore[method-assign]
+    td = _live_wrap_get_quote(
+        TwelveDataProvider(stub_mode=False, api_key="k"), "twelvedata", 233.30
+    )
+    stooq = _live_wrap_get_quote(StooqProvider(stub_mode=False), "stooq", 232.40)
+    svc = MarketDataService(
+        provider=yf,
+        finnhub_provider=FinnhubProvider(stub_mode=True),
+        twelvedata_provider=td,
+        stooq_provider=stooq,
+    )
+    out = svc.get_quote("AAPL")
+    assert out["provenance"]["source"] == "twelvedata"
+    assert out["price"] == 233.30
+    assert out["provenance"]["fallback_used"] is False
+    assert out["provenance"]["delay_minutes"] == 0
 
 
 def test_service_euronext_skips_us_only_free_providers(isolated_db):

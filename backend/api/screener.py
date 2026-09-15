@@ -1,7 +1,7 @@
 """GET /api/screener — rank the seed universe by forecast direction probability.
 
 Deterministic, no AI, no network beyond what the market-data providers
-already do (offline stub fallback keeps the scan usable on outage).
+already do (fail-closed: outage raises 502, never a stub scan).
 For each registry instrument in scope: quote (price/currency/market_state/
 provenance via MarketDataService) + deterministic forecast at the
 requested horizon (raw direction_probability/confidence/model_version —

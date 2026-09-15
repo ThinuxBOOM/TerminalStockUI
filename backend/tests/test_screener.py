@@ -4,6 +4,14 @@ Covers the Phase 3a contract for GET /api/screener: response shape,
 ranking order, min_direction filter, horizon validation (422), unknown
 market handling (422), per-symbol failure degrades to skipped (200
 overall), and the empty-universe edge.
+
+Fail-closed contract: MarketDataService serves ONLY live data (quote:
+fallback_used falsy, price present) else raises ProviderError. Tests
+build live doubles by taking the deterministic stub quotes and marking
+them live (fallback_used=False, pop fallback) so the service grades them
+as live. Per-symbol failures still degrade to skipped[] rows; all-fail
+batches return empty results with skipped reasons (200), never synthetic
+rows.
 """
 
 from __future__ import annotations
@@ -34,10 +42,35 @@ REQUIRED_ROW_KEYS = {
 
 
 def _stub_service() -> MarketDataService:
+    """Live double: stub quotes marked live (fail-closed contract).
+
+    Takes the deterministic YFinanceProvider stub quotes (offline,
+    no network), sets fallback_used=False, pops the fallback marker and
+    ensures a price is present. The service then grades them as live
+    (provenance fallback_used False). Bars come from the seeded DB
+    (500+ rows per symbol) so forecasts are deterministic.
+    """
     tracker = ProviderHealthTracker()
     provider = YFinanceProvider(
         stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
     )
+    _orig_get_quote = provider.get_quote
+
+    def _live_get_quote(symbol: str, *args, **kwargs) -> dict:  # type: ignore[no-untyped-def]
+        upper = (symbol or "").strip().upper() if isinstance(symbol, str) else ""
+        if not upper:
+            # Preserve empty-symbol contract (ProviderError, never a stub).
+            return _orig_get_quote(symbol, *args, **kwargs)
+        q = _orig_get_quote(symbol, *args, **kwargs)
+        q = dict(q)
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        q.pop("circuit_open", None)
+        if q.get("price") is None:
+            q["price"] = 150.0
+        return q
+
+    provider.get_quote = _live_get_quote  # type: ignore[method-assign]
     return MarketDataService(
         registry=InstrumentRegistry(), provider=provider,
         health=tracker, cache=InMemoryCache(),
@@ -106,6 +139,9 @@ def test_screener_contract_shape_keys():
             assert row["model_version"]
             assert row["horizons"] == [21]
             assert REQUIRED_PROVENANCE - set(row["provenance"]) == set()
+            # Fail-closed: screener rows are live only, never fallback stubs.
+            assert row["provenance"]["fallback_used"] is False
+            assert row["price"] is not None
     finally:
         _teardown()
 
@@ -187,6 +223,38 @@ def test_screener_per_symbol_failure_degrades():
         body = resp.json()
         assert any(s["symbol"] == "AAPL" and s["reason"] for s in body["skipped"])
         assert all(r["symbol"] != "AAPL" for r in body["results"])
+    finally:
+        _teardown()
+
+
+def test_screener_all_fail_returns_empty_with_skipped():
+    """Fail-closed: all-fail batch is 200 with empty results + skipped reasons.
+
+    Never synthetic rows. Per-symbol degrade (backend/api/screener.py
+    _scan_one) collects {symbol, reason} per failure; the batch envelope
+    stays honest.
+    """
+    from backend.market_data.providers.base import ProviderError
+
+    stub = _stub_service()
+
+    def _boom(symbol: str, market: str | None = None) -> dict:
+        raise ProviderError("yfinance", f"simulated outage for {symbol}")
+
+    stub.get_quote = _boom  # type: ignore[method-assign]
+    client = _client(svc=stub)
+    try:
+        resp = client.get("/api/screener", params={"min_direction": 0.0, "limit": 50})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["results"] == []
+        assert body["count"] == 0
+        assert body["universe_size"] == len(InstrumentRegistry().all())
+        assert len(body["skipped"]) == body["universe_size"]
+        for entry in body["skipped"]:
+            assert entry.get("symbol") and entry.get("reason")
+        # Honest provenance for an empty scan: non-fallback envelope.
+        assert body["provenance"]["fallback_used"] is False
     finally:
         _teardown()
 

@@ -663,6 +663,10 @@ async function postAIInsight(symbol, profile) {
 }
 function friendlyAIError(error) {
   const message = error instanceof Error ? error.message : String(error ?? "unknown error");
+  const status = error?.response?.status ?? error?.status ?? null;
+  if (status === 423 || /AI disabled/i.test(message)) {
+    return "AI disabled — no API key configured. Add a key in Provider Settings to enable AI opinions; the deterministic forecast is unaffected.";
+  }
   if (error?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(message)) {
     return "AI took longer than 60s (cold start + thinking model) \u2014 deterministic forecast unaffected. Retry; repeat calls are usually instant via the evidence cache.";
   }

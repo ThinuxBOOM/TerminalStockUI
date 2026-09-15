@@ -188,42 +188,44 @@ def _client(empty_store) -> TestClient:
 
 
 def test_api_insight_roundtrip(empty_store):
+    """Fail-closed: no key -> 423 (never a stub 200); wire never serves stubs."""
     client = _client(empty_store)
     response = client.post("/api/ai/insight", json={"symbol": "AAPL", "profile": "quick_insight"})
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["symbol"] == "AAPL"
-    assert body["provider"] == "gemini"
-    opinion = body["opinion"]
-    assert opinion["time_horizon_days"] in (5, 21, 63)
-    assert 0.0 <= opinion["probability"] <= 1.0
-    assert opinion["evidence_ids"]
-    assert "api_key" not in response.text.lower()  # never key material in API output
-    # Second identical call is served from the evidence-hash cache.
-    again = client.post("/api/ai/insight", json={"symbol": "AAPL", "profile": "quick_insight"})
-    assert again.json()["cached"] is True
-    assert again.json()["evidence_hash"] == body["evidence_hash"]
+    assert response.status_code == 423, response.text
+    assert "AI disabled" in response.text
+    assert "api_key" not in response.text.lower()
+    # Wire guard: stub opinions never reach the response (unit).
+    from backend.ai.providers.base import build_stub_opinion
+
+    from backend.api.ai import _refuse_stub_opinion
+    import pytest as _pt
+
+    stub = build_stub_opinion(_packet(), provider="gemini", model="gemini-3.7-flash")
+    assert stub.stub is True
+    with _pt.raises(Exception) as exc:
+        _refuse_stub_opinion(stub, context="insight")
+    assert getattr(exc.value, "status_code", None) == 502
 
 
-def test_api_forecast_opinion_with_blend_preview(empty_store):
+def test_api_forecast_opinion_with_blend_preview(empty_store, monkeypatch):
+    """Fail-closed: ai_enabled True with no key -> 423; disabled -> deterministic passthrough."""
+    from backend.api import ai as _ai_api
+
     client = _client(empty_store)
     response = client.post(
         "/api/ai/forecast_opinion",
         json={"symbol": "AAPL", "horizon": 21, "quant_prob": 0.64,
               "ai_weight": 0.2, "ai_enabled": True},
     )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["opinion"]["time_horizon_days"] == 21
-    blend = body["blend"]
-    assert blend["quant_prob"] == pytest.approx(0.64)
-    assert abs(blend["blended_prob"] - 0.64) <= AI_WEIGHT_MAX + 1e-9
-    assert blend["ai_weight"] <= AI_WEIGHT_MAX
-    # AI-disabled mode: forecast passes through intact.
+    assert response.status_code == 423, response.text
+    # AI-disabled mode: deterministic passthrough without a live AI call.
+    # Mock evidence packet (no network) — blend logic is what is under test.
+    monkeypatch.setattr(_ai_api, "_build_packet", lambda symbol: _packet(symbol))
     disabled = client.post(
         "/api/ai/forecast_opinion",
         json={"symbol": "AAPL", "horizon": 5, "quant_prob": 0.64, "ai_enabled": False},
     )
+    assert disabled.status_code == 200, disabled.text
     assert disabled.json()["blend"]["blended_prob"] == pytest.approx(0.64)
     assert disabled.json()["blend"]["ai_applied"] is False
     # Invalid horizon rejected (only 5/21/63).

@@ -1,5 +1,8 @@
 """FX provider (M7 cross-market gate): free live sources with provenance.
 
+Fail-closed: live Frankfurter/ECB rates or yfinance FX tickers, else
+:class:`ProviderError` — never a stub rate, never stale data.
+
 Free-first design mirroring the equity providers:
 
 - live path 1: ``https://api.frankfurter.app/latest?from=BASE&to=QUOTE``
@@ -8,7 +11,7 @@ Free-first design mirroring the equity providers:
 - live path 2 (secondary): yfinance FX tickers (``EURUSD=X`` …,
   inverse ``USDCNY=X`` inverted when the direct pair is missing) — the same
   network path as the equity quotes, so environments that can fetch quotes
-  can fetch FX. ``yfinance`` imported lazily; missing/unusable -> stub;
+  can fetch FX. ``yfinance`` imported lazily; missing/unusable -> raise;
 - 15-minute in-memory cache of live rates (``CACHE_TTL_S``);
 - reconciler (Phase 1c): live frankfurter/yahoo rates are cross-checked
   against the ECB eurofxref daily reference (``ECB_URL``, parsed per-EUR
@@ -17,12 +20,11 @@ Free-first design mirroring the equity providers:
   disagreement keeps ``reconciled=False`` (grade B) with ``ecb_rate`` +
   ``divergence_pct`` transparency fields; any ECB failure abstains silently
   (``reconciled=False``, no ecb fields) and never blocks the live rate;
-- fallback: deterministic ECB reference stub table (triangle-consistent
-  ``EURUSD 1.08 / USDCNY 7.25 / EURCNY 7.83``), always flagged
-  ``fallback_used=True``;
+- no stub table is ever served: outage/unavailable/malformed upstream raises
+  :class:`ProviderError` (routers map to 502/503);
 - per-provider circuit breaker + token-bucket limiter, health hook, and a
   ``stub_mode`` force-offline switch — like the yfinance/AKShare providers;
-- never raises on network failure: any outage degrades to the flagged stub.
+- fail-closed on network failure: any outage raises.
   Only empty/unsupported currency codes raise :class:`ProviderError`
   (``retryable=False``), matching the equity empty-symbol contract.
 
@@ -141,17 +143,17 @@ def _fetch_ecb_table() -> tuple[dict[str, float], str | None] | None:
 
 
 class FXProvider:
-    """Live Frankfurter/ECB provider with yfinance secondary + stub fallback.
+    """Live Frankfurter/ECB provider with yfinance secondary (fail-closed).
 
-    Chain per pair: frankfurter -> yfinance FX ticker -> flagged stub.
-    Never crashes offline."""
+    Chain per pair: frankfurter -> yfinance FX ticker -> raise.
+    Offline/unavailable raises :class:`ProviderError`, never a stub."""
 
     def _fetch_yahoo(self, base: str, quote: str) -> dict:
         """Secondary live fetch via yfinance FX tickers (``EURUSD=X`` …).
 
         Tries the direct pair first, then the inverse pair (inverted).
         Raises :class:`ProviderError` when yfinance is unavailable or both
-        tickers yield no usable close — the caller then serves the stub.
+        tickers yield no usable close — the caller then raises fail-closed.
         as_of is the MARKET bar timestamp (last hist index), not fetch time,
         so weekend/holiday closes are not misgraded as fresh.
         """
@@ -400,8 +402,11 @@ class FXProvider:
     def get_rate(self, base: str, quote: str) -> dict:
         """Return ``{pair, rate, inverse, as_of, source, fallback_used, ...}``.
 
-        Never raises on outage (flagged stub); raises :class:`ProviderError`
-        (``retryable=False``) only for empty/unsupported currency codes.
+        Fail-closed: raises :class:`ProviderError` when no live rate is
+        available (stub mode, open breaker, fetch failure, malformed
+        upstream) — never a flagged stub rate. Only empty/unsupported
+        currency codes raise with ``retryable=False``; identity pairs
+        (``b == q``) return the exact 1.0 rate with no upstream call.
         """
         b = _check_ccy(base)
         q = _check_ccy(quote)
@@ -429,15 +434,12 @@ class FXProvider:
                 return hit
 
         if self.stub_mode:
-            payload = self._stub_payload(b, q)
-            self._emit(0.0, True)
-            return payload
+            self._emit(0.0, False, error="stub mode: no live rates")
+            raise ProviderError(NAME, f"no live rate for {b}/{q} (stub mode)")
 
         if not self.breaker.allow_request():
-            payload = self._stub_payload(b, q)
-            payload["circuit_open"] = True
             self._emit(0.0, False, error="circuit open (breaker)")
-            return payload
+            raise ProviderError(NAME, f"no live rate for {b}/{q} (circuit open)")
 
         self.limiter.acquire()  # stub: counted, never blocks local run
         started = time.perf_counter()
@@ -450,22 +452,18 @@ class FXProvider:
                 self.breaker.record_failure()
                 self._emit((time.perf_counter() - started) * 1000, False,
                            error=f"{type(exc).__name__}: {exc} (first: {exc_first})")
-                payload = self._stub_payload(b, q)
-                payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
-                return payload
+                raise ProviderError(NAME, f"no live rate for {b}/{q} (upstream unavailable)")
         try:
             rate = float(raw["rate"])
         except (KeyError, TypeError, ValueError):
             rate = float("nan")
         if not math.isfinite(rate) or rate <= 0:
-            # Malformed/non-finite upstream rate: degrade to the flagged
-            # stub instead of leaking NaN/inf (get_rate never raises here).
+            # Malformed/non-finite upstream rate: refuse instead of leaking
+            # NaN/inf or a fabricated stub rate.
             self.breaker.record_failure()
             self._emit((time.perf_counter() - started) * 1000, False,
                        error="non-finite upstream rate")
-            payload = self._stub_payload(b, q)
-            payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
-            return payload
+            raise ProviderError(NAME, f"no live rate for {b}/{q} (malformed upstream)")
         self.breaker.record_success()
         self._emit((time.perf_counter() - started) * 1000, True)
         payload = {

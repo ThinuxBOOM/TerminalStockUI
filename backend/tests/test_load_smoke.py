@@ -3,7 +3,9 @@
 Budget (documents capacity, NOT a strict perf gate):
   - 50 sequential TestClient quote + forecast calls complete in < 30s.
   - A 6-symbol watchlist refreshed concurrently via threads in < 30s.
-All calls run against stub market data: no network, deterministic bars.
+All calls run against live doubles (deterministic stub quotes marked
+live: fallback_used=False, price present; bars from the seeded DB with
+live provenance): no network, deterministic.
 """
 
 from __future__ import annotations
@@ -42,6 +44,22 @@ def _build_app():
     provider = YFinanceProvider(
         stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
     )
+    # Fail-closed live double: stub quotes marked live.
+    _orig = provider.get_quote
+
+    def _live_get_quote(symbol: str, *args, **kwargs) -> dict:  # type: ignore[no-untyped-def]
+        upper = (symbol or "").strip().upper() if isinstance(symbol, str) else ""
+        if not upper:
+            return _orig(symbol, *args, **kwargs)
+        q = dict(_orig(symbol, *args, **kwargs))
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        q.pop("circuit_open", None)
+        if q.get("price") is None:
+            q["price"] = 150.0
+        return q
+
+    provider.get_quote = _live_get_quote  # type: ignore[method-assign]
     stub = MarketDataService(
         registry=InstrumentRegistry(), provider=provider,
         health=tracker, cache=InMemoryCache(),
@@ -75,6 +93,7 @@ def test_load_smoke_50_sequential_quote_plus_forecast():
             q = client.get("/api/market_data/quote", params={"symbol": sym})
             assert q.status_code == 200, q.text
             assert q.json()["price"] is not None
+            assert q.json()["provenance"]["fallback_used"] is False
             f = client.get(f"/api/forecast/{sym}", params={"horizon": 21})
             assert f.status_code == 200, f.text
             n_ok += 1
@@ -92,12 +111,15 @@ def test_load_smoke_watchlist_concurrent_refresh():
     try:
         def _refresh(symbol: str) -> tuple[str, int, bool]:
             # One client per thread: TestClient instances are cheap; the
-            # underlying app + stub service are shared and thread-safe for
-            # these read-only stub paths.
+            # underlying app + live-double service are shared and thread-safe
+            # for these read-only live paths.
             with TestClient(app) as client:
                 resp = client.get("/api/market_data/quote", params={"symbol": symbol})
                 ok = resp.status_code == 200 and resp.json().get("price") is not None
-                prov_ok = "provenance" in resp.json()
+                try:
+                    prov_ok = resp.json().get("provenance", {}).get("fallback_used") is False
+                except Exception:
+                    prov_ok = False
                 return symbol, resp.status_code, ok and prov_ok
 
         started = time.perf_counter()

@@ -119,7 +119,7 @@ def _is_retryable_stub(opinion: AIOpinion) -> bool:
     """True when a stub opinion reflects a TRANSIENT failure worth retrying.
 
     Retryable: live-call/network/timeout/overload/429/5xx phrasing (including
-    the router's own "router fallback: TimeoutError" marker).
+    the router's own "live call failed: TimeoutError" marker).
     Never retryable: no-key stubs, validation stubs, circuit-open stubs —
     retrying those is pure waste.
     """
@@ -132,7 +132,7 @@ def _is_retryable_stub(opinion: AIOpinion) -> bool:
     if "no api key" in reasons or "failed validation" in reasons or "circuit-open" in reasons or "circuit open" in reasons:
         return False
     markers = (
-        "live call unavailable", "router fallback", "timeout", "timed out",
+        "live call unavailable", "live call failed", "timeout", "timed out",
         "temporarily", "overloaded", "try again", "connection", "network",
         "http 429", "http 500", "http 502", "http 503", "http 504",
     )
@@ -736,7 +736,7 @@ class AIRouter:
                 opinion = build_stub_opinion(
                     packet, provider=provider_name, model=provider.model,
                     horizon=horizon,
-                    reason=f"router fallback: TimeoutError after {attempts} attempt(s)",
+                    reason=f"live call failed: TimeoutError after {attempts} attempt(s)",
                 )
                 break
             except Exception as exc:  # last-resort guard; providers already stub
@@ -748,7 +748,7 @@ class AIRouter:
 
                 opinion = build_stub_opinion(
                     packet, provider=provider_name, model=provider.model,
-                    horizon=horizon, reason=f"router fallback: {type(exc).__name__}",
+                    horizon=horizon, reason=f"live call failed: {type(exc).__name__}",
                 )
                 break
             else:

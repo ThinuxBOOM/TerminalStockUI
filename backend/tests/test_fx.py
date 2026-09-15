@@ -1,15 +1,21 @@
-"""M7 FX tests (no network).
+"""M7 FX tests (no network) — FAIL-CLOSED contract.
 
 Covers:
-- stub rates: deterministic ECB reference table, fallback_used=True,
-  USD/EUR/CNY triangle consistency, inverse math, same-ccy identity
-- provider: empty/unsupported -> ProviderError; outage/httpx-missing ->
-  flagged stub (never raises); breaker isolation; 15-min cache
+- provider fail-closed: stub_mode raises, open breaker raises, fetch
+  failure raises, malformed/non-finite upstream raises; identity pairs
+  (b==q) return exact 1.0 with fallback_used False and no upstream call.
+  No fallback stub rates; live rates carry fallback_used False.
+- provider: empty/unsupported -> ProviderError(retryable=False);
+  breaker isolation; 15-min cache
 - convert math: direct / inverse / triangle / key-form variants / no-path
 - gate: fresh passes; stale >24h refuses; fallback refuses without
   allow_fallback, passes with it; missing provenance refuses
+  (gate logic unchanged; provider never serves fallback so the fallback
+  branch is only reachable with hand-built envelopes)
 - rank/compare: refuse without fresh FX, sort otherwise
-- HTTP: /pairs, /rate, /convert, /rank (200 fresh, 423 gated)
+- HTTP fail-closed: ProviderError -> 400 when not retryable else 502;
+  rank with no quotable symbols -> 502; rank gate 423 unchanged for
+  stale/missing rates; live responses always fallback_used False.
 """
 
 from __future__ import annotations
@@ -56,34 +62,91 @@ def _prov(*, hours_old: float = 0.0, fallback: bool = False, source: str = "fran
     }
 
 
-# -- stub rates ------------------------------------------------------------
+# -- live doubles (fail-closed) ------------------------------------------------
+# MarketDataService serves ONLY live data: build live doubles by flipping a
+# stub quote dict to fallback_used False (price present).
 
 
-def test_stub_rates_deterministic_and_flagged():
+def _live_market_service() -> MarketDataService:
+    tracker = ProviderHealthTracker()
+    base = YFinanceProvider(
+        stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
+    )
+
+    _orig = base.get_quote
+
+    def _live_get_quote(symbol: str, *args, **kwargs) -> dict:  # noqa: ANN002, ANN003, ANN202
+        q = _orig(symbol)
+        q = dict(q)
+        q["fallback_used"] = False
+        q.pop("fallback", None)
+        return q
+
+    base.get_quote = _live_get_quote  # type: ignore[method-assign]
+    return MarketDataService(
+        registry=InstrumentRegistry(), provider=base,
+        health=tracker, cache=InMemoryCache(),
+    )
+
+
+def _make_live_fx(*, stale_hours: float | None = None) -> FXProvider:
+    """Live FX double: deterministic stub_rate values served as LIVE."""
+    prov = FXProvider(stub_mode=False)
+
+    def _live(base: str, quote: str) -> dict:
+        from backend.market_data.fx.provider import stub_rate as _stub
+
+        asof = _utcnow() - timedelta(hours=stale_hours) if stale_hours else _utcnow()
+        return {
+            "base": base, "quote": quote, "rate": _stub(base, quote),
+            "as_of": asof, "source": "frankfurter",
+        }
+
+    prov._fetch_raw = _live  # type: ignore[method-assign]
+    prov._get_ecb_table = lambda: None  # type: ignore[method-assign]  # hermetic abstain
+    return prov
+
+
+def _live_client(fx_provider: FXProvider, market=None) -> TestClient:
+    reset_deps()
+    fxapi.reset_fx_provider()
+    app = FastAPI()
+    app.include_router(fxapi.router)
+    app.dependency_overrides[fxapi.get_fx_provider] = lambda: fx_provider
+    svc = market if isinstance(market, MarketDataService) else _live_market_service()
+    app.dependency_overrides[get_market_service] = lambda: svc
+    return TestClient(app)
+
+
+# -- fail-closed provider ------------------------------------------------------
+
+
+def test_stub_mode_raises_fail_closed():
+    """stub_mode serves nothing: every non-identity pair raises ProviderError."""
     prov = FXProvider(stub_mode=True)
-    eur_usd = prov.get_rate("EUR", "USD")
-    assert eur_usd["pair"] == "EUR/USD"
-    assert eur_usd["rate"] == pytest.approx(1.08)
-    assert eur_usd["inverse"] == pytest.approx(1 / 1.08)
-    assert eur_usd["fallback_used"] is True
-    assert eur_usd["source"] == "fx"
-    assert eur_usd["missing_fields"] == []
-    assert isinstance(eur_usd["as_of"], datetime)
-    assert eur_usd["as_of"].tzinfo is not None
-    # Deterministic across calls (rate; as_of refreshes).
-    assert prov.get_rate("eur", "usd")["rate"] == pytest.approx(1.08)
+    for base, quote in (("EUR", "USD"), ("USD", "CNY"), ("EUR", "CNY"), ("USD", "EUR")):
+        with pytest.raises(ProviderError):
+            prov.get_rate(base, quote)
+    # Identity still exact 1.0 with fallback False even in stub_mode.
+    out = prov.get_rate("USD", "USD")
+    assert out["rate"] == 1.0 and out["inverse"] == 1.0
+    assert out["fallback_used"] is False
 
 
-def test_stub_triangle_usd_eur_cny():
+def test_stub_mode_triangle_raises_no_fallback_rates():
+    """No fallback stub rates: triangle pairs raise in stub_mode."""
     prov = FXProvider(stub_mode=True)
-    eur_usd = prov.get_rate("EUR", "USD")["rate"]
-    usd_cny = prov.get_rate("USD", "CNY")["rate"]
-    eur_cny = prov.get_rate("EUR", "CNY")["rate"]
-    assert eur_usd == pytest.approx(1.08)
-    assert usd_cny == pytest.approx(7.25)
-    assert eur_cny == pytest.approx(7.83)
-    assert eur_usd * usd_cny == pytest.approx(eur_cny)  # triangle-consistent
-    assert prov.get_rate("USD", "EUR")["rate"] == pytest.approx(1 / eur_usd)
+    with pytest.raises(ProviderError):
+        prov.get_rate("EUR", "USD")
+    with pytest.raises(ProviderError):
+        prov.get_rate("USD", "CNY")
+    with pytest.raises(ProviderError):
+        prov.get_rate("EUR", "CNY")
+    # stub_mode error is retryable (upstream unavailable) -> HTTP 502.
+    try:
+        prov.get_rate("EUR", "USD")
+    except ProviderError as exc:
+        assert exc.retryable is True
 
 
 def test_same_currency_identity():
@@ -91,6 +154,21 @@ def test_same_currency_identity():
     out = prov.get_rate("USD", "USD")
     assert out["rate"] == 1.0 and out["inverse"] == 1.0
     assert out["fallback_used"] is False
+
+
+def test_identity_live_no_upstream_call():
+    """Identity returns exact 1.0 with no upstream fetch (even live)."""
+    prov = FXProvider(stub_mode=False)
+
+    def _boom(base: str, quote: str) -> dict:
+        raise AssertionError("upstream must not be called for identity")
+
+    prov._fetch_raw = _boom  # type: ignore[method-assign]
+    prov._fetch_yahoo = _boom  # type: ignore[method-assign]
+    out = prov.get_rate("EUR", "EUR")
+    assert out["rate"] == 1.0 and out["inverse"] == 1.0
+    assert out["fallback_used"] is False
+    assert out["reconciled"] is True
 
 
 def test_empty_and_unsupported_currency_raise():
@@ -103,12 +181,20 @@ def test_empty_and_unsupported_currency_raise():
         prov.get_rate("EUR", "JPY")
 
 
-def test_provenance_grades_stub_vs_live():
-    prov = FXProvider(stub_mode=True)
-    stub_prov = prov.provenance_for(prov.get_rate("EUR", "USD"))
-    assert stub_prov.fallback_used is True
-    assert stub_prov.quality_grade == "C"
-    assert stub_prov.source == "fx"
+def test_empty_currency_not_retryable():
+    prov = FXProvider(stub_mode=False)
+    with pytest.raises(ProviderError) as ei:
+        prov.get_rate("", "USD")
+    assert ei.value.retryable is False
+    with pytest.raises(ProviderError) as ei2:
+        prov.get_rate("EUR", "JPY")
+    assert ei2.value.retryable is False
+
+
+def test_provenance_grades_live_and_manual_fallback():
+    """Live payloads grade B (single-source) / A when reconciled; a
+    hand-built fallback envelope still grades C (gate layer unchanged)."""
+    prov = FXProvider(stub_mode=False)
     live = {
         "pair": "EUR/USD", "rate": 1.08, "as_of": _utcnow(),
         "source": "frankfurter", "missing_fields": [], "fallback_used": False,
@@ -117,26 +203,33 @@ def test_provenance_grades_stub_vs_live():
     assert live_prov.fallback_used is False
     assert live_prov.quality_grade == "B"  # fresh single-source
     assert REQUIRED_KEYS <= set(live_prov.model_dump(mode="json"))
+    # Explicit reconciled keyword reaches A from a bare payload.
+    bare = dict(live)
+    assert prov.provenance_for(bare, reconciled=True).quality_grade == "A"
+    # Manual fallback envelope (never served by the provider) still C.
+    stub_like = dict(live)
+    stub_like["fallback_used"] = True
+    stub_like["source"] = "fx"
+    assert prov.provenance_for(stub_like).quality_grade == "C"
+    assert prov.provenance_for(stub_like).fallback_used is True
 
 
-# -- offline resilience ----------------------------------------------------
+# -- offline resilience (fail-closed: raise, never fallback) -------------------
 
 
-def test_network_failure_falls_back_flagged_never_raises():
+def test_network_failure_raises_fail_closed():
     prov = FXProvider(stub_mode=False)
 
     def _boom(base: str, quote: str) -> dict:
         raise ProviderError("fx", "network down")
 
     prov._fetch_raw = _boom  # type: ignore[method-assign]
-    prov._fetch_yahoo = _boom  # type: ignore[method-assign]  # full outage -> stub
-    out = prov.get_rate("EUR", "USD")
-    assert out["fallback_used"] is True
-    assert out["rate"] == pytest.approx(1.08)
-    assert out["source"] == "fx"
+    prov._fetch_yahoo = _boom  # type: ignore[method-assign]
+    with pytest.raises(ProviderError):
+        prov.get_rate("EUR", "USD")
 
 
-def test_missing_httpx_package_falls_back_flagged(monkeypatch):
+def test_missing_httpx_package_raises_fail_closed(monkeypatch):
     import sys
 
     prov = FXProvider(stub_mode=False)
@@ -148,9 +241,42 @@ def test_missing_httpx_package_falls_back_flagged(monkeypatch):
     prov._fetch_yahoo = _boom  # type: ignore[method-assign]  # isolate httpx path
     with pytest.raises(ProviderError):  # raw fetch names the missing dep
         prov._fetch_raw("EUR", "USD")
-    out = prov.get_rate("EUR", "USD")  # public path never crashes
-    assert out["fallback_used"] is True
-    assert out["rate"] == pytest.approx(1.08)
+    with pytest.raises(ProviderError):  # public path raises fail-closed
+        prov.get_rate("EUR", "USD")
+
+
+def test_malformed_upstream_raises():
+    prov = FXProvider(stub_mode=False)
+
+    def _bad(base: str, quote: str) -> dict:
+        return {
+            "base": base, "quote": quote, "rate": "oops-not-a-number",
+            "as_of": _utcnow(), "source": "frankfurter",
+        }
+
+    prov._fetch_raw = _bad  # type: ignore[method-assign]
+    prov._get_ecb_table = lambda: None  # type: ignore[method-assign]
+    with pytest.raises(ProviderError):
+        prov.get_rate("EUR", "USD")
+
+
+def test_nonfinite_upstream_raises():
+    import math
+
+    for bad_rate in (float("nan"), float("inf"), -1.0, 0.0):
+        prov = FXProvider(stub_mode=False)
+
+        def _bad(base: str, quote: str, _r=bad_rate) -> dict:
+            return {
+                "base": base, "quote": quote, "rate": _r,
+                "as_of": _utcnow(), "source": "frankfurter",
+            }
+
+        prov._fetch_raw = _bad  # type: ignore[method-assign]
+        prov._get_ecb_table = lambda: None  # type: ignore[method-assign]
+        with pytest.raises(ProviderError):
+            prov.get_rate("EUR", "USD")
+    assert not math.isfinite(float("nan"))  # sanity
 
 
 def test_yahoo_secondary_serves_live_when_frankfurter_down():
@@ -201,13 +327,13 @@ def test_yahoo_inverse_pair_inverts_rate(monkeypatch):
     assert out["rate"] == pytest.approx(1.0 / 7.25)
 
 
-def test_breaker_open_returns_flagged_stub():
+def test_breaker_open_raises_fail_closed():
     breaker = CircuitBreaker(failure_threshold=1)
     breaker.record_failure()
     prov = FXProvider(stub_mode=False, breaker=breaker)
-    out = prov.get_rate("EUR", "USD")
-    assert out["fallback_used"] is True
-    assert out.get("circuit_open") is True
+    with pytest.raises(ProviderError) as ei:
+        prov.get_rate("EUR", "USD")
+    assert "circuit open" in str(ei.value)
 
 
 def test_breaker_objects_are_isolated():
@@ -255,6 +381,14 @@ def test_expired_cache_refetches():
     prov.get_rate("EUR", "USD")
     prov.get_rate("EUR", "USD")
     assert calls["n"] == 2
+
+
+def test_live_rates_carry_fallback_false():
+    prov = _make_live_fx()
+    for base, quote in (("EUR", "USD"), ("USD", "CNY"), ("EUR", "CNY")):
+        out = prov.get_rate(base, quote)
+        assert out["fallback_used"] is False
+        assert out["rate"] > 0
 
 
 # -- convert math ----------------------------------------------------------
@@ -406,15 +540,49 @@ def test_pairs_supported_currencies():
     assert REQUIRED_KEYS <= set(body["provenance"])
 
 
-def test_rate_carries_provenance():
-    client = _client(FXProvider(stub_mode=True))
+def test_rate_live_carries_provenance_no_fallback():
+    client = _live_client(_make_live_fx())
     resp = client.get("/api/fx/rate", params={"base": "EUR", "quote": "USD"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["rate"] == pytest.approx(1.08)
     assert body["inverse"] == pytest.approx(1 / 1.08)
-    assert body["fallback_used"] is True
+    assert body["fallback_used"] is False
     assert REQUIRED_KEYS <= set(body["provenance"])
+    assert body["provenance"]["fallback_used"] is False
+
+
+def test_rate_stub_mode_is_502():
+    client = _live_client(FXProvider(stub_mode=True))
+    resp = client.get("/api/fx/rate", params={"base": "EUR", "quote": "USD"})
+    assert resp.status_code == 502, resp.text
+
+
+def test_rate_identity_in_stub_mode_is_200():
+    """Identity needs no upstream: USD/USD works even in stub_mode."""
+    client = _live_client(FXProvider(stub_mode=True))
+    resp = client.get("/api/fx/rate", params={"base": "USD", "quote": "USD"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rate"] == 1.0
+    assert body["fallback_used"] is False
+
+
+def test_rate_provider_error_mapping_400_vs_502():
+    class _BadInput(FXProvider):
+        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
+            raise ProviderError("fx", "bad input", retryable=False)
+
+    class _Downstream(FXProvider):
+        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
+            raise ProviderError("fx", "upstream down", retryable=True)
+
+    assert _live_client(_BadInput()).get(
+        "/api/fx/rate", params={"base": "EUR", "quote": "USD"}
+    ).status_code == 400
+    assert _live_client(_Downstream()).get(
+        "/api/fx/rate", params={"base": "EUR", "quote": "USD"}
+    ).status_code == 502
 
 
 def test_rate_rejects_unsupported_currency():
@@ -423,53 +591,76 @@ def test_rate_rejects_unsupported_currency():
     assert resp.status_code == 400
 
 
-def test_convert_math_and_provenance():
-    client = _client(FXProvider(stub_mode=True))
+def test_convert_live_math_and_provenance():
+    client = _live_client(_make_live_fx())
     resp = client.post("/api/fx/convert", json={"amount": 100, "from": "EUR", "to": "USD"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["converted"] == pytest.approx(108.0)
     assert body["from"] == "EUR" and body["to"] == "USD"
+    assert body["fallback_used"] is False
     assert REQUIRED_KEYS <= set(body["provenance"])
 
 
-def test_rank_gated_fallback_without_flag_is_423():
-    client = _client(FXProvider(stub_mode=True))  # stub => fallback_used=True
-    resp = client.post(
-        "/api/fx/rank",
-        json={"symbols": ["AAPL", "MC.PA", "600519.SS"], "target_ccy": "USD"},
-    )
-    assert resp.status_code == 423, resp.text
-    body = resp.json()
-    assert body["error"]["code"] == "FX_PROVENANCE_MISSING"
+def test_convert_stub_mode_is_502():
+    client = _live_client(FXProvider(stub_mode=True))
+    resp = client.post("/api/fx/convert", json={"amount": 100, "from": "EUR", "to": "USD"})
+    assert resp.status_code == 502, resp.text
 
 
-def test_rank_allows_fallback_with_explicit_flag():
-    client = _client(FXProvider(stub_mode=True))
-    resp = client.post(
-        "/api/fx/rank",
-        json={
-            "symbols": ["AAPL", "MC.PA", "600519.SS"],
-            "target_ccy": "USD",
-            "allow_fallback": True,
-        },
+def test_convert_provider_error_mapping_400_vs_502():
+    class _BadInput(FXProvider):
+        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
+            raise ProviderError("fx", "bad input", retryable=False)
+
+    class _Downstream(FXProvider):
+        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
+            raise ProviderError("fx", "upstream down", retryable=True)
+
+    bad = _live_client(_BadInput()).post(
+        "/api/fx/convert", json={"amount": 100, "from": "EUR", "to": "USD"}
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert [r["symbol"] for r in body["ranked"]] == ["MC.PA", "AAPL", "600519.SS"]
-    assert REQUIRED_KEYS <= set(body["provenance"])
-    assert body["provenance"]["fallback_used"] is True
+    assert bad.status_code == 400
+    down = _live_client(_Downstream()).post(
+        "/api/fx/convert", json={"amount": 100, "from": "EUR", "to": "USD"}
+    )
+    assert down.status_code == 502
+
+
+def test_rank_stale_rates_gate_423():
+    """Stale live rates refuse with 423 with or without the fallback flag."""
+    for flag in (False, True):
+        client = _live_client(_make_live_fx(stale_hours=30.0))
+        resp = client.post(
+            "/api/fx/rank",
+            json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
+                  "allow_fallback": flag},
+        )
+        assert resp.status_code == 423, resp.text
+        assert resp.json()["error"]["code"] == "FX_PROVENANCE_MISSING"
+
+
+def test_rank_live_passes_with_and_without_flag_inert():
+    """allow_fallback is inert for live rates: both flag values pass identically."""
+    for flag in (False, True):
+        client = _live_client(_make_live_fx())
+        resp = client.post(
+            "/api/fx/rank",
+            json={
+                "symbols": ["AAPL", "MC.PA", "600519.SS"],
+                "target_ccy": "USD",
+                "allow_fallback": flag,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert [r["symbol"] for r in body["ranked"]] == ["MC.PA", "AAPL", "600519.SS"]
+        assert REQUIRED_KEYS <= set(body["provenance"])
+        assert body["provenance"]["fallback_used"] is False
 
 
 def test_rank_refuses_stale_rates_even_with_flag():
-    class StaleFX(FXProvider):
-        def get_rate(self, base: str, quote: str) -> dict:  # noqa: ANN002, ANN202
-            out = super().get_rate(base, quote)
-            out["as_of"] = _utcnow() - timedelta(hours=30)
-            out["fallback_used"] = False
-            return out
-
-    client = _client(StaleFX(stub_mode=True))
+    client = _live_client(_make_live_fx(stale_hours=30.0))
     resp = client.post(
         "/api/fx/rank",
         json={
@@ -483,18 +674,7 @@ def test_rank_refuses_stale_rates_even_with_flag():
 
 
 def test_rank_fresh_live_rates_pass_without_flag():
-    prov = FXProvider(stub_mode=False)
-
-    def _live(base: str, quote: str) -> dict:
-        from backend.market_data.fx.provider import stub_rate as _stub
-
-        return {
-            "base": base, "quote": quote, "rate": _stub(base, quote),
-            "as_of": _utcnow(), "source": "frankfurter",
-        }
-
-    prov._fetch_raw = _live  # type: ignore[method-assign]
-    client = _client(prov)
+    client = _live_client(_make_live_fx())
     resp = client.post(
         "/api/fx/rank",
         json={"symbols": ["AAPL", "MC.PA", "600519.SS"], "target_ccy": "USD"},
@@ -503,6 +683,33 @@ def test_rank_fresh_live_rates_pass_without_flag():
     body = resp.json()
     assert body["provenance"]["fallback_used"] is False
     assert [r["symbol"] for r in body["ranked"]] == ["MC.PA", "AAPL", "600519.SS"]
+
+
+def test_rank_no_quotable_symbols_is_502():
+    """All quotes failing -> 502, never a flagged 200 or empty 200."""
+    dead = _stub_market_service()  # stub provider raises under fail-closed service
+    client = _live_client(_make_live_fx(), market=dead)
+    resp = client.post(
+        "/api/fx/rank",
+        json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD"},
+    )
+    assert resp.status_code == 502, resp.text
+
+
+def test_rank_stub_fx_multi_ccy_is_502():
+    """Stub FX cannot serve cross-currency ranks: 502 (identity-only passes)."""
+    client = _live_client(FXProvider(stub_mode=True))
+    resp = client.post(
+        "/api/fx/rank",
+        json={"symbols": ["AAPL", "MC.PA"], "target_ccy": "USD"},
+    )
+    assert resp.status_code == 502, resp.text
+    # Single-USD rank needs only the identity rate, so it still passes.
+    ok = client.post(
+        "/api/fx/rank", json={"symbols": ["AAPL"], "target_ccy": "USD"}
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["provenance"]["fallback_used"] is False
 
 
 def test_router_prefix_and_package_exports():
@@ -735,10 +942,21 @@ def test_ecb_table_fetched_once_per_hour(monkeypatch):
     assert second["ecb_rate"] == pytest.approx(7.25)
 
 
-def test_stub_path_never_reconciled():
-    """Flagged stub is unchanged: no reconciled flag, grade C regardless."""
+def test_stub_path_raises_never_served():
+    """Fail-closed: stub_mode never serves a rate, so nothing is reconciled.
+
+    The only stub_mode success is the identity pair (trivially reconciled).
+    """
     prov = FXProvider(stub_mode=True)
-    out = prov.get_rate("EUR", "USD")
-    assert "reconciled" not in out
-    assert prov.provenance_for(out).quality_grade == "C"
-    assert prov.provenance_for(out, reconciled=True).quality_grade == "C"
+    with pytest.raises(ProviderError):
+        prov.get_rate("EUR", "USD")
+    ident = prov.get_rate("USD", "USD")
+    assert ident["reconciled"] is True
+    assert prov.provenance_for(ident).quality_grade == "A"
+    # A hand-built fallback envelope still grades C at the provenance layer.
+    manual = {
+        "pair": "EUR/USD", "rate": 1.08, "as_of": _utcnow(),
+        "source": "fx", "missing_fields": [], "fallback_used": True,
+    }
+    assert prov.provenance_for(manual).quality_grade == "C"
+    assert prov.provenance_for(manual, reconciled=True).quality_grade == "C"

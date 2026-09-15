@@ -32,9 +32,24 @@ function FXProvenanceBanner({
     );
   }
   const fresh = isFreshFxProvenance(provenance);
+  // Fail-closed: stale or fallback FX never renders a fallback badge + stale
+  // copy — cross-market comparison is unavailable. Keep provenance title for debug.
+  if (!fresh || provenance.fallback_used) {
+    return /* @__PURE__ */ React.createElement(
+      "div",
+      {
+        className: "mb-3 rounded border border-term-red bg-term-panel p-3 text-xs text-term-red",
+        role: "alert",
+        title: `fx_source=${provenance.source} fx_as_of=${provenance.as_of} fx_delay=${provenance.delay_minutes}m fx_grade=${provenance.quality_grade} fx_fallback=${provenance.fallback_used} target=${ccy}`
+      },
+      /* @__PURE__ */ React.createElement("b", null, "Cross-market comparison unavailable"),
+      " \u2014 ",
+      "FX unavailable."
+    );
+  }
   const missing = provenance.missing_fields ?? [];
-  const border = fresh ? "border-term-border" : "border-term-amber";
-  const tone = fresh ? "text-term-muted" : "text-term-amber";
+  const border = "border-term-border";
+  const tone = "text-term-muted";
   return /* @__PURE__ */ React.createElement(
     "div",
     {
@@ -47,9 +62,7 @@ function FXProvenanceBanner({
     /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, "as_of: ", fmtTime(provenance.as_of)),
     /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, "delay: ", provenance.delay_minutes, "m"),
     /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, "Q:", /* @__PURE__ */ React.createElement("b", { className: "text-term-cyan" }, provenance.quality_grade)),
-    provenance.fallback_used && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-term-amber" }, "fallback"),
-    missing.length > 0 && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-term-red" }, "missing: ", missing.join(",")),
-    !fresh && /* @__PURE__ */ React.createElement("span", { className: "ml-2 font-bold" }, "\xB7 stale \u2014 Cross-market comparison unavailable \u2014 FX provenance missing.")
+    missing.length > 0 && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-term-red" }, "missing: ", missing.join(","))
   );
 }
 export { FXProvenanceBanner as default };

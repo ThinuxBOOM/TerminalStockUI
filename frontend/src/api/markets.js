@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { api, coalesceInflight, getQuote, getScreener, normalizeSymbolParam, ProvenanceSchema, SUPPORTED_MARKET_MICS } from "./client";
+import { api, coalesceInflight, ProvenanceSchema, SUPPORTED_MARKET_MICS } from "./client";
 const MARKET_MICS = [...SUPPORTED_MARKET_MICS];
 const MARKET_LABELS = {
   XNYS: "NYSE (XNYS)",
@@ -77,18 +77,9 @@ function localProvenance(raw, sourceFallback) {
     const parsed = ProvenanceSchema.passthrough().safeParse(cand);
     if (parsed.success) return parsed.data;
   }
-  const delayRaw = r.delay_minutes ?? (isRecord(cand) ? cand.delay_minutes : void 0);
-  return {
-    source: str(r.source, sourceFallback),
-    as_of: str(r.as_of, (/* @__PURE__ */ new Date()).toISOString()),
-    delay_minutes: typeof delayRaw === "number" ? Number(delayRaw) : -1,
-    quality_grade: str(
-      r.quality_grade ?? r.data_quality ?? r.grade,
-      "U"
-    ),
-    fallback_used: true,
-    missing_fields: ["provenance"]
-  };
+  // Fail-closed: missing/invalid provenance throws to ErrorState — never
+  // synthesize a fallback_used:true envelope. Delays OK, stale/fallback NOT OK.
+  throw new Error("provenance missing");
 }
 function httpStatus(err) {
   const e = err;
@@ -123,6 +114,13 @@ function normalizeMarketBreadth(raw, micFallback = "") {
     const n = Number(v);
     if (Number.isFinite(n) && n > 0) market_state_counts[String(k)] = Math.floor(n);
   }
+  // Fail-closed: missing provenance throws to ErrorState — never synthesize.
+  let provenance;
+  try {
+    provenance = localProvenance(r, `markets-api:${mic}`);
+  } catch (e) {
+    throw new Error(`normalizeMarketBreadth(${mic}): ${e instanceof Error ? e.message : "provenance missing"}`);
+  }
   return {
     mic,
     label: str(r.label ?? r.name, MARKET_LABELS[mic] ?? mic),
@@ -146,7 +144,7 @@ function normalizeMarketBreadth(raw, micFallback = "") {
     market_state_counts,
     rows: normalizeMarketRows(r.rows ?? r.symbols ?? r.details ?? r.items),
     turnover_note: typeof r.turnover_note === "string" && r.turnover_note.trim() !== "" ? r.turnover_note : null,
-    provenance: localProvenance(r, `markets-api:${mic}`)
+    provenance
   };
 }
 function normalizeMarketRows(raw) {
@@ -185,7 +183,13 @@ function normalizeMarketsOverview(raw) {
     if (!parsed.turnover_note && topNote) parsed.turnover_note = topNote;
     return parsed;
   });
-  const provenance = localProvenance(raw, "markets-api");
+  // Fail-closed: missing provenance throws to ErrorState — never synthesize.
+  let provenance;
+  try {
+    provenance = localProvenance(raw, "markets-api");
+  } catch (e) {
+    throw new Error(`normalizeMarketsOverview: ${e instanceof Error ? e.message : "provenance missing"}`);
+  }
   const explicitFallback = typeof r.fallback_used === "boolean" ? r.fallback_used : false;
   return {
     markets,
@@ -193,99 +197,7 @@ function normalizeMarketsOverview(raw) {
     fallback_used: explicitFallback || provenance.fallback_used || markets.some((m) => m.provenance.fallback_used)
   };
 }
-function rowVolume(row) {
-  const r = row;
-  return numOrNull(r.volume ?? r.total_volume ?? r.volume_shares ?? r.shares_volume);
-}
-function rowRangePct(row) {
-  const r = row;
-  return numOrNull(r.range_pct ?? r.rangePct ?? r.day_range_pct ?? r.avg_range_pct);
-}
-function computeBreadthFromScreener(mic, rows) {
-  const upper = mic.trim().toUpperCase();
-  let advancers = 0;
-  let decliners = 0;
-  let unchanged = 0;
-  let changeSum = 0;
-  let changeN = 0;
-  let volSum = 0;
-  let volN = 0;
-  let turnoverSum = 0;
-  let turnoverN = 0;
-  let rangeSum = 0;
-  let rangeN = 0;
-  const market_state_counts = {};
-  const rowMissing = /* @__PURE__ */ new Set();
-  for (const row of rows) {
-    const cp = numOrNull(row.change_pct);
-    if (cp === null) {
-    } else if (cp > 0) advancers += 1;
-    else if (cp < 0) decliners += 1;
-    else unchanged += 1;
-    if (cp !== null) {
-      changeSum += cp;
-      changeN += 1;
-    }
-    const st = typeof row.market_state === "string" && row.market_state ? row.market_state : "unknown";
-    market_state_counts[st] = (market_state_counts[st] ?? 0) + 1;
-    const vol = rowVolume(row);
-    if (vol !== null) {
-      volSum += vol;
-      volN += 1;
-    }
-    const px = numOrNull(row.price);
-    if (vol !== null && px !== null) {
-      turnoverSum += vol * px;
-      turnoverN += 1;
-    }
-    const rg = rowRangePct(row);
-    if (rg !== null) {
-      rangeSum += rg;
-      rangeN += 1;
-    }
-    for (const m of row.provenance?.missing_fields ?? []) rowMissing.add(String(m));
-  }
-  const missing = /* @__PURE__ */ new Set(["markets-overview-endpoint"]);
-  if (volN === 0) missing.add("volume");
-  if (turnoverN === 0) missing.add("turnover");
-  if (rangeN === 0) missing.add("avg_range_pct");
-  if (rows.length > 0 && changeN === 0) missing.add("change_pct");
-  for (const m of rowMissing) missing.add(m);
-  return {
-    mic: upper,
-    label: MARKET_LABELS[upper] ?? upper,
-    currency: MARKET_CURRENCIES[upper] ?? "USD",
-    advancers,
-    decliners,
-    unchanged,
-    total: rows.length,
-    avg_change_pct: changeN > 0 ? changeSum / changeN : null,
-    total_volume: volN > 0 ? volSum : null,
-    turnover: turnoverN > 0 ? turnoverSum : null,
-    avg_range_pct: rangeN > 0 ? rangeSum / rangeN : null,
-    market_state_counts,
-    turnover_note: TURNOVER_COMPARABILITY_NOTE,
-    // client-side fallback: turnover stays native price*volume, no FX.
-    rows: rows.map((row) => ({
-      symbol: row.symbol,
-      price: numOrNull(row.price),
-      change_pct: numOrNull(row.change_pct),
-      volume: rowVolume(row),
-      turnover: rowVolume(row) !== null && numOrNull(row.price) !== null ? rowVolume(row) * numOrNull(row.price) : null,
-      range_pct: rowRangePct(row),
-      market_state: typeof row.market_state === "string" && row.market_state ? row.market_state : null
-    })),
-    provenance: {
-      source: `client-fallback:screener${rows.length === 0 ? ":empty" : ""}`,
-      as_of: (/* @__PURE__ */ new Date()).toISOString(),
-      delay_minutes: -1,
-      quality_grade: "D",
-      fallback_used: true,
-      missing_fields: [...missing]
-    }
-  };
-}
-const QUOTE_ENRICH_CAP = 12;
+
 // ---------------------------------------------------------------------------
 // Liquidity revamp helpers (Frontend Agent 2): per-market native currency,
 // XSHG lunch window, breadth ratios, card state, history normalization.
@@ -444,98 +356,39 @@ function normalizeLiquidityHistory(raw, micFallback = "", windowFallback = "1D")
   }
   points.sort((a, b) => a._ms - b._ms);
   const clean = points.map(({ _ms, ...rest }) => rest);
+  // Fail-closed: missing provenance throws to ErrorState — never synthesize.
+  let provenance;
+  try {
+    provenance = localProvenance(raw, `markets-api:${mic}:history`);
+  } catch (e) {
+    throw new Error(`normalizeLiquidityHistory(${mic}): ${e instanceof Error ? e.message : "provenance missing"}`);
+  }
   return {
     mic,
     window,
     currency,
     points: clean,
     placeholder: clean.length === 0,
-    provenance: localProvenance(raw, `markets-api:${mic}:history`)
+    provenance
   };
 }
-async function enrichWithQuotes(rows) {
-  const targets = rows.filter((r) => numOrNull(r.change_pct) === null).slice(0, QUOTE_ENRICH_CAP);
-  if (targets.length === 0) return;
-  const settled = await Promise.allSettled(targets.map((r) => getQuote(r.symbol)));
-  const bySymbol = /* @__PURE__ */ new Map();
-  settled.forEach((s, i) => {
-    if (s.status !== "fulfilled") return;
-    bySymbol.set(normalizeSymbolParam(targets[i].symbol), {
-      change_pct: s.value.change_pct,
-      market_state: s.value.market_state
-    });
-  });
-  for (const row of rows) {
-    if (numOrNull(row.change_pct) !== null) continue;
-    const hit = bySymbol.get(normalizeSymbolParam(row.symbol));
-    if (!hit) continue;
-    const rec = row;
-    if (numOrNull(hit.change_pct) !== null) rec.change_pct = Number(hit.change_pct);
-    if (!row.market_state && typeof hit.market_state === "string") {
-      rec.market_state = hit.market_state;
-    }
-  }
-}
-async function getMarketLiquidityFallback(mic) {
-  const upper = String(mic ?? "").trim().toUpperCase();
-  const screen = await getScreener({ market: upper, minDirection: 0, limit: 50 });
-  const rows = [...screen.results];
-  await enrichWithQuotes(rows);
-  return computeBreadthFromScreener(upper, rows);
-}
-async function getMarketsOverviewFallback() {
-  const settled = await Promise.allSettled(
-    MARKET_MICS.map((mic) => getMarketLiquidityFallback(mic))
-  );
-  const markets = [];
-  let firstError = new Error("screener fallback failed for every market");
-  let sawError = false;
-  for (const s of settled) {
-    if (s.status === "fulfilled") markets.push(s.value);
-    else if (!sawError) {
-      sawError = true;
-      firstError = s.reason;
-    }
-  }
-  if (markets.length === 0) throw firstError;
-  const missing = /* @__PURE__ */ new Set(["markets-overview-endpoint"]);
-  for (const m of markets) for (const f of m.provenance.missing_fields) missing.add(f);
-  return {
-    markets,
-    provenance: {
-      source: "client-fallback:screener+quote",
-      as_of: (/* @__PURE__ */ new Date()).toISOString(),
-      delay_minutes: -1,
-      quality_grade: "D",
-      fallback_used: true,
-      missing_fields: [...missing]
-    },
-    fallback_used: true
-  };
-}
+
+// Fail-closed: market breadth comes from the backend liquidity endpoints
+// only. Errors propagate to ErrorState — the client never synthesizes
+// breadth figures from screener snapshots.
 async function getMarketsOverview() {
   return coalesceInflight("markets-overview", async () => {
-    try {
-      const { data } = await api.get("/api/markets/overview", { timeout: 6e4 });
-      return normalizeMarketsOverview(data);
-    } catch (err) {
-      if (!isEndpointMissingError(err)) throw err;
-      return getMarketsOverviewFallback();
-    }
+    const { data } = await api.get("/api/markets/overview", { timeout: 6e4 });
+    return normalizeMarketsOverview(data);
   });
 }
 async function getMarketLiquidity(mic) {
   const upper = String(mic ?? "").trim().toUpperCase();
   return coalesceInflight(`market-liquidity:${upper}`, async () => {
-    try {
-      const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
-        timeout: 6e4
-      });
-      return normalizeMarketBreadth(data, upper);
-    } catch (err) {
-      if (!isEndpointMissingError(err)) throw err;
-      return getMarketLiquidityFallback(upper);
-    }
+    const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
+      timeout: 6e4
+    });
+    return normalizeMarketBreadth(data, upper);
   });
 }
 // ---------------------------------------------------------------------------
@@ -546,37 +399,20 @@ async function getMarketLiquidity(mic) {
 //   //   currency: "USD", points: [{ t, turnover, volume, advancers, decliners,
 //   //     unchanged, avg_change_pct }], provenance
 //   // }
-// Normalizes via normalizeLiquidityHistory; on 404/501 returns an empty
-// placeholder (never fakes points).
+// Fail-closed: normalizes via normalizeLiquidityHistory; on 404/501 or any
+// error THROWS to ErrorState (never returns a client-fallback placeholder).
+// Caller must show ErrorState with retry.
 async function getMarketLiquidityHistory(mic, window = "1D") {
   const upper = String(mic ?? "").trim().toUpperCase();
   const w = normalizeLiquidityHistoryWindow(window);
   return coalesceInflight(`market-liquidity-history:${upper}:${w}`, async () => {
-    try {
-      const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity/history`, {
-        params: { window: w },
-        timeout: 6e4
-      });
-      const norm = normalizeLiquidityHistory(data, upper, w);
-      if (norm) return norm;
-    } catch (err) {
-      if (!isEndpointMissingError(err)) throw err;
-    }
-    return {
-      mic: upper,
-      window: w,
-      currency: MARKET_CURRENCIES[upper] ?? "USD",
-      points: [],
-      placeholder: true,
-      provenance: {
-        source: `client-fallback:no-history:${upper}`,
-        as_of: new Date().toISOString(),
-        delay_minutes: -1,
-        quality_grade: "D",
-        fallback_used: true,
-        missing_fields: ["liquidity-history-endpoint"]
-      }
-    };
+    const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity/history`, {
+      params: { window: w },
+      timeout: 6e4
+    });
+    const norm = normalizeLiquidityHistory(data, upper, w);
+    if (!norm) throw new Error(`liquidity history unavailable for ${upper} (no live feed)`);
+    return norm;
   });
 }
 // ---------------------------------------------------------------------------
@@ -590,16 +426,11 @@ async function getMarketTopRows(mic, opts = {}) {
   const sortRaw = String(opts?.sort ?? "turnover").trim().toLowerCase();
   const sort = ["turnover", "change", "volume"].includes(sortRaw) ? sortRaw : "turnover";
   return coalesceInflight(`market-top:${upper}:${sort}:${limit}`, async () => {
-    try {
-      const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
-        params: { limit, sort },
-        timeout: 6e4
-      });
-      return normalizeMarketBreadth(data, upper);
-    } catch (err) {
-      if (!isEndpointMissingError(err)) throw err;
-      return getMarketLiquidityFallback(upper);
-    }
+    const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
+      params: { limit, sort },
+      timeout: 6e4
+    });
+    return normalizeMarketBreadth(data, upper);
   });
 }
-export { MARKET_CURRENCIES, MARKET_LABELS, MARKET_MICS, MARKET_TIMEZONES, TURNOVER_COMPARABILITY_NOTE, MarketBreadthSchema, breadthRatios, canRankCrossCurrency, computeBreadthFromScreener, deriveMarketCardState, dominantMarketState, getMarketLiquidity, getMarketLiquidityHistory, getMarketTopRows, getMarketsOverview, isStaleLiquidity, isXshgLunchWindow, normalizeLiquidityHistory, normalizeLiquidityHistoryWindow, normalizeMarketBreadth, normalizeMarketRows, normalizeMarketsOverview };
+export { MARKET_CURRENCIES, MARKET_LABELS, MARKET_MICS, MARKET_TIMEZONES, TURNOVER_COMPARABILITY_NOTE, MarketBreadthSchema, breadthRatios, canRankCrossCurrency, deriveMarketCardState, dominantMarketState, getMarketLiquidity, getMarketLiquidityHistory, getMarketTopRows, getMarketsOverview, isStaleLiquidity, isXshgLunchWindow, normalizeLiquidityHistory, normalizeLiquidityHistoryWindow, normalizeMarketBreadth, normalizeMarketRows, normalizeMarketsOverview };

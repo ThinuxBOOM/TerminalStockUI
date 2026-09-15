@@ -370,20 +370,14 @@ def backtest_history(
             raise ValueError("empty provenance")
     except HTTPException:
         raise
-    except Exception:
-        try:
-            from datetime import datetime as _dt
-            from datetime import timezone as _tz
+    except Exception as exc:
+        # Fail-closed: no bars, no honest provenance — raise instead of
+        # fabricating an envelope.
+        from backend.market_data.providers.base import ProviderError as _PE
 
-            from backend.market_data.provenance import build_provenance as _bp
-
-            provenance = _bp(
-                "backtest", as_of=_dt.now(_tz.utc), delay_minutes=15,
-                quality_grade="B", fallback_used=True, missing_fields=[],
-            ).model_dump(mode="json")
-        except Exception:
-            provenance = {"source": "backtest", "as_of": "", "delay_minutes": 15,
-                          "quality_grade": "B", "fallback_used": True, "missing_fields": []}
+        if isinstance(exc, _PE):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=f"backtest history failed: {exc}") from exc
     runs = _HISTORY.get(sym, [])
     summaries = []
     for r in runs:

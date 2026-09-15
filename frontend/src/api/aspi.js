@@ -198,20 +198,17 @@ function closesFromCandles(candles) {
 }
 
 // Normalized per-market index series (what AspiChart renders).
+// Fail-closed: throws Error("provenance missing") when provenance is absent —
+// never fabricates a fallback envelope. Delays OK, stale/fallback NOT OK.
+// closesFromCandles stays pure (drops invalid rows, never invents points).
 function normalizeAspiSeries(input) {
   const r = isRecord(input) ? input : {};
   const mic = String(r.mic ?? "").trim().toUpperCase() || "UNKNOWN";
   const points = closesFromCandles(r.candles);
-  const prov = isRecord(r.provenance)
-    ? r.provenance
-    : {
-        source: "aspi:missing-provenance",
-        as_of: new Date().toISOString(),
-        delay_minutes: -1,
-        quality_grade: "U",
-        fallback_used: true,
-        missing_fields: ["provenance"],
-      };
+  if (!isRecord(r.provenance)) {
+    throw new Error("provenance missing");
+  }
+  const prov = r.provenance;
   return {
     mic,
     label: strOrNull(r.label) ?? mic,
@@ -387,6 +384,9 @@ function enrichConstituentsWithScreener(rows, screenerResults) {
 // turnover). Fallback: screener rank order (direction_probability) —
 // labelled as fallback. Empty in -> empty out (seed list stays a TODO;
 // fake constituents are never rendered).
+// DEAD live path — getTop20Constituents never passes screenerRows (fail-closed).
+// The screener-rank-fallback branch below is kept as a pure, honestly-labelled
+// helper covered by unit tests; it is never reached by live callers.
 function normalizeTop20(input = {}, micFallback = "") {
   const r = isRecord(input) ? input : {};
   const mic = String(r.mic ?? micFallback ?? "").trim().toUpperCase() || "UNKNOWN";
@@ -430,15 +430,17 @@ function normalizeTop20(input = {}, micFallback = "") {
 // Merge per-series provenance envelopes into one composite envelope:
 // oldest as_of wins, sources joined, fallback sticky, missing unioned,
 // delay = max, grade = worst (fallback forces D).
+// Empty input: honest non-fallback envelope (nothing served, nothing fallback)
+// to mirror backend empty-scan contract — fallback_used FALSE, delay 15.
 function combineAspiProvenance(entries, sourceFallback = "aspi:composite") {
   const list = (Array.isArray(entries) ? entries : []).filter(isRecord);
   if (list.length === 0) {
     return {
       source: sourceFallback,
       as_of: new Date().toISOString(),
-      delay_minutes: -1,
+      delay_minutes: 15,
       quality_grade: "U",
-      fallback_used: true,
+      fallback_used: false,
       missing_fields: ["provenance"],
     };
   }
@@ -488,9 +490,11 @@ function isEndpointMissingError(err) {
 
 // Per-market benchmark series. Prefers the native backend endpoint
 // GET /api/markets/{mic}/index (server-side proxy chain, same symbols as
-// below); falls back to the frontend getBars proxy chain when the endpoint
-// is missing (404/501) so older backends keep working. A 422 on `^`-symbols
-// falls through to the proxy chain. Zero-candle successes count as a miss.
+// below); falls back to the frontend getBars proxy chain ONLY when the
+// endpoint is missing (404/501) so older backends keep working. Fail-closed:
+// a 422 (disabled venue / bad symbol) or 502 (no live data) throws the
+// backend error immediately — never tries a second opinion. Zero-candle
+// successes count as a miss.
 function normalizeNativeIndexSeries(raw, micFallback = "") {
   const r = isRecord(raw) ? raw : {};
   const mic = String(r.mic ?? micFallback ?? "").trim().toUpperCase() || "UNKNOWN";
@@ -538,21 +542,12 @@ async function getAspiSeries(mic, timeframe = "1d", opts = {}) {
       const native = normalizeNativeIndexSeries(data, cfg.mic);
       if (native.points.length > 0) return native;
     } catch (err) {
-      if (!isEndpointMissingError(err)) {
-        // 422 (disabled venue) and 502 (all candidates failed) are honest
-        // backend answers — fall through to the frontend chain only when the
-        // endpoint itself is missing; otherwise surface the backend detail
-        // via the frontend chain attempt below (which carries the same
-        // symbols) unless it also fails.
-        if (httpStatus(err) === 422 || httpStatus(err) === 502) {
-          // Fall through to frontend chain for a second opinion; if that
-          // also fails, prefer the backend's explicit detail.
-          try {
-            return await getAspiSeriesViaBars(cfg, tf, limit, signal);
-          } catch {
-            throw err;
-          }
-        }
+      // Fail-closed: 422 (disabled venue / bad symbol) and 502 (no live
+      // data) are honest backend answers — throw immediately, never try a
+      // second opinion. Only 404/501 (endpoint missing) or network errors
+      // fall through to the frontend chain.
+      if (httpStatus(err) === 422 || httpStatus(err) === 502) {
+        throw err;
       }
       // 404/501 or network: frontend chain below.
       try {
@@ -604,70 +599,36 @@ async function getAspiSeriesViaBars(cfg, tf, limit, signal) {
   );
 }
 
-// Top-20 constituents for a market. Preferred path: server-side
-// turnover-sorted liquidity rows (limit 20) enriched with company/currency
-// from the screener. Fallback path (liquidity endpoint missing): screener
-// rank order, honestly labelled. Other errors propagate to ErrorState.
+// Top-20 constituents for a market: server-side turnover-sorted liquidity
+// rows (limit 20) enriched with company/currency/cap from the screener.
+// Fail-closed: liquidity errors propagate to ErrorState — no
+// screener-rank synthesis. (normalizeTop20 keeps its screener-rank branch
+// as a pure, honestly-labelled helper covered by unit tests.)
 async function getTop20Constituents(mic, opts = {}) {
   const upper = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
   const userId = opts?.userId ?? null;
   const tier = opts?.tier ?? null;
   const signal = opts?.signal;
   return coalesceInflight(top20InflightKey(upper, userId, tier), async () => {
+    const liq = await getMarketTopRows(upper, { limit: TOP20_LIMIT, sort: "turnover" });
+    const liqRows = Array.isArray(liq?.rows) ? liq.rows : [];
+    let screenerResults = [];
     try {
-      const liq = await getMarketTopRows(upper, { limit: TOP20_LIMIT, sort: "turnover" });
-      const liqRows = Array.isArray(liq?.rows) ? liq.rows : [];
-      let screenerResults = [];
-      try {
-        const screen = await getScreener(
-          { market: upper, minDirection: 0, limit: 50 },
-          signal ? { signal } : undefined
-        );
-        screenerResults = Array.isArray(screen?.results) ? screen.results : [];
-      } catch {
-        screenerResults = [];
-      }
-      const picked = normalizeTop20({ mic: upper, liquidityRows: liqRows, limit: TOP20_LIMIT }, upper);
-      // Honesty override: getMarketTopRows itself falls back to a
-      // client-side screener computation (quality D, no turnover/volume)
-      // when the liquidity endpoint is missing. A turnover-sorted claim
-      // would be false there — relabel as screener-rank fallback.
-      const liqFallback = liq?.provenance?.fallback_used === true;
-      const anyTurnover = picked.rows.some((r) => numOrNull(r.turnover) !== null);
-      const relabelled =
-        picked.methodology === "liquidity-turnover" && liqFallback && !anyTurnover
-          ? {
-              ...picked,
-              methodology: "screener-rank-fallback",
-              methodologyNote:
-                `Liquidity endpoint unavailable (client screener fallback, quality D) — ` +
-                `first ${picked.rows.length} screener rows (ranked by forecast ` +
-                `direction_probability, NOT by size). Turnover-sorted Top-20 needs ` +
-                `GET /api/markets/${upper}/liquidity (see API proposal).`,
-            }
-          : picked;
-      return {
-        ...relabelled,
-        rows: enrichConstituentsWithScreener(relabelled.rows, screenerResults),
-        provenance: isRecord(liq?.provenance) ? liq.provenance : combineAspiProvenance([], `aspi-top20:${upper}`),
-        fallback_used: liqFallback,
-      };
-    } catch (err) {
-      if (!isEndpointMissingError(err)) throw err;
       const screen = await getScreener(
         { market: upper, minDirection: 0, limit: 50 },
         signal ? { signal } : undefined
       );
-      const picked = normalizeTop20(
-        { mic: upper, screenerRows: Array.isArray(screen?.results) ? screen.results : [], limit: TOP20_LIMIT },
-        upper
-      );
-      return {
-        ...picked,
-        provenance: combineAspiProvenance([], `client-fallback:screener-rank:${upper}`),
-        fallback_used: true,
-      };
+      screenerResults = Array.isArray(screen?.results) ? screen.results : [];
+    } catch {
+      screenerResults = [];
     }
+    const picked = normalizeTop20({ mic: upper, liquidityRows: liqRows, limit: TOP20_LIMIT }, upper);
+    return {
+      ...picked,
+      rows: enrichConstituentsWithScreener(picked.rows, screenerResults),
+      provenance: isRecord(liq?.provenance) ? liq.provenance : combineAspiProvenance([], `aspi-top20:${upper}`),
+      fallback_used: false,
+    };
   });
 }
 

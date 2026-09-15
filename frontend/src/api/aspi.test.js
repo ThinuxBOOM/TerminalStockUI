@@ -166,12 +166,11 @@ describe("normalizeAspiSeries", () => {
     expect(out.count).toBe(2);
     expect(out.fallback_used).toBe(false);
   });
-  it("marks missing provenance honestly (fallback, grade U)", () => {
-    const out = normalizeAspiSeries({ mic: "XSHG", candles: [{ time: "2026-01-15", close: 3000 }] });
-    expect(out.points).toHaveLength(1);
-    expect(out.provenance.fallback_used).toBe(true);
-    expect(out.provenance.missing_fields).toContain("provenance");
-    expect(out.fallback_used).toBe(true);
+  it("throws on missing provenance (fail-closed, never fabricates)", () => {
+    expect(() =>
+      normalizeAspiSeries({ mic: "XSHG", candles: [{ time: "2026-01-15", close: 3000 }] })
+    ).toThrow("provenance missing");
+    expect(() => normalizeAspiSeries({ mic: "XSHG", candles: [] })).toThrow("provenance missing");
   });
 });
 
@@ -330,9 +329,15 @@ describe("normalizeNativeIndexSeries (GET /api/markets/{mic}/index contract)", (
   });
   it("empty points -> zero-count series (never fabricates)", async () => {
     const { normalizeNativeIndexSeries } = await import("./aspi");
-    const out = normalizeNativeIndexSeries({ mic: "XNYS", points: [] }, "XNYS");
+    const out = normalizeNativeIndexSeries({ mic: "XNYS", points: [], provenance: prov() }, "XNYS");
     expect(out.count).toBe(0);
     expect(out.lastClose).toBeNull();
+  });
+  it("missing provenance throws (fail-closed)", async () => {
+    const { normalizeNativeIndexSeries } = await import("./aspi");
+    expect(() => normalizeNativeIndexSeries({ mic: "XNYS", points: [{ t: "2026-01-15", close: 100 }] }, "XNYS")).toThrow(
+      "provenance missing"
+    );
   });
 });
 
@@ -378,9 +383,11 @@ describe("combineAspiProvenance", () => {
     expect(out.quality_grade).toBe("D");
     expect(out.missing_fields).toContain("volume");
   });
-  it("returns an honest empty envelope with no entries", () => {
+  it("returns an honest empty envelope with no entries (non-fallback)", () => {
     const out = combineAspiProvenance([]);
-    expect(out.fallback_used).toBe(true);
+    expect(out.fallback_used).toBe(false);
+    expect(out.delay_minutes).toBe(15);
+    expect(out.quality_grade).toBe("U");
     expect(out.missing_fields).toContain("provenance");
   });
 });

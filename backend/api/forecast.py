@@ -191,7 +191,9 @@ def calibration_history(
         canonical = canonical_symbol(symbol, market_service)
     except Exception:
         canonical = (symbol or "").strip().upper()
-    # Provenance: best-effort bars envelope, honest fallback otherwise.
+    # Provenance: live bars envelope. Fail-closed: when bars are
+    # unavailable there is nothing honest to contextualize the history
+    # with, so the request raises instead of fabricating an envelope.
     try:
         bars = market_service.get_bars(
             (symbol or "").strip().upper(), timeframe="1d", limit=5
@@ -199,25 +201,12 @@ def calibration_history(
         provenance = dict(bars.get("provenance", {}))
         if not provenance:
             raise ValueError("empty provenance")
-    except Exception:
-        try:
-            provenance = build_provenance(
-                "forecast-calibration",
-                as_of=datetime.now(timezone.utc),
-                delay_minutes=15,
-                quality_grade="C",
-                fallback_used=True,
-                missing_fields=["bars"],
-            ).model_dump(mode="json")
-        except Exception:
-            provenance = {
-                "source": "forecast-calibration",
-                "as_of": datetime.now(timezone.utc).isoformat(),
-                "delay_minutes": 15,
-                "quality_grade": "C",
-                "fallback_used": True,
-                "missing_fields": ["bars"],
-            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=sanitize_error(exc, prefix="calibration history failed")
+        ) from exc
     try:
         from backend.db.session import get_session_factory, init_db
         from backend.db.models import CalibrationSnapshot

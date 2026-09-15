@@ -64,13 +64,14 @@ For real HTTP load later: `locust -f infra/load/locustfile.py --headless -u 20 -
 
 | Simulated failure | Expected behavior |
 |---|---|
-| Provider outage (`_fetch_raw` raises) | 200 with `fallback_used=true`, usable `price` (page stays up) |
-| Circuit breaker open | flagged stub + `circuit_open=true`, still 200 |
+| Provider outage (`_fetch_raw` raises) | Service raises `ProviderError`; HTTP 502, never 200+stale/fallback |
+| Circuit breaker open | Service raises fail-closed (provider-level flagged stub is refused by the service); HTTP 502 |
 | yfinance down, SSE request | served live via AKShare (`source=akshare`, `CNY`, `fallback_used=false`); breakers are per-provider objects — one open never trips the other |
 | Invalid horizon (`7`, `7d`, `30`, `soon`) on forecast / backtest / AI opinion; unknown AI profile | 422, never 500 |
-| Malformed AI JSON (empty, truncated, bad prob/horizon, missing `evidence_ids`) | `parse_opinion_strict` raises `ValueError`; providers fall back to a marked stub — never a partial opinion |
-| FX stale (>24 h) or fallback without `allow_fallback=true` on `POST /api/fx/rank` | 423 + `code FX_PROVENANCE_MISSING`; explicit `allow_fallback=true` passes (fresh only) |
-| Unknown symbol: `resolve` / `instruments/{id}` / `securities/{id}/quote` | 404; audit `forecasts` + backtest history return empty 200 payloads; empty quote symbol is 422 — **never 500** |
+| Malformed AI JSON (empty, truncated, bad prob/horizon, missing `evidence_ids`) | `parse_opinion_strict` raises `ValueError`; API returns 502/423, never a partial opinion on the wire |
+| FX stale (>24 h) or missing on `POST /api/fx/rank` | 423 + `code FX_PROVENANCE_MISSING` (no `allow_fallback` escape — fail-closed) |
+| Unknown symbol: `resolve` / `instruments/{id}` / `securities/{id}/quote` | 404; audit `forecasts` returns empty 200; backtest history / quote with no live data → 502; bad-symbol shape (e.g. underscore) → 422; empty quote symbol is 422 — **never 500, never stub 200** |
+| AI insight/forecast_opinion with no key | 423 AI disabled (deterministic forecast unaffected); live-call failure → 502 (stub refused on wire) |
 
 ## 5. Leakage / key / audit checks
 

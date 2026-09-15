@@ -21,6 +21,7 @@ from backend.instruments.registry import InstrumentRegistry
 from backend.market_data import ingest as ingest_module
 from backend.market_data.health import ProviderHealthTracker
 from backend.market_data.ingest import DEFAULT_UNIVERSE, ingest_symbols
+from backend.market_data.providers.base import ProviderError
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
 
@@ -260,74 +261,38 @@ def test_get_bars_db_first(isolated_db, monkeypatch):
         _teardown()
 
 
-def test_get_bars_fallback_empty_db(isolated_db, monkeypatch):
-    # Offline: the on-demand live fetch must also fail so the stub serves.
+def test_get_bars_empty_db_raises_provider_error(isolated_db, monkeypatch):
+    # Fail-closed: empty DB + failed on-demand live fetch -> ProviderError
+    # (no stub cover, no deterministic fallback bars).
     monkeypatch.setattr(
         ingest_module, "fetch_daily_bars",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
     try:
         svc = _service()
-        out = svc.get_bars("AAPL", timeframe="1d", limit=5)
-        assert len(out["bars"]) == 5  # stub shape
-        assert out["provenance"]["fallback_used"] is True
-        assert out["provenance"]["source"] == "yfinance"
-        assert out["symbol"] == "AAPL"
-        assert PROVENANCE_KEYS <= set(out["provenance"])
-        for bar in out["bars"]:
-            assert {"ts", "open", "high", "low", "close", "volume",
-                    "missing_fields"} <= set(bar)
-        again = svc.get_bars("AAPL", timeframe="1d", limit=5)
-        assert again["bars"] == out["bars"]  # deterministic stub intact
+        with pytest.raises(ProviderError):
+            svc.get_bars("AAPL", timeframe="1d", limit=5)
     finally:
         _teardown()
 
 
-def test_stub_bars_anchored_to_quote(isolated_db, monkeypatch):
-    """Regression: stub chart must end where the header quote is.
-
-    (GOOGL showed $338.50 in the header with a ~$571 stub chart because the
-    stub base was hash-random and unanchored.)
-    """
-    # Offline: the on-demand live fetch must also fail so the stub serves.
-    monkeypatch.setattr(
-        ingest_module, "fetch_daily_bars",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
-    )
-    try:
-        svc = _service()
-        quote = svc.get_quote("AAPL")
-        out = svc.get_bars("AAPL", timeframe="1d", limit=20)
-        assert out["provenance"]["fallback_used"] is True
-        assert out["bars"][-1]["close"] == round(quote["price"], 2)
-        # OHLC ordering survives the rescale on every bar.
-        for bar in out["bars"]:
-            assert bar["low"] <= min(bar["open"], bar["close"])
-            assert bar["high"] >= max(bar["open"], bar["close"])
-        # Unknown symbols anchor to their (stub) quote too — never $571 vs $100.
-        quote_unknown = svc.get_quote("ZZZ_UNKNOWN_123")
-        bars_unknown = svc.get_bars("ZZZ_UNKNOWN_123", timeframe="1d", limit=10)
-        assert bars_unknown["bars"][-1]["close"] == round(quote_unknown["price"], 2)
-    finally:
-        _teardown()
-
-
-def test_get_bars_fallback_unreachable_db_never_raises(isolated_db, monkeypatch):
+def test_get_bars_unreachable_db_raises_provider_error(isolated_db, monkeypatch):
+    # Fail-closed: unreachable DB + failed live fetch -> ProviderError
+    # (never serve fabricated bars).
     import backend.db.session as session_module
 
     def _boom(*args, **kwargs):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(session_module, "get_session_factory", _boom)
-    # Offline: the on-demand live fetch must also fail so the stub serves.
+    # Offline: the on-demand live fetch also fails, so the request raises.
     monkeypatch.setattr(
         ingest_module, "fetch_daily_bars",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
     )
     try:
         svc = _service()
-        out = svc.get_bars("AAPL", timeframe="1d", limit=7)
-        assert len(out["bars"]) == 7
-        assert out["provenance"]["fallback_used"] is True
+        with pytest.raises(ProviderError):
+            svc.get_bars("AAPL", timeframe="1d", limit=7)
     finally:
         _teardown()

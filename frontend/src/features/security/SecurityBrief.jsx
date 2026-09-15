@@ -8,7 +8,7 @@ import MarketStateBadge from "../../components/MarketStateBadge";
 import CurrencyValue from "../../components/CurrencyValue";
 import Loading from "../../components/Loading";
 import Skeleton from "../../components/Skeleton";
-import ErrorState, { StaleBanner } from "../../components/ErrorState";
+import ErrorState from "../../components/ErrorState";
 import { SourceBadge, BlendedForecastBar, DeepResearchStub } from "../../components/ResearchSection";
 
 // PriceChart (and lightweight-charts) loads on demand — the brief header,
@@ -187,17 +187,8 @@ function SecurityBrief({ symbol }) {
       </div>
     );
   }
-  const stale = q.provenance?.fallback_used === true || (q.provenance?.delay_minutes ?? 0) > 30;
   return (
     <div className="max-w-full">
-      {stale && <StaleBanner detail={`quote via ${q.provenance?.source ?? "unknown"}, delay ${q.provenance?.delay_minutes ?? "—"}m`} />}
-      {forecastQ.isError && (
-        <StaleBanner detail={`forecast endpoint unreachable (${forecastQ.error instanceof Error ? forecastQ.error.message : "unknown error"}) — forecast unavailable, no placeholder numbers shown`} />
-      )}
-      {analyticsQ.isError && <StaleBanner detail="analytics endpoint unreachable — snapshot shows unavailable, rest of the page unaffected" />}
-      {barsQ.isError && (
-        <StaleBanner detail={`price history unreachable (${barsQ.error instanceof Error ? barsQ.error.message : "bars endpoint error"}) — chart shows unavailable, rest of the page unaffected`} />
-      )}
       <section className="term-panel min-w-0 p-4" aria-labelledby="brief-forecast">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="brief-forecast" className="min-w-0 text-lg font-bold">

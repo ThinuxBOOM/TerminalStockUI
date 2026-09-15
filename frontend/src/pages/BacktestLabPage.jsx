@@ -9,7 +9,7 @@ import FreshnessBadge from "../components/FreshnessBadge";
 import CalibrationChart from "../components/CalibrationChart";
 import { SourceBadge } from "../components/ResearchSection";
 import Loading from "../components/Loading";
-import ErrorState, { StaleBanner } from "../components/ErrorState";
+import ErrorState from "../components/ErrorState";
 
 const MAX_HISTORY_ROWS = 20;
 const MAX_RELIABILITY_ROWS = 20;
@@ -245,7 +245,7 @@ function BacktestLabPage() {
 }
 
 function LabResults({ r }) {
-  const stale = r.provenance?.fallback_used === true || (r.provenance?.delay_minutes ?? 0) > 30;
+  const slowFeed = (r.provenance?.delay_minutes ?? 0) > 30;
   const scoredHorizon = (r.horizons ?? [])[0];
   const scoredSuffix = scoredHorizon !== undefined ? ` · ${scoredHorizon}d` : "";
   const reliability = useMemo(() => r.reliability ?? [], [r]);
@@ -281,7 +281,11 @@ function LabResults({ r }) {
 
   return (
     <div className="space-y-4">
-      {stale && <StaleBanner detail={`backtest via ${r.provenance?.source ?? "unknown"}, delay ${r.provenance?.delay_minutes ?? "—"}m`} />}
+      {slowFeed && (
+        <p className="text-[11px] text-term-muted" role="status">
+          Backtest via {r.provenance?.source ?? "unknown"}, delay {r.provenance?.delay_minutes ?? "—"}m.
+        </p>
+      )}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="term-panel p-4">
           <div className="flex flex-wrap items-center gap-2">

@@ -18,7 +18,7 @@ import CalibrationChart from "../../components/CalibrationChart";
 import { ResearchSection, AuditLink, DeepResearchStub } from "../../components/ResearchSection";
 import Loading from "../../components/Loading";
 import { formatDateTime, formatPct1 } from "../../utils/format";
-import ErrorState, { StaleBanner } from "../../components/ErrorState";
+import ErrorState from "../../components/ErrorState";
 
 const DISCLOSURE = "Not investment advice. Forecasts are measurable probabilities from the deterministic engine; AI opinions are bounded and capped at 20% influence.";
 const MAX_CAL_TABLE_ROWS = 20;
@@ -132,12 +132,9 @@ function ForecastDetails({ symbol }) {
         />
       )}
       {!forecastQ.isError && !forecastQ.isLoading && !live && (
-        <StaleBanner detail="live forecast not yet returned — forecast unavailable, no placeholder numbers shown" />
-      )}
-      {f && (f.provenance.fallback_used || f.provenance.delay_minutes > 30) && !forecastQ.isError && (
-        <StaleBanner
-          detail={`forecast via ${f.provenance.source}, delay ${f.provenance.delay_minutes}m${f.provenance.fallback_used ? " — fallback/synthetic bars, not market history" : ""}`}
-        />
+        <p className="text-xs text-term-muted" role="status">
+          Live forecast not yet returned — forecast unavailable, no placeholder numbers shown.
+        </p>
       )}
       {!f && !forecastQ.isLoading && (
         <section className="term-panel p-4" role="status">

@@ -7,7 +7,7 @@ Covers, offline only:
 - symbol / timeframe / instrument_id validation (422, no traversal)
 - alerts list pagination (limit/offset/total)
 - SECRET_KEY placeholder detection
-- deterministic stub-bar cache + provisional-instrument cache
+- deterministic stub-bar helpers removed (fail-closed, no synthesis) + provisional-instrument cache
 - AI router cache TTL expiry
 """
 
@@ -23,7 +23,7 @@ from backend.ai.router import AIRouter
 from backend.api.deps import reset_deps
 from backend.api.main import create_app
 from backend.db.session import init_db, reset_engine
-from backend.market_data.service import MarketDataService, _stub_base_rows
+from backend.market_data.service import MarketDataService
 from backend.security import auth as auth_module
 from backend.security import rate_limit as rate_limit_module
 from backend.security.secrets import is_default_secret_key, reset_fernet
@@ -227,22 +227,22 @@ def test_default_secret_key_detected(monkeypatch):
 # --- performance caches -------------------------------------------------------------
 
 
-def test_stub_base_rows_cached_and_deterministic():
-    _stub_base_rows.cache_clear()
-    first = _stub_base_rows("AAPL", 30, "2026-09-14")
-    second = _stub_base_rows("AAPL", 30, "2026-09-14")
-    assert first is second  # same cached object
-    assert len(first) == 30
-    other = _stub_base_rows("MSFT", 30, "2026-09-14")
-    assert other != first
+def test_stub_base_rows_removed_fail_closed():
+    """NO FALLBACKS: deterministic stub-bar helpers are removed (no synthesis)."""
+    import backend.market_data.service as _svc_mod
+
+    assert not hasattr(_svc_mod, "_stub_base_rows"), "stub bar cache must not exist"
+    assert not hasattr(MarketDataService, "_stub_bars"), "stub bars method must not exist"
 
 
-def test_stub_bars_stable_within_day():
+def test_bars_fail_closed_without_live_data():
+    """NO FALLBACKS: get_bars raises when DB thin/empty and live fetch misses."""
+    from backend.market_data.providers.base import ProviderError
+    import pytest as _pt
+
     svc = MarketDataService()
-    one = svc._stub_bars("AAPL", "1d", 10)
-    two = svc._stub_bars("AAPL", "1d", 10)
-    assert [b["close"] for b in one["bars"]] == [b["close"] for b in two["bars"]]
-    assert len(one["bars"]) == 10
+    with _pt.raises(ProviderError):
+        svc.get_bars("ZZZNOPE123XYZ", "1d", 5)
 
 
 def test_provisional_instrument_returns_copies():

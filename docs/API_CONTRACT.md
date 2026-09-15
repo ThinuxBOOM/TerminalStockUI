@@ -109,9 +109,13 @@ Supports hash-chain verification (see README § Observability).
 
 ## Error shape
 ```json
-{"error": {"code": "PROVIDER_UNAVAILABLE", "message": "yfinance timed out; served cached bars", "retryable": true, "provenance": {...}}}
+{"detail": "yfinance: no live quote for AAPL (all providers unavailable)"}
 ```
-Partial failure must still return usable cached data with `fallback_used: true` (M1 acceptance).
+Fail-closed (NO FALLBACKS): outage/stale/missing data raises — HTTP 502 (no live
+data), 423 (AI disabled / FX refused), 422 (bad input) — never 200 with
+`fallback_used:true`, never synthetic/stub/cached-as-fresh. See
+`docs/FAIL_CLOSED_CONTRACT.md`. Delays are honest (`delay_minutes`, grade);
+stale data is refused, not served.
 
 ---
 

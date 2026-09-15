@@ -3,7 +3,7 @@ import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import { displaySymbol, searchInstruments } from "../../api/client";
 import Loading from "../../components/Loading";
-import ErrorState, { StaleBanner } from "../../components/ErrorState";
+import ErrorState from "../../components/ErrorState";
 import EmptyState from "../../components/EmptyState";
 const MARKET_OPTIONS = [
   { label: "All", value: "" },
@@ -191,12 +191,7 @@ function SearchBox({
       "aria-label": "Clear recent searches"
     },
     "clear"
-  )), /* @__PURE__ */ React.createElement("div", { className: "mt-4 min-w-0" }, !submitted && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type a ticker or company name. Search is exchange-aware (XNYS / XNAS / XSHG / XPAR / XAMS / XBRU). Try ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "AAPL"), " or", " ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "Moutai"), "."), submitted && isLoading && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && data && isFetching && !isLoading && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "refreshing\u2026"), submitted && isError && data && data.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mb-2" }, /* @__PURE__ */ React.createElement(
-    StaleBanner,
-    {
-      detail: `search refresh failed (${error instanceof Error ? error.message : "backend unreachable"}) \u2014 showing cached results`
-    }
-  )), submitted && isError && (!data || data.length === 0) && /* @__PURE__ */ React.createElement(
+  )), /* @__PURE__ */ React.createElement("div", { className: "mt-4 min-w-0" }, !submitted && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type a ticker or company name. Search is exchange-aware (XNYS / XNAS / XSHG / XPAR / XAMS / XBRU). Try ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "AAPL"), " or", " ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "Moutai"), "."), submitted && isLoading && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && data && isFetching && !isLoading && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "refreshing\u2026"), submitted && isError && data && data.length > 0 && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, `search refresh failed (${error instanceof Error ? error.message : "backend unreachable"}) \u2014 showing last loaded results.`), submitted && isError && (!data || data.length === 0) && /* @__PURE__ */ React.createElement(
     ErrorState,
     {
       title: "Search unavailable",
