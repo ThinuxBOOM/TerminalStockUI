@@ -76,3 +76,40 @@ def test_bars_http_carries_provenance():
     body = resp.json()
     assert len(body["bars"]) == 5
     assert REQUIRED_KEYS <= set(body["provenance"])
+
+
+# --- Agent 6: health enrichment leaves the provenance envelope untouched -----
+
+def test_passive_health_records_do_not_alter_provenance():
+    svc = _stub_service()
+    out = svc.get_quote("AAPL")
+    assert REQUIRED_KEYS <= set(out["provenance"])
+    stats = svc.health.stats("yfinance")
+    assert stats["total_calls"] >= 1
+    # Enriched keys exist alongside the legacy shape.
+    for key in ("state", "error_rate_5m", "calls_5m", "last_success",
+                "consecutive_failures", "quota", "kind"):
+        assert key in stats
+    # A quota-limited mark degrades health but never rewrites provenance.
+    svc.health.record("yfinance", 5.0, False, status_code=429,
+                      error="rate limited (429)")
+    assert svc.health.stats("yfinance")["quota"]["limited"] is True
+    assert svc.health.stats("yfinance")["state"] == "degraded"
+    out2 = svc.get_quote("AAPL")
+    assert REQUIRED_KEYS <= set(out2["provenance"])
+
+
+def test_providers_health_rows_carry_enriched_schema():
+    reset_deps()
+    app = create_app()
+    app.dependency_overrides[get_market_service] = _stub_service
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.get("/api/market_data/quote", params={"symbol": "AAPL"})
+    resp = client.get("/api/providers/health")
+    assert resp.status_code == 200, resp.text
+    rows = {p["provider"]: p for p in resp.json()["providers"]}
+    assert "yfinance" in rows
+    for key in ("state", "error_rate_5m", "calls_5m", "consecutive_failures", "quota"):
+        assert key in rows["yfinance"], f"yfinance row missing {key!r}"

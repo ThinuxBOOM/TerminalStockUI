@@ -118,3 +118,92 @@ def test_evidence_hash_stable_for_same_inputs():
     second = build_evidence_packet("msft", **kwargs)
     assert first.evidence_hash == second.evidence_hash
     assert first.packet_id == second.packet_id
+
+
+# ---------------------------------------------------------------------------
+# Token efficiency + tier stubs (Agent 4): per-profile budgets, prompt
+# truncation/summarization, TokenUsage schema, tier fields unenforced.
+# ---------------------------------------------------------------------------
+
+
+def _big_packet():
+    return build_evidence_packet(
+        "AAPL",
+        {
+            "top_bullish": [{"label": f"bull {i}", "detail": "x" * 400} for i in range(12)],
+            "top_risks": [{"label": f"risk {i}", "detail": "y" * 400} for i in range(9)],
+            "events": [{"label": f"event {i}", "detail": "z" * 300} for i in range(40)],
+            "summary": {f"metric_{i}": "v" * 200 for i in range(30)},
+            "candles": [1, 2, 3],  # must never survive
+            "api_key": "sk-live-must-vanish",
+        },
+        {"source": "yfinance", "quality_grade": "B", "delay_minutes": 15},
+    )
+
+
+def test_profile_token_budgets_ordered():
+    from backend.ai.evidence import PROFILE_TOKEN_BUDGETS
+
+    assert PROFILE_TOKEN_BUDGETS["quick_insight"] <= 600
+    assert PROFILE_TOKEN_BUDGETS["forecast_assist"] == 1000
+    assert PROFILE_TOKEN_BUDGETS["deep_research"] == 4000
+    assert PROFILE_TOKEN_BUDGETS["quick_insight"] < PROFILE_TOKEN_BUDGETS["forecast_assist"]
+    assert PROFILE_TOKEN_BUDGETS["forecast_assist"] < PROFILE_TOKEN_BUDGETS["deep_research"]
+
+
+def test_summarize_packet_enforces_caps_per_profile():
+    from backend.ai.evidence import summarize_packet_for_profile
+
+    packet = _big_packet()
+    quick = summarize_packet_for_profile(packet, "quick_insight")
+    deep = summarize_packet_for_profile(packet, "deep_research")
+    assert len(quick["top_bullish"]) <= 5 and len(quick["top_risks"]) <= 5
+    assert len(quick["events"]) <= 10  # quick summarizes harder
+    assert len(deep["events"]) <= 20
+    assert all(len(item["detail"]) <= 140 for item in quick["top_bullish"])
+    assert len(quick["deterministic_summary"]) <= 8
+    assert len(deep["deterministic_summary"]) <= 20
+    dumped = str(quick) + str(deep)
+    assert "sk-live-must-vanish" not in dumped
+    assert "candles" not in quick["deterministic_summary"]
+
+
+def test_packet_prompt_json_stays_in_budget():
+    from backend.ai.evidence import packet_prompt_json
+
+    packet = _big_packet()
+    quick_json = packet_prompt_json(packet, "quick_insight")
+    deep_json = packet_prompt_json(packet, "deep_research")
+    assert len(quick_json) <= 600 * 4 + 64  # budget chars + truncation marker
+    assert len(deep_json) <= 4000 * 4 + 64
+    assert len(quick_json) < len(deep_json)  # quick summarizes harder
+
+
+def test_render_prompt_truncates_packet_not_template():
+    from backend.ai.prompts import get_prompt, render_prompt
+
+    packet = _big_packet()
+    text = render_prompt("quick_insight", packet)
+    assert get_prompt("quick_insight").strip() in text  # template intact
+    assert "TIME_HORIZON_DAYS: 21" in text
+    packet_part = text.split("EVIDENCE_PACKET_JSON:")[1]
+    assert len(packet_part) <= 600 * 4 + 64
+
+
+def test_token_usage_schema_and_tier_stubs_unenforced():
+    from backend.ai.schemas import (
+        ForecastOpinionRequest,
+        InsightRequest,
+        TokenUsage,
+    )
+
+    usage = TokenUsage(provider="gemini", model="m", profile="quick_insight",
+                       prompt_tokens=500, completion_tokens=100, total_tokens=600)
+    assert usage.total_tokens == 600
+    # Tier stubs accepted in any (or no) value — never enforced.
+    for kwargs in ({}, {"user_tier": "free"}, {"user_tier": "platinum"},
+                   {"user_tier": "nonsense-tier"}, {"call_type": "insight", "token_credits": 5}):
+        req = InsightRequest(symbol="AAPL", **kwargs)
+        assert req.symbol == "AAPL"
+        forecast = ForecastOpinionRequest(symbol="aapl", horizon=21, **kwargs)
+        assert forecast.symbol == "AAPL" and forecast.horizon == 21

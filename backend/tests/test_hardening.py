@@ -278,6 +278,18 @@ def test_ai_cache_ttl_expiry():
 
     from backend.ai.evidence import build_evidence_packet
 
+    # Isolate from the process-global dist cache (same reason as the
+    # empty_store fixture in test_ai_router.py): a stale dist copy from
+    # another test would serve the refetch below without a provider call.
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _clear = getattr(_get_cache(), "clear", None)
+        if callable(_clear):
+            _clear()
+    except Exception:
+        pass
+
     router = AIRouter(
         providers={"gemini": CountingProvider(secret_store=None)},
         cache_ttl_s=60,

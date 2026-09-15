@@ -404,3 +404,316 @@ def cron_evaluate_post(
             "provenance": _cron_provenance(True),
             "disclosure": _ALERTS_DISCLOSURE,
         }
+
+
+# --- market snapshots + forecast scoring (Agent 3; additive, distinct paths) --
+# New distinct paths only: existing /ingest /calibrate /evaluate routes above
+# are untouched. Both jobs degrade gracefully without migration 0006
+# (in-memory snapshot fallback; score reports zeros with a reason).
+
+
+class SnapshotRequest(BaseModel):
+    symbols: list[str] | None = Field(default=None, max_length=100)
+    timeframe: str | None = Field(default="1d", max_length=8)
+
+
+class ScoreRequest(BaseModel):
+    symbols: list[str] | None = Field(default=None, max_length=100)
+
+
+def _normalize_symbols(symbols: list[str] | None, single: str | None = None) -> list[str]:
+    wanted: list[str] = []
+    if single and single.strip():
+        wanted.append(single.strip()[:32])
+    for raw in symbols or []:
+        text = (raw or "").strip()
+        if text:
+            wanted.append(text[:32])
+        if len(wanted) >= 100:
+            break
+    return wanted
+
+
+def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
+    """Capture one compressed snapshot per symbol (batch never 500s)."""
+    from backend.db.session import get_session_factory, init_db
+    from backend.workers.jobs import capture_snapshot
+
+    wanted = _normalize_symbols(symbols)
+    tf = (timeframe or "1d").strip() or "1d"
+    if not wanted:
+        return {"ok": True, "snapshots": {}, "errors": {},
+                "provenance": _cron_provenance(False)}
+    try:
+        init_db()
+        Session = get_session_factory()
+        db = Session()
+    except Exception:
+        logger.warning("snapshot db unavailable symbols=%d", len(wanted))
+        db = None  # type: ignore[assignment]
+    snapshots: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    try:
+        for raw in wanted:
+            key = raw.strip().upper()
+            try:
+                out = capture_snapshot(raw, timeframe=tf, db=db)
+                snapshots[key] = {
+                    "snapshot_id": out.get("snapshot_id"),
+                    "persisted": bool(out.get("persisted")),
+                    "encoding": out.get("encoding"),
+                    "n_bars": out.get("n_bars"),
+                    "size_reduction_pct": out.get("size_reduction_pct"),
+                }
+                if not out.get("ok"):
+                    errors[key] = str((out.get("errors") or {"_batch": "failed"})
+                                      if isinstance(out.get("errors"), dict)
+                                      else out.get("errors"))[:200]
+            except Exception as exc:
+                try:
+                    if db is not None:
+                        db.rollback()
+                except Exception:
+                    pass
+                errors[key] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                logger.warning("cron snapshot failed")
+    finally:
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+    logger.info("snapshot done captured=%d errors=%d", len(snapshots), len(errors))
+    return {"ok": not errors, "snapshots": snapshots, "errors": errors,
+            "provenance": _cron_provenance(bool(errors))}
+
+
+def _run_score(symbols: list[str]) -> dict:
+    """Score matured forecasts point-in-time (batch never 500s)."""
+    from backend.db.session import get_session_factory, init_db
+    from backend.workers.jobs import score_forecasts
+
+    wanted = _normalize_symbols(symbols)
+    try:
+        init_db()
+        Session = get_session_factory()
+        db = Session()
+    except Exception:
+        logger.warning("score db unavailable")
+        return {"scored": 0, "unscored": 0, "hits": 0, "brier_mean": None,
+                "errors": {"_batch": "db unavailable"},
+                "provenance": _cron_provenance(True)}
+    try:
+        out = score_forecasts(db=db, symbols=wanted or None)
+        return {"scored": int(out.get("scored") or 0),
+                "unscored": int(out.get("unscored") or 0),
+                "hits": int(out.get("hits") or 0),
+                "brier_mean": out.get("brier_mean"),
+                "errors": dict(out.get("errors") or {}),
+                "provenance": _cron_provenance(bool(out.get("errors")))}
+    except Exception:
+        logger.warning("cron score batch failed")
+        return {"scored": 0, "unscored": 0, "hits": 0, "brier_mean": None,
+                "errors": {"_batch": "score failed"},
+                "provenance": _cron_provenance(True)}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@router.get("/snapshot")
+def cron_snapshot_get(
+    request: Request,
+    symbol: str | None = Query(
+        default=None, description="Single symbol; default is the ingest universe"
+    ),
+    timeframe: str | None = Query(default="1d", description="Bars timeframe"),
+) -> dict:
+    """Vercel Cron entry: ``GET /api/cron/snapshot[?symbol=AAPL&timeframe=1d]``."""
+    _check_cron_auth(request)
+    symbols = ([symbol] if (symbol or "").strip()
+               else ingest_module.default_universe())
+    try:
+        return _run_snapshot(symbols, timeframe or "1d")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron snapshot batch failed")
+        return {"ok": False, "snapshots": {}, "errors": {"_batch": "snapshot failed"},
+                "provenance": _cron_provenance(True)}
+
+
+@router.post("/snapshot")
+def cron_snapshot_post(request: Request, body: SnapshotRequest) -> dict:
+    """Manual run: ``POST /api/cron/snapshot`` with ``{symbols, timeframe}``."""
+    _check_cron_auth(request)
+    symbols = body.symbols if body.symbols else ingest_module.default_universe()
+    try:
+        return _run_snapshot(symbols, body.timeframe or "1d")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron snapshot batch failed")
+        return {"ok": False, "snapshots": {}, "errors": {"_batch": "snapshot failed"},
+                "provenance": _cron_provenance(True)}
+
+
+@router.get("/score")
+def cron_score_get(
+    request: Request,
+    symbol: str | None = Query(
+        default=None, description="Single symbol; default scores all due forecasts"
+    ),
+) -> dict:
+    """Vercel Cron entry: ``GET /api/cron/score[?symbol=AAPL]``."""
+    _check_cron_auth(request)
+    try:
+        return _run_score([symbol] if (symbol or "").strip() else [])
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron score batch failed")
+        return {"scored": 0, "unscored": 0, "hits": 0, "brier_mean": None,
+                "errors": {"_batch": "score failed"},
+                "provenance": _cron_provenance(True)}
+
+
+@router.post("/score")
+def cron_score_post(request: Request, body: ScoreRequest) -> dict:
+    """Manual run: ``POST /api/cron/score`` with JSON ``{symbols: [...]}``."""
+    _check_cron_auth(request)
+    try:
+        return _run_score(body.symbols or [])
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron score batch failed")
+        return {"scored": 0, "unscored": 0, "hits": 0, "brier_mean": None,
+                "errors": {"_batch": "score failed"},
+                "provenance": _cron_provenance(True)}
+
+
+# --- provider health probing (Agent 6; additive, distinct paths) ------------
+# Active healthchecks for ALL providers (data + AI) live here for Vercel Cron:
+# ``GET /api/cron/health`` runs one lightweight ping per provider (single
+# quote / FX pair / AI model-list — no costly calls) and records into the
+# shared ProviderHealthTracker, so GET /health and GET /api/providers/health
+# stay read-only and lightweight (<100ms, never block on upstream).
+# ``POST /api/cron/health`` is the manual-run twin. Batches never 500.
+
+
+def _run_health_probe(timeout_s: float = 5.0) -> dict:
+    """Probe every known provider once; return enriched stats + batch status.
+
+    ``ok`` is False when any provider reports state ``down`` or an open
+    circuit; quota-limited (429) and unconfigured AI rows are degraded, not
+    batch failures. Per-provider fallbacks surface in ``providers`` rows;
+    only unexpected exceptions land in ``errors``. Never raises.
+    """
+    try:
+        timeout = max(1.0, min(15.0, float(timeout_s)))
+    except (TypeError, ValueError):
+        timeout = 5.0
+    try:
+        from backend.api.deps import get_health_tracker
+        from backend.market_data.health import probe_all_providers
+
+        tracker = get_health_tracker()
+    except Exception:
+        logger.warning("cron health probe unavailable")
+        return {"ok": False, "providers": [], "errors": {"_batch": "health unavailable"},
+                "provenance": _cron_provenance(True)}
+    try:
+        probe_all_providers(tracker, timeout_s=timeout)
+    except Exception:
+        logger.warning("cron health probe batch failed")
+    try:
+        providers = tracker.all_stats() or []
+    except Exception:
+        providers = []
+    # Durable history (best-effort): mirror the fresh probe rows into
+    # provider_health_history so the tracker has a queryable trail. Missing
+    # table / closed DB degrades to no-op via writers (never breaks cron).
+    try:
+        from backend.db.session import get_session_factory
+        from backend.db.writers import record_provider_health
+
+        Session = get_session_factory()
+        db = Session()
+        try:
+            for row in providers:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("provider") or "").strip().lower()
+                if not name:
+                    continue
+                state = str(row.get("state") or "up").lower()
+                ok = state not in ("down",)
+                lat = row.get("p50_ms", row.get("latency_ms"))
+                try:
+                    lat_i = int(float(lat)) if lat is not None else None
+                except (TypeError, ValueError):
+                    lat_i = None
+                err = None
+                if not ok:
+                    err = f"state={row.get('state')};circuit={row.get('circuit')}"
+                elif state == "degraded":
+                    err = f"degraded;circuit={row.get('circuit')}"
+                record_provider_health(db, provider=name, ok=ok, latency_ms=lat_i, error_code=err)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    errors: dict[str, str] = {}
+    try:
+        for row in providers:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("provider", "unknown"))
+            if str(row.get("state", "up")) == "down" or str(row.get("circuit", "closed")) == "open":
+                errors[name] = f"state={row.get('state')}; circuit={row.get('circuit')}"
+    except Exception:
+        pass
+    try:
+        providers = sorted(providers, key=lambda p: str(p.get("provider", "unknown")))
+    except Exception:
+        pass
+    return {"ok": not errors, "providers": providers, "errors": errors,
+            "provenance": _cron_provenance(bool(errors))}
+
+
+@router.get("/health")
+def cron_health_get(
+    request: Request,
+    timeout_s: float = Query(default=5.0, ge=1.0, le=15.0,
+                             description="Per-provider ping budget in seconds"),
+) -> dict:
+    """Vercel Cron entry: ``GET /api/cron/health[?timeout_s=5]``."""
+    _check_cron_auth(request)
+    try:
+        return _run_health_probe(timeout_s)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron health batch failed")
+        return {"ok": False, "providers": [], "errors": {"_batch": "health failed"},
+                "provenance": _cron_provenance(True)}
+
+
+@router.post("/health")
+def cron_health_post(request: Request) -> dict:
+    """Manual run: ``POST /api/cron/health`` (all providers; no body)."""
+    _check_cron_auth(request)
+    try:
+        return _run_health_probe()
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron health batch failed")
+        return {"ok": False, "providers": [], "errors": {"_batch": "health failed"},
+                "provenance": _cron_provenance(True)}

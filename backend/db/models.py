@@ -271,3 +271,247 @@ class QuoteSnapshot(Base):
 
 
 Index("ix_quote_snapshots_updated", QuoteSnapshot.updated_at.desc())
+
+
+# --- Market snapshots + forecast accuracy (APPENDED at end-of-file by design) --
+# Parallel agents append other models to this same file: do not move this block
+# above existing models and do not edit any line above it. Writer contracts:
+# backend/market_data/snapshot_store.py + backend/forecasting/accuracy.py
+# (DDL draft: infra/migrations/0006_snapshots.sql). Portable types
+# (LargeBinary/JSON) so unit tests run on SQLite while Postgres (BYTEA/JSONB)
+# stays the deployment target. All readers/writers treat these tables as
+# optional: a missing table degrades to the in-memory fallback instead of
+# raising. 0006 revamp union (Agent 7, merged 2026-09-15): ONLY additive
+# columns/CHECKs/indexes were added below (size_raw/size_stored/tier,
+# realized_ret/tier, scorer-guaranteed CHECKs); every writer column is kept
+# verbatim. Do NOT add a second MarketSnapshot/ForecastAccuracy class:
+# duplicate __tablename__ is a hard import crash for every test.
+class MarketSnapshot(Base):
+    """One compressed OHLCV capture per (symbol, timeframe, ts).
+
+    ``payload`` is the compressed bar list (see
+    ``backend/market_data/snapshot_store.py``; ``encoding`` names the scheme
+    so readers can decompress without guessing). ``instrument_id`` is
+    lineage-only and nullable; ``user_id`` is a nullable hook for future
+    per-user tracking (no auth is implemented here). ``size_raw``/
+    ``size_stored`` mirror ``raw_bytes``/``compressed_bytes`` for
+    instrument-keyed readers; ``tier`` is a nullable future-auth stub.
+    Append-only: no UNIQUE constraint (writers plain-INSERT; latest-wins).
+    """
+
+    __tablename__ = "market_snapshots"
+    __table_args__ = (
+        _sa.CheckConstraint(
+            "encoding IN ('gzip+json', 'delta-q100+gzip', 'json+gzip', "
+            "'json', 'zstd', 'raw')",
+            name="ck_market_snapshots_encoding",
+        ),
+        _sa.CheckConstraint(
+            "quality_grade IN ('A', 'B', 'C', 'D')",
+            name="ck_market_snapshots_quality_grade",
+        ),
+        _sa.CheckConstraint(
+            "size_raw IS NULL OR size_raw >= 0",
+            name="ck_market_snapshots_size_raw",
+        ),
+        _sa.CheckConstraint(
+            "size_stored IS NULL OR size_stored >= 0",
+            name="ck_market_snapshots_size_stored",
+        ),
+    )
+
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    instrument_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"), nullable=True)
+    exchange_mic: Mapped[str | None] = mapped_column(String(8))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False, default="1d")
+    encoding: Mapped[str] = mapped_column(Text, nullable=False, default="gzip+json")
+    payload: Mapped[bytes] = mapped_column(_sa.LargeBinary, nullable=False)
+    n_bars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    raw_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    compressed_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    size_raw: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    size_stored: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="yfinance")
+    quality_grade: Mapped[str] = mapped_column(String(1), nullable=False, default="C")
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    tier: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ForecastAccuracy(Base):
+    """Realized outcome per matured forecast (append-only, retained per the
+    retention ``forecast_accuracy`` rule, tied to the forecasts window).
+
+    ``forecast_id`` is intentionally NOT a DB-level FK: scoring also covers
+    in-memory/deterministic forecast records, so a hard reference would
+    reject valid rows. Point-in-time: ``realized_return`` derives from stored
+    bars at/before ``target_date`` vs at/before forecast creation; ``hit``
+    and ``brier_contrib`` follow the formula in
+    ``backend/forecasting/accuracy.py``. ``confidence_before/after`` track
+    confidence evolution; ``user_id`` is a nullable hook for future
+    per-user tracking (no auth implemented here). ``realized_ret`` mirrors
+    ``realized_return`` for revamp readers; ``tier`` is a nullable
+    future-auth stub. CHECKs only encode scorer-guaranteed invariants.
+    """
+
+    __tablename__ = "forecast_accuracy"
+    __table_args__ = (
+        _sa.CheckConstraint(
+            "brier_contrib IS NULL OR (brier_contrib >= 0 AND brier_contrib <= 1)",
+            name="ck_forecast_accuracy_brier",
+        ),
+        _sa.CheckConstraint(
+            "predicted_prob IS NULL OR (predicted_prob >= 0 AND predicted_prob <= 1)",
+            name="ck_forecast_accuracy_predicted_prob",
+        ),
+        _sa.CheckConstraint(
+            "realized_label IS NULL OR realized_label IN (0, 1)",
+            name="ck_forecast_accuracy_realized_label",
+        ),
+    )
+
+    accuracy_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    forecast_id: Mapped[uuid.UUID | None] = mapped_column(ID_TYPE, nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange_mic: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    predicted_prob: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    realized_label: Mapped[int | None] = mapped_column(Integer)
+    realized_return: Mapped[float | None] = mapped_column(Numeric(12, 8))
+    realized_ret: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True, default=None)
+    hit: Mapped[bool | None] = mapped_column(Boolean)
+    brier_contrib: Mapped[float | None] = mapped_column(Numeric(10, 8))
+    confidence_before: Mapped[str | None] = mapped_column(Text)
+    confidence_after: Mapped[str | None] = mapped_column(Text)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    data_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    tier: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_market_snapshots_symbol_tf_ts", MarketSnapshot.symbol,
+      MarketSnapshot.timeframe, MarketSnapshot.ts.desc())
+Index("ix_market_snapshots_created", MarketSnapshot.created_at.desc())
+Index("ix_market_snapshots_inst_tf_ts",
+      MarketSnapshot.instrument_id, MarketSnapshot.timeframe, MarketSnapshot.ts.desc())
+Index("ix_market_snapshots_ts", MarketSnapshot.ts.desc())
+Index("ix_forecast_accuracy_forecast", ForecastAccuracy.forecast_id)
+Index("ix_forecast_accuracy_symbol_horizon", ForecastAccuracy.symbol,
+      ForecastAccuracy.horizon_days, ForecastAccuracy.scored_at.desc())
+Index("ix_forecast_accuracy_scored", ForecastAccuracy.scored_at.desc())
+
+
+# --- 0006 revamp: AI token ledger, health history, indicators cache, ---------
+# --- future auth/tiers (APPENDED at end-of-file by design) --------------------
+# Parallel agents append other models to this same file: do not move this block
+# above existing models and do not edit any line above it. Mirrors
+# infra/migrations/0006_revamp.sql (Postgres BYTEA/JSONB/BIGSERIAL map to
+# portable LargeBinary/JSON/Integer here so SQLite tests stay green).
+# Additive-only: no existing table/column renamed or removed;
+# ai_weight<=0.20 and horizon 5/21/63 CHECKs untouched; audit_logs hash chain
+# intact. alerts/forecasts gain DB-level user_id+tier stubs in 0006
+# (migration-only, intentionally NOT mapped here to keep this file
+# append-only for concurrent agents). Do NOT redefine market_snapshots /
+# forecast_accuracy here: their single UNION classes live in the block above.
+
+
+class AiTokenLedger(Base):
+    """Append-only AI token usage ledger (Agent 4).
+
+    Successor to the legacy ``ai_token_logs`` dataset name (kept in
+    retention.py for backward compat): one row per AI call with token
+    counts, latency, and the evidence-hash cache key. ``user_id``/``tier``
+    are nullable future-auth stubs (no FK until the users DB lands).
+    Secrets MUST never be stored here (provider/model/counts only).
+    """
+
+    __tablename__ = "ai_token_ledger"
+    __table_args__ = (
+        _sa.CheckConstraint(
+            "provider IN ('gemini', 'openai', 'anthropic', 'xai')",
+            name="ck_ai_token_ledger_provider",
+        ),
+        _sa.CheckConstraint(
+            "call_type IN ('opinion', 'evidence', 'forecast', 'embedding', 'other')",
+            name="ck_ai_token_ledger_call_type",
+        ),
+        _sa.CheckConstraint("input_tokens >= 0", name="ck_ai_token_ledger_input_tokens"),
+        _sa.CheckConstraint("output_tokens >= 0", name="ck_ai_token_ledger_output_tokens"),
+        _sa.CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="ck_ai_token_ledger_latency",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    call_type: Mapped[str] = mapped_column(Text, nullable=False, default="opinion")
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    evidence_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ID_TYPE, nullable=True, default=None)
+    tier: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ProviderHealthHistory(Base):
+    """Durable provider health samples (Agent 6).
+
+    In-memory ProviderHealthTracker stays the live path; this table is the
+    durable history behind it (one row per probe/call sample). Surrogate
+    ``id`` PK so duplicate ``ts`` values never collide.
+    """
+
+    __tablename__ = "provider_health_history"
+    __table_args__ = (
+        _sa.CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="ck_provider_health_history_latency",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+
+class IndicatorCache(Base):
+    """Cached deterministic indicator payloads per (instrument, timeframe, key).
+
+    ``indicator_key`` e.g. ``rsi-14`` / ``macd-12-26-9`` / ``sma-50``.
+    Cache eviction (not history): retention purges rows whose ``updated_at``
+    is older than the window. Not user-scoped by design (deterministic core
+    output is identical for every tier).
+    """
+
+    __tablename__ = "indicator_cache"
+
+    instrument_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(8), primary_key=True, default="1d")
+    indicator_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_ai_token_ledger_provider_created",
+      AiTokenLedger.provider, AiTokenLedger.created_at.desc())
+Index("ix_ai_token_ledger_evidence", AiTokenLedger.evidence_hash)
+Index("ix_ai_token_ledger_user_created",
+      AiTokenLedger.user_id, AiTokenLedger.created_at.desc())
+Index("ix_provider_health_history_provider_ts",
+      ProviderHealthHistory.provider, ProviderHealthHistory.ts.desc())
+Index("ix_provider_health_history_ts", ProviderHealthHistory.ts.desc())
+Index("ix_indicator_cache_updated", IndicatorCache.updated_at.desc())

@@ -12,11 +12,88 @@ Rules enforced here for every vendor:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
 from backend.ai.schemas import AIOpinion, EvidencePacket, parse_opinion_strict
+
+# Per-profile output-token caps (mirror router.PROFILE_CONFIG; duplicated
+# here so providers work without importing the router at module load time —
+# router is the source of truth for timeout/retry/cache, this is the local
+# fallback for max_output_tokens only).
+PROFILE_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "quick_insight": 400,
+    "forecast_assist": 600,
+    "deep_research": 1200,
+    "report": 1000,
+}
+
+PROFILE_TIMEOUT_FALLBACK: dict[str, float] = {
+    "quick_insight": 8.0,
+    "forecast_assist": 12.0,
+    "deep_research": 25.0,
+    "report": 20.0,
+}
+
+
+def max_output_tokens_for_profile(profile: str) -> int:
+    """Max completion tokens for a profile (prompt-capped, token-efficient)."""
+    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+    try:
+        from backend.ai.router import PROFILE_CONFIG  # lazy: avoid import cycle
+
+        return int(PROFILE_CONFIG.get(key, {}).get("max_output_tokens", PROFILE_MAX_OUTPUT_TOKENS.get(key, 400)))
+    except Exception:
+        return PROFILE_MAX_OUTPUT_TOKENS.get(key, 400)
+
+
+def timeout_for_profile(profile: str) -> float:
+    """HTTP timeout (s) for a profile: 8s quick … 25s deep."""
+    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+    try:
+        from backend.ai.router import PROFILE_CONFIG  # lazy: avoid import cycle
+
+        return float(PROFILE_CONFIG.get(key, {}).get("timeout_s", PROFILE_TIMEOUT_FALLBACK.get(key, 8.0)))
+    except Exception:
+        return PROFILE_TIMEOUT_FALLBACK.get(key, 8.0)
+
+
+def prompt_cache_hint(provider_name: str, profile: str) -> dict[str, Any]:
+    """Future prompt-caching hooks (NOT enforced yet — stub for billing work).
+
+    - Anthropic: return {"cache_control": {"type": "ephemeral"}} to attach to
+      the system block / long evidence prefix once prompt-caching is enabled.
+    - OpenAI: automatic prompt caching applies to prefixes >= 1024 tokens;
+      keep the template prefix stable so repeated evidence packets hit it.
+    Callers ignore the return value today; it documents where cache
+    directives plug in without changing request shapes.
+    """
+    name = (provider_name or "").strip().lower()
+    if name == "anthropic":
+        return {"cache_control": {"type": "ephemeral"}, "profile": profile}
+    if name == "openai":
+        return {"prompt_cache": "auto-prefix", "profile": profile}
+    return {"prompt_cache": "unsupported", "profile": profile}
+
+
+def _is_transient_failure(status_code: int | None, exc: BaseException | None = None) -> bool:
+    """Retryable = timeouts/connection errors, HTTP 429, 5xx. Never 4xx."""
+    if exc is not None:
+        try:
+            import httpx
+
+            if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+                return True
+        except Exception:
+            pass
+        name = type(exc).__name__.lower()
+        if "timeout" in name or "connect" in name or "network" in name:
+            return True
+    if status_code is None:
+        return False
+    return status_code == 429 or 500 <= status_code <= 599
 
 _default_store: Any | None = None
 
@@ -155,6 +232,22 @@ class BaseProvider(ABC):
         """Return a validated AIOpinion (or marked stub). Must never raise
         for missing keys / network / validation failures."""
 
+    async def insight_with_usage(
+        self,
+        packet: EvidencePacket,
+        *,
+        profile: str = "quick_insight",
+        horizon: int | None = None,
+    ) -> tuple[AIOpinion, dict[str, int] | None]:
+        """Like insight() plus real provider token counts when available.
+
+        Default: delegates to insight() and returns (opinion, None) so the
+        router falls back to its len//4 estimate. Vendors with usage metadata
+        override this to return {"prompt_tokens": n, "completion_tokens": m}.
+        Never raises for usage-parse failures (returns None usage).
+        """
+        return await self.insight(packet, profile=profile, horizon=horizon), None
+
     def health(self) -> dict[str, Any]:
         """Safe for API responses: configuration only, never key material."""
         return {
@@ -192,20 +285,87 @@ class BaseProvider(ABC):
 
         return render_prompt(profile, packet, horizon=horizon)
 
-    async def _post_json(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout_s: float = 15.0) -> str:
-        """POST JSON via httpx without ever logging headers/payload secrets."""
+    @staticmethod
+    def _finite_usage(value: object) -> int | None:
+        try:
+            n = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if n < 0 or n > 10_000_000:
+            return None
+        return n
+
+    async def _post_json_with_usage(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_s: float = 15.0,
+        max_retries: int = 1,
+        backoff_base_s: float = 0.4,
+    ) -> tuple[str, dict | None]:
+        """POST JSON and return (raw_text, raw_body_dict|None).
+
+        Same retry/redaction contract as _post_json; the parsed body lets
+        vendors extract real usageMetadata/usage without a second parse.
+        """
+        raw = await self._post_json(
+            url, headers, payload,
+            timeout_s=timeout_s, max_retries=max_retries,
+            backoff_base_s=backoff_base_s,
+        )
+        try:
+            import json as _json
+
+            body = _json.loads(raw)
+            if isinstance(body, dict):
+                return raw, body
+        except Exception:
+            pass
+        return raw, None
+
+    async def _post_json(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_s: float = 15.0,
+        max_retries: int = 1,
+        backoff_base_s: float = 0.4,
+    ) -> str:
+        """POST JSON via httpx with exponential-backoff retries.
+
+        - Retries ONLY transient failures (timeouts/connection errors,
+          HTTP 429/5xx); 4xx (bad key/model/payload) fails fast.
+        - Headers/payload (key material) are never logged; errors are
+          redacted via _redact_error.
+        - Backoff: backoff_base_s * 2**attempt (attempt 0-based), no jitter
+          so tests stay deterministic.
+        """
         import httpx
 
-        started = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=timeout_s) as client:
-                response = await client.post(url, headers=headers, json=payload)
-        except Exception as exc:
-            raise RuntimeError(f"provider request failed: {self._redact_error(exc)}") from exc
-        _ = time.monotonic() - started
-        if response.status_code >= 400:
-            # Include Google's error body (no key material in it — headers
-            # are never logged). Turns opaque "HTTP 400" stubs into the real
-            # cause: bad key, unknown model, billing, region, bad field.
-            raise RuntimeError(f"provider HTTP {response.status_code}: {response.text[:180]}")
-        return response.text
+        attempts = max(1, int(max_retries) + 1)
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                async with httpx.AsyncClient(timeout=timeout_s) as client:
+                    response = await client.post(url, headers=headers, json=payload)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts - 1 and _is_transient_failure(None, exc):
+                    await asyncio.sleep(backoff_base_s * (2**attempt))
+                    continue
+                raise RuntimeError(f"provider request failed: {self._redact_error(exc)}") from exc
+            if response.status_code >= 400:
+                transient = _is_transient_failure(response.status_code)
+                if transient and attempt < attempts - 1:
+                    await asyncio.sleep(backoff_base_s * (2**attempt))
+                    continue
+                # Include the error body (no key material in it — headers
+                # are never logged). Turns opaque "HTTP 400" stubs into the
+                # real cause: bad key, unknown model, billing, region.
+                raise RuntimeError(f"provider HTTP {response.status_code}: {response.text[:180]}")
+            return response.text
+        if last_exc is not None:
+            raise RuntimeError(f"provider request failed: {self._redact_error(last_exc)}") from last_exc
+        raise RuntimeError("provider request failed: retries exhausted")

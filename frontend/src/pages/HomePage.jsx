@@ -6,6 +6,8 @@ import ProvenanceBadge from "../components/ProvenanceBadge";
 import FreshnessBadge from "../components/FreshnessBadge";
 import MarketStateBadge from "../components/MarketStateBadge";
 import MarketLiquidityPanel from "../components/MarketLiquidityPanel";
+import MarketIndicesSection from "../components/AspiChart";
+import LiquidationSection from "../components/LiquidationPanel";
 import { useMarketLiquidity } from "../hooks/useMarketLiquidity";
 import useWatchlist from "../hooks/useWatchlist";
 import CurrencyValue from "../components/CurrencyValue";
@@ -131,7 +133,7 @@ function HomePage() {
     [providerRows, healthProviders]
   );
   const reports = useMemo(() => research.data?.forecasts ?? [], [research.data]);
-  return /* @__PURE__ */ React.createElement("div", { className: "grid max-w-full gap-4 md:grid-cols-3" }, /* @__PURE__ */ React.createElement("section", { className: "term-panel min-w-0 p-4", "aria-labelledby": "home-market-status" }, /* @__PURE__ */ React.createElement("h2", { id: "home-market-status", className: "term-label" }, "Market status"), /* @__PURE__ */ React.createElement("ul", { className: "mt-2 space-y-1 text-sm" }, VENUES.map((v) => /* @__PURE__ */ React.createElement(VenueRow, { key: v.mic, label: v.label, symbol: v.symbol }))), /* @__PURE__ */ React.createElement("p", { className: "mt-2 text-[10px] text-term-muted" }, "Live per-venue state from quote market_state + health \u2014 never hardcoded.")), /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", { className: "grid max-w-full gap-4 md:grid-cols-3" }, /* @__PURE__ */ React.createElement("section", { className: "term-panel min-w-0 p-4", "aria-labelledby": "home-market-status" }, /* @__PURE__ */ React.createElement("h2", { id: "home-market-status", className: "term-label" }, "Market status"), /* @__PURE__ */ React.createElement("ul", { className: "mt-2 space-y-1 text-sm" }, VENUES.map((v) => /* @__PURE__ */ React.createElement(VenueRow, { key: v.mic, label: v.label, symbol: v.symbol }))), /* @__PURE__ */ React.createElement("p", { className: "mt-2 text-[10px] text-term-muted" }, "Live per-venue state from quote market_state + health \u2014 never hardcoded."), /* @__PURE__ */ React.createElement("p", { className: "mt-1 text-[11px]" }, /* @__PURE__ */ React.createElement("a", { href: "#market-indices", className: "text-term-green hover:underline" }, "Market indices & Top-20 composites ↓"))), /* @__PURE__ */ React.createElement(
     MarketLiquidityPanel,
     {
       data: liquidity.data ?? null,
@@ -140,7 +142,7 @@ function HomePage() {
       error: liquidity.error,
       onRetry: () => void liquidity.refetch()
     }
-  ), /* @__PURE__ */ React.createElement("section", { className: "term-panel min-w-0 p-4", "aria-labelledby": "home-watchlist" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("h2", { id: "home-watchlist", className: "term-label" }, "Watchlist"), /* @__PURE__ */ React.createElement(Link, { to: "/watchlist", className: "text-xs text-term-green" }, "ALL \u2192")), /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React.createElement(MarketIndicesSection, null), /* @__PURE__ */ React.createElement(LiquidationSection, null), /* @__PURE__ */ React.createElement("section", { className: "term-panel min-w-0 p-4", "aria-labelledby": "home-watchlist" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("h2", { id: "home-watchlist", className: "term-label" }, "Watchlist"), /* @__PURE__ */ React.createElement(Link, { to: "/watchlist", className: "text-xs text-term-green" }, "ALL \u2192")), /* @__PURE__ */ React.createElement(
     "form",
     {
       className: "mt-2 flex gap-2",

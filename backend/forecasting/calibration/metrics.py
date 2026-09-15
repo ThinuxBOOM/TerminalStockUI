@@ -41,43 +41,86 @@ def brier_score(y_true: Sequence[int | float], y_prob: Sequence[float]) -> float
     return float(np.mean((p - y) ** 2))
 
 
+def _bin_assignments(p: np.ndarray, n_bins: int) -> np.ndarray:
+    """Vectorized bin ids replicating the legacy per-bin masks exactly.
+
+    Bin 0 covers ``[e0, e1]`` (both edges inclusive); bins ``b > 0`` cover
+    ``(e_b, e_{b+1}]``. ``np.digitize(p, inner_edges, right=True)`` assigns
+    exactly those half-open intervals in one C pass (no Python bin loop).
+    """
+    n = int(n_bins)
+    if n <= 1:
+        return np.zeros(p.shape[0], dtype=np.intp)
+    edges = np.linspace(0.0, 1.0, n + 1)
+    return np.digitize(p, edges[1:-1], right=True).astype(np.intp)
+
+
+def _binned_sums(
+    y: np.ndarray, p: np.ndarray, n_bins: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(counts, sum_p, sum_y) per bin via ``np.bincount`` (single pass)."""
+    n = int(n_bins)
+    idx = _bin_assignments(p, n)
+    counts = np.bincount(idx, minlength=n).astype(float)
+    sum_p = np.bincount(idx, weights=p, minlength=n).astype(float)
+    sum_y = np.bincount(idx, weights=y, minlength=n).astype(float)
+    return counts, sum_p, sum_y
+
+
 def calibration_error(
     y_true: Sequence[int | float], y_prob: Sequence[float], n_bins: int = 10
 ) -> float:
-    """Expected calibration error with uniform bins (lower is better)."""
+    """Expected calibration error with uniform bins (lower is better).
+
+    Vectorized: one ``digitize`` + ``bincount`` pass instead of a Python
+    loop over bins; identical bin edges and half-open semantics.
+
+    NOTE (future per-user calibration hook): per-user reliability curves
+    must be computed by grouping (y, p) pairs per user OUTSIDE this pure
+    function (auth/tiers owned by another agent) and calling it per group.
+    """
     if int(n_bins) < 1:
         raise ValueError("n_bins must be >= 1")
     y, p = _clean_prob_inputs(y_true, y_prob)
-    edges = np.linspace(0.0, 1.0, int(n_bins) + 1)
-    error, n = 0.0, len(y)
-    for b in range(int(n_bins)):
-        lo, hi = edges[b], edges[b + 1]
-        mask = (p > lo) & (p <= hi) if b else (p >= lo) & (p <= hi)
-        if not mask.any():
-            continue
-        error += (mask.sum() / n) * abs(p[mask].mean() - y[mask].mean())
-    return float(error)
+    n = int(n_bins)
+    counts, sum_p, sum_y = _binned_sums(y, p, n)
+    total = float(len(y))
+    nonzero = counts > 0
+    if not bool(nonzero.any()):
+        return 0.0
+    mean_p = np.zeros(n)
+    mean_y = np.zeros(n)
+    mean_p[nonzero] = sum_p[nonzero] / counts[nonzero]
+    mean_y[nonzero] = sum_y[nonzero] / counts[nonzero]
+    return float(np.sum(counts[nonzero] / total * np.abs(mean_p[nonzero] - mean_y[nonzero])))
 
 
 def reliability_table(
     y_true: Sequence[int | float], y_prob: Sequence[float], n_bins: int = 10
 ) -> pd.DataFrame:
-    """Per-bin counts, mean predicted probability and positive fraction."""
+    """Per-bin counts, mean predicted probability and positive fraction.
+
+    Vectorized over bins (same edges/semantics as :func:`calibration_error`);
+    empty bins report NaN means exactly as before.
+    """
     if int(n_bins) < 1:
         raise ValueError("n_bins must be >= 1")
     y, p = _clean_prob_inputs(y_true, y_prob)
-    edges = np.linspace(0.0, 1.0, int(n_bins) + 1)
-    rows = []
-    for b in range(int(n_bins)):
-        lo, hi = edges[b], edges[b + 1]
-        mask = (p > lo) & (p <= hi) if b else (p >= lo) & (p <= hi)
-        rows.append({
-            "bin_low": float(lo), "bin_high": float(hi),
-            "count": int(mask.sum()),
-            "mean_predicted": float(p[mask].mean()) if mask.any() else float("nan"),
-            "fraction_positive": float(y[mask].mean()) if mask.any() else float("nan"),
-        })
-    return pd.DataFrame(rows)
+    n = int(n_bins)
+    edges = np.linspace(0.0, 1.0, n + 1)
+    counts, sum_p, sum_y = _binned_sums(y, p, n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean_p = sum_p / counts
+        frac = sum_y / counts
+    mean_p[counts == 0] = np.nan
+    frac[counts == 0] = np.nan
+    return pd.DataFrame({
+        "bin_low": edges[:-1].astype(float),
+        "bin_high": edges[1:].astype(float),
+        "count": counts.astype(int),
+        "mean_predicted": mean_p.astype(float),
+        "fraction_positive": frac.astype(float),
+    })
 
 
 __all__ = ["brier_score", "calibration_error", "reliability_table"]

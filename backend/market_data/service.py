@@ -42,6 +42,29 @@ except ImportError:  # pragma: no cover
     except ImportError:
         StooqProvider = None  # type: ignore[assignment]
 
+try:  # Free-tier real-time US redo (opt-in; None when unavailable)
+    from backend.market_data.providers.finnhub_free import FinnhubProvider
+except ImportError:  # pragma: no cover
+    try:
+        from .providers.finnhub_free import FinnhubProvider  # type: ignore[no-redef]
+    except ImportError:
+        FinnhubProvider = None  # type: ignore[assignment]
+
+try:  # Free Basic-tier real-time US redo (opt-in; None when unavailable)
+    from backend.market_data.providers.twelvedata_free import TwelveDataProvider
+except ImportError:  # pragma: no cover
+    try:
+        from .providers.twelvedata_free import TwelveDataProvider  # type: ignore[no-redef]
+    except ImportError:
+        TwelveDataProvider = None  # type: ignore[assignment]
+
+
+#: Live real-time US sources: a currently-live quote from one of these is
+#: served with ``delay_minutes=0`` (grade path unchanged otherwise).
+#: All three are single-venue/composite feeds (Alpaca IEX, Finnhub US,
+#: TwelveData limited-venue US) — live-but-partial, never full NBBO/SIP.
+_LIVE_DELAY_ZERO_SOURCES = frozenset({"alpaca", "finnhub", "twelvedata"})
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -210,14 +233,16 @@ class MarketDataService:
         akshare_provider: object | None = None,
         alpaca_provider: object | None = None,
         stooq_provider: object | None = None,
+        finnhub_provider: object | None = None,
+        twelvedata_provider: object | None = None,
     ) -> None:
         self.registry = registry or InstrumentRegistry()
         self.health = health or ProviderHealthTracker()
         self.provider = provider or YFinanceProvider(
-            on_call=lambda p, ms, ok: self.health.record(p, ms, ok)
+            on_call=lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
         )
         if getattr(self.provider, "_on_call", None) is None:
-            self.provider._on_call = lambda p, ms, ok: self.health.record(p, ms, ok)
+            self.provider._on_call = lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
         # SSE secondary (AKShare). Independent breaker/limiter -> failure isolation.
         # Default inherits stub_mode from primary so offline/test services stay offline.
         if akshare_provider is not None:
@@ -226,7 +251,7 @@ class MarketDataService:
             primary_stub = bool(getattr(self.provider, "stub_mode", False))
             try:
                 self.akshare_provider = AKShareProvider(
-                    on_call=lambda p, ms, ok: self.health.record(p, ms, ok),
+                    on_call=lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error")),
                     stub_mode=primary_stub,
                 )
             except Exception:
@@ -238,7 +263,7 @@ class MarketDataService:
         ) is None:
             try:
                 self.akshare_provider._on_call = (  # type: ignore[union-attr]
-                    lambda p, ms, ok: self.health.record(p, ms, ok)
+                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
                 )
             except Exception:
                 pass
@@ -254,7 +279,7 @@ class MarketDataService:
         ) is None:
             try:
                 self.alpaca_provider._on_call = (  # type: ignore[union-attr]
-                    lambda p, ms, ok: self.health.record(p, ms, ok)
+                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
                 )
             except Exception:
                 pass
@@ -264,7 +289,30 @@ class MarketDataService:
         ) is None:
             try:
                 self.stooq_provider._on_call = (  # type: ignore[union-attr]
-                    lambda p, ms, ok: self.health.record(p, ms, ok)
+                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
+                )
+            except Exception:
+                pass
+        # Free-tier US redundancy (additive, same pattern): Finnhub +
+        # TwelveData sit between yfinance and stooq in the live chain.
+        # Absent (None) they are skipped, preserving pre-chain behavior.
+        self.finnhub_provider = finnhub_provider
+        if self.finnhub_provider is not None and getattr(
+            self.finnhub_provider, "_on_call", None
+        ) is None:
+            try:
+                self.finnhub_provider._on_call = (  # type: ignore[union-attr]
+                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
+                )
+            except Exception:
+                pass
+        self.twelvedata_provider = twelvedata_provider
+        if self.twelvedata_provider is not None and getattr(
+            self.twelvedata_provider, "_on_call", None
+        ) is None:
+            try:
+                self.twelvedata_provider._on_call = (  # type: ignore[union-attr]
+                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
                 )
             except Exception:
                 pass
@@ -320,6 +368,24 @@ class MarketDataService:
             return False
         return True
 
+    @staticmethod
+    def _is_finnhub_eligible(mic: str | None, provider_symbol: str) -> bool:
+        """Finnhub free tier is US-only (international is EOD-only there).
+
+        Separate method (not an alias) so future subscription tiers can
+        diverge per provider without touching the Alpaca rule.
+        """
+        return MarketDataService._is_alpaca_eligible(mic, provider_symbol)
+
+    @staticmethod
+    def _is_twelvedata_eligible(mic: str | None, provider_symbol: str) -> bool:
+        """TwelveData free Basic tier is US-only (Euronext needs Grow+).
+
+        Separate method (not an alias) so future subscription tiers can
+        diverge per provider without touching the Alpaca rule.
+        """
+        return MarketDataService._is_alpaca_eligible(mic, provider_symbol)
+
     def _call_chain_provider(self, prov: object, symbol: str, market: str | None) -> dict | None:
         """Invoke one opt-in chain provider; None on miss. Never raises.
 
@@ -344,7 +410,25 @@ class MarketDataService:
             return None
 
     # -- quotes ---------------------------------------------------------
-    def get_quote(self, symbol: str, market: str | None = None) -> dict:
+    # Future subscription tiers (Free/Silver/Gold/Platinum): provider
+    # gating will happen HERE, in one place, keyed off ``tier`` (and
+    # ``user_id`` for per-user keys/quotas) — never inside providers.
+    # Draft mapping (no behavior today; both params are accepted and
+    # ignored): Free -> keyless only (yfinance/AKShare/Stooq); Silver ->
+    # + keyed free tiers (Alpaca/Finnhub/TwelveData shared keys);
+    # Gold/Platinum -> + paid providers (SIP, real-time Euronext, full
+    # TwelveData markets) with per-user keys. Paid provider slots should
+    # be added as new ``*_provider`` constructor args following the
+    # existing opt-in pattern (None = skipped, chain behavior unchanged).
+    def get_quote(
+        self,
+        symbol: str,
+        market: str | None = None,
+        *,
+        user_id: str | None = None,
+        tier: str | None = None,
+    ) -> dict:
+        _ = (user_id, tier)  # reserved for future per-user tier routing; no-op today.
         # Harden: coerce non-str/None symbols to str (avoids AttributeError
         # on symbol.strip()); empty still flows to ProviderError via provider.
         try:
@@ -443,15 +527,19 @@ class MarketDataService:
             quote["symbol"] = yahoo_symbol
         else:
             # Non-SSE chain (opt-in, additive): alpaca live (US, delay 0) ->
-            # yfinance (delay 15) -> stooq (delay 15, US+Euronext) ->
-            # snapshot/stub. First live quote wins (alpaca preferred =
-            # freshest) with short-circuit so one live feed costs one call.
-            # When nothing is live, the yfinance fallback wins to preserve
-            # the pre-chain outage behavior (source yfinance, fallback True).
-            # Absent providers (None) are skipped, so every existing call
-            # site without explicit wiring behaves as before.
+            # yfinance (delay 15) -> finnhub live (US free, delay 0) ->
+            # twelvedata live (US free, delay 0) -> stooq (delay 15,
+            # US+Euronext) -> snapshot/stub. First live quote wins (alpaca
+            # preferred = freshest) with short-circuit so one live feed
+            # costs one call. When nothing is live, the yfinance fallback
+            # wins to preserve the pre-chain outage behavior (source
+            # yfinance, fallback True). Absent providers (None) are
+            # skipped, so every existing call site without explicit wiring
+            # behaves as before.
             q_alpaca: dict | None = None
             q_yf_chain: dict | None = None
+            q_finnhub: dict | None = None
+            q_twelvedata: dict | None = None
             q_stooq: dict | None = None
             quote = None
             if self._is_alpaca_eligible(mic, provider_symbol):
@@ -475,6 +563,18 @@ class MarketDataService:
                     q_yf_chain = None
                 if _quote_is_live(q_yf_chain):
                     quote = q_yf_chain
+            if quote is None and self._is_finnhub_eligible(mic, provider_symbol):
+                q_finnhub = self._call_chain_provider(
+                    self.finnhub_provider, provider_symbol, mic
+                )
+                if _quote_is_live(q_finnhub):
+                    quote = q_finnhub
+            if quote is None and self._is_twelvedata_eligible(mic, provider_symbol):
+                q_twelvedata = self._call_chain_provider(
+                    self.twelvedata_provider, provider_symbol, mic
+                )
+                if _quote_is_live(q_twelvedata):
+                    quote = q_twelvedata
             if quote is None and self._is_stooq_eligible(mic, provider_symbol):
                 q_stooq = self._call_chain_provider(
                     self.stooq_provider, provider_symbol, mic
@@ -482,7 +582,9 @@ class MarketDataService:
                 if _quote_is_live(q_stooq):
                     quote = q_stooq
             if quote is None:
-                for fallback_candidate in (q_yf_chain, q_stooq, q_alpaca):
+                for fallback_candidate in (
+                    q_yf_chain, q_finnhub, q_twelvedata, q_stooq, q_alpaca,
+                ):
                     if fallback_candidate is not None:
                         quote = fallback_candidate
                         break
@@ -516,14 +618,15 @@ class MarketDataService:
             calendar_expected = expected_delay_minutes(mic)
         except ValueError:
             calendar_expected = 15
-        # Live Alpaca IEX is real-time (delay 0); everything else keeps the
-        # calendar delay (15). Fallback/snapshot data never gets delay 0 —
-        # only a currently-live alpaca quote does.
+        # Live real-time US feeds (Alpaca IEX, Finnhub free, TwelveData
+        # free) serve delay 0; everything else keeps the calendar delay
+        # (15). Fallback/snapshot data never gets delay 0 — only a
+        # currently-live quote from one of those sources does.
         try:
             _live_source = (quote.get("source") or "") if isinstance(quote, dict) else ""
         except Exception:
             _live_source = ""
-        if _live_source == "alpaca" and _quote_is_live(quote):
+        if _live_source in _LIVE_DELAY_ZERO_SOURCES and _quote_is_live(quote):
             expected = 0
         else:
             expected = calendar_expected
@@ -628,7 +731,7 @@ class MarketDataService:
         except Exception:
             sym = str(symbol)
         try:
-            n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
+            n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
         return f"bars:{sym}:{(timeframe or '1d')}:{n}"
@@ -742,12 +845,19 @@ class MarketDataService:
         return out
 
     def get_quotes_many(
-        self, symbols: list[str], market: str | None = None
+        self,
+        symbols: list[str],
+        market: str | None = None,
+        *,
+        user_id: str | None = None,
+        tier: str | None = None,
     ) -> dict[str, dict]:
         """Bulk quotes for a symbol list (bounded pool, per-symbol degrade).
 
         Never raises; failures are skipped. Homepage/screener fan-outs use
-        this instead of N sequential ``get_quote`` calls.
+        this instead of N sequential ``get_quote`` calls. ``user_id``/``tier``
+        are reserved for future per-user tier routing (passed through to
+        :meth:`get_quote`); no-op today.
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -765,7 +875,7 @@ class MarketDataService:
 
         def _one(sym: str) -> tuple[str, dict | None]:
             try:
-                return sym, self.get_quote(sym, market)
+                return sym, self.get_quote(sym, market, user_id=user_id, tier=tier)
             except Exception:
                 return sym, None
 
@@ -778,7 +888,7 @@ class MarketDataService:
         except Exception:
             for sym in wanted:
                 try:
-                    payload = self.get_quote(sym, market)
+                    payload = self.get_quote(sym, market, user_id=user_id, tier=tier)
                 except Exception:
                     continue
                 if isinstance(payload, dict):
@@ -1081,7 +1191,7 @@ class MarketDataService:
             return None
         instrument, _, _ = self.registry.resolve(symbol_text)
         try:
-            n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
+            n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
         Session = get_session_factory()  # lazy per call; cached engine
@@ -1245,7 +1355,7 @@ class MarketDataService:
         instrument, _, _ = self.registry.resolve(symbol_text)
         provider_symbol = instrument.provider_symbol if instrument else symbol_text.upper()
         try:
-            n = max(1, min(int(limit), 250))  # type: ignore[arg-type]
+            n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
         day = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)

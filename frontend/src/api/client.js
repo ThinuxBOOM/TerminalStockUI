@@ -233,12 +233,60 @@ function freshnessOf(p) {
   if (effective <= 30) return "delayed";
   return "stale";
 }
+const AI_WEIGHT_CAP = 0.2;
+const DISAGREE_TOL = 0.15;
+const AI_DISABLED_LABEL = "AI DISABLED (ai_weight=0)";
+function sourceLabelForForecast(f) {
+  return "SOURCE: DETERMINISTIC";
+}
+function sourceLabelForAIOpinion(opinion, aiWeight) {
+  const w = Number(aiWeight);
+  if (!(w > 0)) return AI_DISABLED_LABEL;
+  const provider = String(opinion?.provider ?? "").trim() || "unknown-provider";
+  return `SOURCE: AI ${provider}`;
+}
+function clampAIWeight(w) {
+  const n = Number(w);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(AI_WEIGHT_CAP, n);
+}
+function blendProbs(quantProb, aiProb, aiWeight) {
+  // Explicit null/undefined/"" guards: Number(null) === 0 would silently
+  // drag the blend toward zero on malformed AI. Missing AI -> quant alone.
+  const q = quantProb === null || quantProb === void 0 || quantProb === "" ? Number.NaN : Number(quantProb);
+  const a = aiProb === null || aiProb === void 0 || aiProb === "" ? Number.NaN : Number(aiProb);
+  const w = clampAIWeight(aiWeight);
+  if (!Number.isFinite(q)) return null;
+  // Never override quant with AI: AI can at most nudge the blend w (<=20%)
+  // of the way from quant toward the AI figure. Malformed AI -> quant alone.
+  if (!Number.isFinite(a) || !(w > 0)) return q;
+  return (1 - w) * q + w * a;
+}
+function isAIDisabled(aiWeight) {
+  return !(Number(aiWeight) > 0);
+}
+function auditForecastsUrl(symbol, limit = 20) {
+  const sym = normalizeSymbolParam(symbol);
+  const n = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 20;
+  return `/api/audit/forecasts?symbol=${encodeURIComponent(sym)}&limit=${n}`;
+}
 const AI_PROFILES = [
   "Quick Insight",
   "Deep Research",
   "Forecast Assist",
   "Report"
 ];
+// Tier-gated UI mapping (future-proof stub — NOT enforced).
+// Free -> Deep Research locked; Silver -> Deep Research unlocked, Report locked;
+// Gold -> all unlocked, higher limits; Platinum -> all unlocked + priority.
+// UI must always render with `locked=false` for now (no gating).
+const PLAN_TIERS = ["Free", "Silver", "Gold", "Platinum"];
+const TIER_FEATURES = {
+  "Deep Research": { minTier: "Silver", lockedIcon: "🔒" },
+  Report: { minTier: "Silver", lockedIcon: "🔒" },
+  "Quick Insight": { minTier: "Free", lockedIcon: "🔒" },
+  "Forecast Assist": { minTier: "Free", lockedIcon: "🔒" }
+};
 const FORECAST_HORIZONS = [5, 21, 63];
 function normalizeProvenance(raw, sourceFallback) {
   const r = raw ?? {};
@@ -293,6 +341,15 @@ const ForecastSchema = z.object({
   why: z.array(z.string()).optional().default([]),
   risks: z.array(z.string()).optional().default([]),
   evidence_ids: z.array(z.string()).optional().default([]),
+  // Explicit research split: deterministic quant core vs bounded AI opinion.
+  // probability is ALWAYS the deterministic quant figure (never overridden).
+  quant_probability: z.number().min(0).max(1).nullable().optional().default(null),
+  ai_probability: z.number().min(0).max(1).nullable().optional().default(null),
+  blended_probability: z.number().min(0).max(1).nullable().optional().default(null),
+  ai_weight: z.number().min(0).max(1).optional().default(0),
+  direction: z.string().optional().default(""),
+  regime: z.string().nullable().optional().default(null),
+  drawdown: z.number().nullable().optional().default(null),
   inputs: z.record(z.unknown()).optional(),
   versions: z.record(z.unknown()).optional(),
   calibration: z.array(ReliabilityRowSchema).optional().default([]),
@@ -301,6 +358,16 @@ const ForecastSchema = z.object({
   disclosure: z.string().optional(),
   provenance: ProvenanceSchema
 }).passthrough();
+function numOrNullStrict(v) {
+  if (v === null || v === void 0 || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function clamp01OrNull(v) {
+  const n = numOrNullStrict(v);
+  if (n === null || n < 0 || n > 1) return null;
+  return n;
+}
 function normalizeForecast(raw, symbol, horizon) {
   const r = raw ?? {};
   const versions = r.versions ?? {
@@ -310,23 +377,38 @@ function normalizeForecast(raw, symbol, horizon) {
     ...typeof r.data_version === "string" ? { data_version: r.data_version } : {},
     ...typeof r.as_of === "string" ? { as_of: r.as_of } : {}
   };
-  const direction = typeof r.direction === "string" ? r.direction : void 0;
+  const direction = typeof r.direction === "string" ? r.direction : "";
   const label = r.label ?? r.outlook ?? (direction ? `${direction}, ${num(r.horizon_days ?? r.horizon ?? horizon, horizon)}d` : "");
   const intervalsRaw = r.intervals ?? r.expected_return_range ?? r.return_range ?? null;
+  // Deterministic core first: quant probability is authoritative.
+  const quantRaw = r.probability ?? r.quant_probability ?? r.direction_probability ?? r.direction_prob ?? r.proba ?? r.value;
+  const quant = num(quantRaw, Number.NaN);
+  // AI side is bounded: weight clamped to [0, AI_WEIGHT_CAP]; malformed AI
+  // probability degrades to null (quant alone survives).
+  const aiWeight = clampAIWeight(r.ai_weight ?? r.aiWeight ?? 0);
+  const aiProb = clamp01OrNull(r.ai_probability ?? r.aiProbability ?? r.ai_opinion?.probability ?? null);
+  const blendedRaw = clamp01OrNull(r.blended_probability ?? r.blendedProbability ?? null);
+  const blended = blendedRaw ?? blendProbs(quant, aiProb, aiWeight);
+  const regimeRaw = r.regime ?? r.vol_regime ?? r.volatility_regime ?? null;
+  const drawdownRaw = r.drawdown ?? r.max_drawdown ?? r.expected_drawdown ?? null;
   const candidate = {
     symbol: r.symbol ?? r.ticker ?? symbol,
     horizon_days: num(r.horizon_days ?? r.horizon ?? horizon, horizon),
     label,
-    probability: num(
-      r.probability ?? r.direction_probability ?? r.proba ?? r.value,
-      Number.NaN
-    ),
+    probability: quant,
+    quant_probability: Number.isFinite(quant) ? quant : null,
+    ai_probability: aiProb,
+    blended_probability: blended,
+    ai_weight: aiWeight,
+    direction,
+    regime: typeof regimeRaw === "string" && regimeRaw ? regimeRaw : null,
+    drawdown: numOrNullStrict(drawdownRaw),
     confidence: r.confidence ?? r.confidence_level ?? "Unknown",
     quality_grade: r.quality_grade ?? r.data_quality ?? r.grade ?? "U",
     provider: r.provider ?? r.model_name ?? "deterministic-engine",
-    why: strArray(r.why ?? r.bull ?? r.bullish_signals ?? r.top_bullish ?? r.catalysts),
-    risks: strArray(r.risks ?? r.bear ?? r.bearish_risks ?? r.top_risks),
-    evidence_ids: strArray(r.evidence_ids ?? r.evidence ?? []),
+    why: strArray(r.why ?? r.bull ?? r.bullish_signals ?? r.top_bullish ?? r.catalysts).slice(0, 4),
+    risks: strArray(r.risks ?? r.bear ?? r.bearish_risks ?? r.top_risks).slice(0, 4),
+    evidence_ids: strArray(r.evidence_ids ?? r.evidence ?? r.model_members ?? []),
     inputs: r.inputs ?? r.features,
     versions: Object.keys(versions).length > 0 ? versions : void 0,
     calibration: normalizeReliability(
@@ -338,6 +420,7 @@ function normalizeForecast(raw, symbol, horizon) {
       high: Number(intervalsRaw.high)
     } : null,
     limitations: strArray(r.limitations),
+    // Disclosure rendered verbatim by the UI — never rewritten client-side.
     disclosure: r.disclosure,
     provenance: normalizeProvenance(r, "forecast-api")
   };
@@ -380,7 +463,7 @@ const AnalyticsSchema = z.object({
   note: z.string().optional(),
   provenance: ProvenanceSchema
 }).passthrough();
-function normalizeAnalytics(raw, symbol) {
+function normalizeAnalytics(raw, symbol, requestedIndicators) {
   const r = raw ?? {};
   const nested = r.data ?? r.analytics ?? {};
   const pick = (key) => r[key] ?? nested[key] ?? {};
@@ -394,28 +477,38 @@ function normalizeAnalytics(raw, symbol) {
     ...noteRaw ? { note: noteRaw } : {},
     provenance: normalizeProvenance({ ...nested, ...r }, "analytics-api")
   };
-  return AnalyticsSchema.parse(candidate);
+  const parsed = AnalyticsSchema.parse(candidate);
+  return {
+    ...parsed,
+    requestedIndicators: normalizeIndicatorList(requestedIndicators ?? r.requestedIndicators),
+    indicators: normalizeIndicators(r)
+  };
 }
 const ANALYTICS_TIMEOUT_MS = 6e4;
 async function getAnalytics(symbol, opts) {
   const sym = normalizeSymbolParam(symbol);
   const signal = opts?.signal;
-  return coalesceInflight(`analytics:${sym}`, async () => {
+  const indicators = normalizeIndicatorList(opts?.indicators);
+  const param = indicators.length > 0 ? indicators.join(",") : void 0;
+  const key = param ? `analytics:${sym}:indicators=${param}` : `analytics:${sym}`;
+  return coalesceInflight(key, async () => {
+    const params = param ? { indicators: param } : void 0;
     try {
       const { data } = await api.get(`/api/analytics/${encodeURIComponent(sym)}`, {
         timeout: ANALYTICS_TIMEOUT_MS,
+        ...params ? { params } : {},
         ...signal ? { signal } : {}
       });
-      return normalizeAnalytics(data, sym);
+      return normalizeAnalytics(data, sym, indicators);
     } catch (pathErr) {
       if (!isEndpointMissingError(pathErr)) throw pathErr;
       try {
         const { data } = await api.get("/api/analytics", {
-          params: { symbol: sym },
+          params: { symbol: sym, ...param ? { indicators: param } : {} },
           timeout: ANALYTICS_TIMEOUT_MS,
           ...signal ? { signal } : {}
         });
-        return normalizeAnalytics(data, sym);
+        return normalizeAnalytics(data, sym, indicators);
       } catch {
         throw pathErr;
       }
@@ -516,11 +609,18 @@ const AIOpinionSchema = z.object({
   provider: z.string().optional(),
   model: z.string().optional(),
   disagreement: z.boolean().optional(),
+  // Token/latency meta surfaced when the backend provides it (optional).
+  latency_ms: z.number().nullable().optional(),
+  tokens: z.number().nullable().optional(),
+  usage: z.record(z.unknown()).nullable().optional(),
   provenance: ProvenanceSchema.optional()
 }).passthrough();
 function normalizeAIOpinion(raw) {
   const r = raw ?? {};
   const opinion = r.opinion ?? r.data ?? r;
+  const usage = opinion.usage ?? r.usage ?? null;
+  const tokensRaw = opinion.tokens ?? usage?.total_tokens ?? usage?.tokens ?? null;
+  const latencyRaw = opinion.latency_ms ?? opinion.latencyMs ?? r.latency_ms ?? null;
   const candidate = {
     ...opinion,
     direction: opinion.direction ?? opinion.outlook,
@@ -533,9 +633,21 @@ function normalizeAIOpinion(raw) {
     risks: strArray(opinion.risks),
     // evidence_ids intentionally NOT defaulted: missing IDs must fail validation
     // (spec M5: reject claims without evidence IDs).
-    limitations: strArray(opinion.limitations)
+    limitations: strArray(opinion.limitations),
+    latency_ms: latencyRaw === null || latencyRaw === void 0 || latencyRaw === "" ? void 0 : Number(latencyRaw),
+    tokens: tokensRaw === null || tokensRaw === void 0 || tokensRaw === "" ? void 0 : Number(tokensRaw),
+    usage: usage && typeof usage === "object" ? usage : void 0
   };
   return AIOpinionSchema.parse(candidate);
+}
+// Safe degrade: malformed AI payloads never throw into the render path.
+// Returns null so callers render the deterministic core + AI DISABLED state.
+function tryNormalizeAIOpinion(raw) {
+  try {
+    return normalizeAIOpinion(raw);
+  } catch {
+    return null;
+  }
 }
 const AI_TIMEOUT_MS = 6e4;
 async function postAIInsight(symbol, profile) {
@@ -915,10 +1027,22 @@ async function getProvidersHealth() {
     });
   });
 }
-async function getAuditForecasts(limit = 5) {
+async function getAuditForecasts(symbolOrLimit = 5, maybeLimit = 5) {
+  // Supports both legacy (limit) and new (symbol, limit) call shapes:
+  // getAuditForecasts(5) | getAuditForecasts("AAPL") | getAuditForecasts("AAPL", 20)
+  let symbol = "";
+  let limit = 5;
+  if (typeof symbolOrLimit === "string") {
+    symbol = normalizeSymbolParam(symbolOrLimit);
+    limit = maybeLimit;
+  } else {
+    limit = symbolOrLimit;
+  }
   const n = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 5;
-  return coalesceInflight(`audit-forecasts:${n}`, async () => {
-    const { data } = await api.get("/api/audit/forecasts", { params: { limit: n } });
+  const symKey = symbol || "ALL";
+  return coalesceInflight(`audit-forecasts:${symKey}:${n}`, async () => {
+    const params = symbol ? { symbol, limit: n } : { limit: n };
+    const { data } = await api.get("/api/audit/forecasts", { params });
     const raw = data ?? {};
     const listRaw = Array.isArray(data) ? data : Array.isArray(raw.forecasts) ? raw.forecasts : Array.isArray(raw.results) ? raw.results : [];
     const forecasts = listRaw.map((f) => ({
@@ -939,6 +1063,56 @@ async function getAuditForecasts(limit = 5) {
       count: typeof raw.count === "number" ? raw.count : forecasts.length,
       disclosure: typeof raw.disclosure === "string" ? raw.disclosure : "Not investment advice. For informational purposes only."
     };
+  });
+}
+// Client-side backtest history reader (GET /api/backtest/:symbol).
+// Kept in client.js (no import from backtestHistory.js to avoid a cycle:
+// that module imports api/coalesceInflight/normalizeSymbolParam from here).
+// BacktestLabPage should prefer this when it only needs history via client.
+function normalizeBacktestHistoryRun(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw;
+  const runId = typeof (r.run_id ?? r.runId ?? r.id) === "string" ? (r.run_id ?? r.runId ?? r.id) : void 0;
+  if (!runId) return null;
+  const horizonsRaw = Array.isArray(r.horizons) ? r.horizons : [];
+  const numOrNullLocal = (v) => {
+    if (v === null || v === void 0 || v === "") return null;
+    const nn = Number(v);
+    return Number.isFinite(nn) ? nn : null;
+  };
+  return {
+    run_id: runId,
+    as_of: typeof r.as_of === "string" ? r.as_of : null,
+    horizons: horizonsRaw.map((h) => Number(h)).filter((hh) => Number.isFinite(hh)),
+    metrics: r.metrics ?? r.results ?? {},
+    brier: numOrNullLocal(r.brier ?? r.brier_score),
+    ece: numOrNullLocal(r.ece ?? r.calibration_error ?? r.ece_score),
+    model_version: typeof r.model_version === "string" ? r.model_version : null,
+    feature_version: typeof r.feature_version === "string" ? r.feature_version : null,
+    data_version: typeof r.data_version === "string" ? r.data_version : null
+  };
+}
+async function getBacktestHistory(symbol, includeReliability = true) {
+  const sym = normalizeSymbolParam(symbol);
+  if (!sym) return [];
+  return coalesceInflight(`backtest-history:${sym}:${includeReliability}`, async () => {
+    try {
+      const { data } = await api.get(`/api/backtest/${encodeURIComponent(sym)}`, {
+        params: { include_reliability: includeReliability }
+      });
+      const raw = data ?? {};
+      const listRaw = Array.isArray(data) ? data : Array.isArray(raw.runs) ? raw.runs : Array.isArray(raw.results) ? raw.results : Array.isArray(raw.history) ? raw.history : [];
+      const out = [];
+      for (const row of listRaw) {
+        const parsed = normalizeBacktestHistoryRun(row);
+        if (parsed) out.push(parsed);
+      }
+      return out;
+    } catch (err) {
+      const status = err?.response?.status;
+      if (status === 404 || status === 501) return [];
+      throw err;
+    }
   });
 }
 const ScreenerRowSchema = z.object({
@@ -1047,6 +1221,56 @@ async function getScreener(params = {}, opts = {}) {
     return normalizeScreener(data, horizon);
   });
 }
+const BARS_MAX_LIMIT = 1000;
+const BARS_BACKEND_CAP = 1000;
+const TIMEFRAME_PRESETS = [
+  { id: "1D", label: "1D", timeframe: "1d", limit: 5, note: "5 daily bars (intraday unavailable; daily close context)" },
+  { id: "1W", label: "1W", timeframe: "1d", limit: 7 },
+  { id: "1M", label: "1M", timeframe: "1d", limit: 30 },
+  { id: "3M", label: "3M", timeframe: "1d", limit: 90 },
+  { id: "1Y", label: "1Y", timeframe: "1d", limit: 250 },
+  { id: "2Y", label: "2Y", timeframe: "1d", limit: 500, note: "up to 500 bars; server allows 1000" },
+  { id: "5Y", label: "5Y", timeframe: "1d", limit: 1000, note: "up to 1000 bars (decimated to 500 for display)" }
+];
+function resolveTimeframePreset(id) {
+  const key = String(id ?? "").trim().toUpperCase();
+  return TIMEFRAME_PRESETS.find((p) => p.id === key) ?? TIMEFRAME_PRESETS[3];
+}
+const SUPPORTED_INDICATORS = ["SMA20", "SMA50", "SMA200", "EMA12", "EMA26", "RSI14", "MACD", "BB20", "VWAP", "ATR14"];
+const PRICE_PANE_INDICATORS = ["SMA20", "SMA50", "SMA200", "EMA12", "EMA26", "BB20", "VWAP"];
+const OSCILLATOR_INDICATORS = ["RSI14", "MACD", "ATR14"];
+function normalizeIndicatorName(v) {
+  const s = String(v ?? "").trim().toUpperCase().replace(/[\s_-]+/g, "");
+  const alias = {
+    SMA20: "SMA20", SMA50: "SMA50", SMA200: "SMA200",
+    EMA12: "EMA12", EMA26: "EMA26",
+    RSI14: "RSI14", RSI: "RSI14",
+    MACD: "MACD", BB20: "BB20", BB: "BB20",
+    VWAP: "VWAP", ATR14: "ATR14", ATR: "ATR14"
+  };
+  return alias[s] ?? null;
+}
+function normalizeIndicatorList(v) {
+  const arr = Array.isArray(v) ? v : typeof v === "string" ? v.split(",") : [];
+  const seen = new Set();
+  const out = [];
+  for (const item of arr) {
+    const n = normalizeIndicatorName(item);
+    if (n && !seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out;
+}
+function buildIndicatorsParam(list) {
+  const clean = normalizeIndicatorList(list);
+  return clean.length > 0 ? clean.join(",") : void 0;
+}
+const IndicatorPointSchema = z.object({
+  time: z.string(),
+  value: z.number().nullable()
+}).passthrough();
 const BarSchema = z.object({
   ts: z.string(),
   open: z.number().nullable().optional(),
@@ -1106,17 +1330,148 @@ function normalizeBarsToCandles(raw, symbol, timeframe = "1d") {
     provenance: normalizeProvenance(r, "bars-api")
   };
 }
+function normalizeIndicatorPoints(raw) {
+  // Accepts backend indicator series in several shapes:
+  //   [{time,value}] | [{ts,value}] | [{date,value}] | {points:[...]} |
+  //   {values:[{...}]} | {data:[...]}. Times via normalizeBarTime,
+  //   values via numFinite; null/NaN values dropped (line gaps, never 0-fill).
+  const listRaw = Array.isArray(raw) ? raw : Array.isArray(raw?.points) ? raw.points : Array.isArray(raw?.values) ? raw.values : Array.isArray(raw?.data) ? raw.data : [];
+  const out = [];
+  for (const row of listRaw) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row;
+    const time = normalizeBarTime(rec.time ?? rec.ts ?? rec.date);
+    if (!time) continue;
+    const value = numFinite(rec.value ?? rec.v ?? rec.close);
+    if (value === null) continue;
+    out.push({ time, value });
+  }
+  out.sort((a, b) => a.time < b.time ? -1 : a.time > b.time ? 1 : 0);
+  const deduped = [];
+  for (const p of out) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.time === p.time) prev.value = p.value;
+    else deduped.push({ ...p });
+  }
+  return deduped;
+}
+function normalizeIndicators(raw) {
+  // Contract alignment with Backend Agent 5:
+  //   GET /api/analytics/{symbol}?indicators=SMA20,EMA12,RSI14,MACD,BB20,VWAP,ATR14
+  // Expected response nests full series under `indicators`:
+  //   { indicators: { SMA20:[{time,value}], BB20:{upper,middle,lower},
+  //     MACD:{macd,signal,histogram}, RSI14:[...], VWAP:[...], ATR14:[...] },
+  //     provenance }
+  // Current server (M3) returns only latest-value snapshots under
+  // `technical` (no plottable series) -> this returns {} so the chart
+  // shows ErrorState/empty instead of fabricating lines. Never synthesizes.
+  // Canonical output keys (flat, chart-ready):
+  //   SMA20,SMA50,SMA200,EMA12,EMA26,VWAP,RSI14,ATR14,
+  //   BB_UPPER,BB_MIDDLE,BB_LOWER,MACD_LINE,MACD_SIGNAL,MACD_HIST
+  const r = raw ?? {};
+  const nested = r?.data ?? r?.analytics ?? {};
+  const src = r?.indicators ?? nested?.indicators ?? r?.overlays ?? {};
+  if (!src || typeof src !== "object" || Array.isArray(src)) {
+    if (Array.isArray(src)) {
+      const flat = {};
+      for (const row of src) {
+        if (!row || typeof row !== "object") continue;
+        const name = normalizeIndicatorName(row.name ?? row.indicator);
+        if (name) {
+          const pts = normalizeIndicatorPoints(row);
+          if (pts.length > 0) flat[name] = pts;
+        }
+      }
+      return flat;
+    }
+    return {};
+  }
+  const flat = {};
+  const put = (key, pts) => {
+    if (Array.isArray(pts) && pts.length > 0) flat[key] = pts;
+  };
+  for (const [rawKey, val] of Object.entries(src)) {
+    const up = String(rawKey ?? "").trim().toUpperCase().replace(/[\s_-]+/g, "");
+    if (up === "BB20" || up === "BB" || up === "BOLLINGER20" || up === "BOLLINGER") {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        put("BB_UPPER", normalizeIndicatorPoints(val.upper ?? val.high ?? val.top));
+        put("BB_MIDDLE", normalizeIndicatorPoints(val.middle ?? val.mid ?? val.basis));
+        put("BB_LOWER", normalizeIndicatorPoints(val.lower ?? val.low ?? val.bottom));
+      } else {
+        put("BB_MIDDLE", normalizeIndicatorPoints(val));
+      }
+      continue;
+    }
+    if (up === "MACD") {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        put("MACD_LINE", normalizeIndicatorPoints(val.macd ?? val.line ?? val.value ?? val.values));
+        put("MACD_SIGNAL", normalizeIndicatorPoints(val.signal));
+        put("MACD_HIST", normalizeIndicatorPoints(val.histogram ?? val.hist ?? val.diff));
+      } else {
+        put("MACD_LINE", normalizeIndicatorPoints(val));
+      }
+      continue;
+    }
+    const name = normalizeIndicatorName(rawKey);
+    if (name) put(name, normalizeIndicatorPoints(val));
+  }
+  return flat;
+}
+function favoriteIndicatorsKey(userId) {
+  // Future-proof stub: per-user favorite indicators, namespaced by the
+  // future auth user_id. No auth is implemented; callers pass undefined
+  // -> "guest" namespace backed by localStorage only.
+  const id = String(userId ?? "").trim() || "guest";
+  return `indicators:${id}`;
+}
+function loadFavoriteIndicators(userId, fallback = []) {
+  try {
+    if (typeof localStorage === "undefined") return [...fallback];
+    const raw = localStorage.getItem(favoriteIndicatorsKey(userId));
+    if (!raw) return [...fallback];
+    const parsed = JSON.parse(raw);
+    const clean = normalizeIndicatorList(parsed);
+    return clean.length > 0 ? clean : [...fallback];
+  } catch {
+    return [...fallback];
+  }
+}
+function saveFavoriteIndicators(userId, list) {
+  try {
+    if (typeof localStorage === "undefined") return false;
+    localStorage.setItem(favoriteIndicatorsKey(userId), JSON.stringify(normalizeIndicatorList(list)));
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
   const sym = normalizeSymbolParam(symbol);
   const tf = String(timeframe ?? "1d").trim() || "1d";
-  const n = Number.isFinite(Number(limit)) ? Math.min(250, Math.max(1, Math.floor(Number(limit)))) : 90;
+  const n = Number.isFinite(Number(limit)) ? Math.min(BARS_MAX_LIMIT, Math.max(1, Math.floor(Number(limit)))) : 90;
   const signal = opts?.signal;
   return coalesceInflight(`bars:${sym}:${tf}:${n}`, async () => {
-    const { data } = await api.get("/api/market_data/bars", {
-      params: { symbol: sym, timeframe: tf, limit: n },
-      ...signal ? { signal } : {}
-    });
-    return normalizeBarsToCandles(data, sym, tf);
+    try {
+      const { data } = await api.get("/api/market_data/bars", {
+        params: { symbol: sym, timeframe: tf, limit: n },
+        ...signal ? { signal } : {}
+      });
+      return normalizeBarsToCandles(data, sym, tf);
+    } catch (err) {
+      // Rollout shim: older deployed backends cap limit<=250 (422). Retry
+      // once at the legacy cap so 2Y/5Y presets degrade instead of failing.
+      const status = err?.response?.status;
+      if (status === 422 && n > 250) {
+        const { data } = await api.get("/api/market_data/bars", {
+          params: { symbol: sym, timeframe: tf, limit: 250 },
+          ...signal ? { signal } : {}
+        });
+        return normalizeBarsToCandles(data, sym, tf);
+      }
+      throw err;
+    }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, InstrumentSchema, MARKET_STATES, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, api, coalesceInflight, convertFX, deriveMarketState, displaySymbol, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, normalizeAIHealthTest, normalizeBarTime, normalizeBarsToCandles, normalizeHealthProviders, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, runBacktest, searchInstruments, testProviderHealth };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, testProviderHealth };
+
+export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };

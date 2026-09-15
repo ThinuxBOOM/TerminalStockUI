@@ -13,10 +13,13 @@ from backend.security.validation import (
     validate_symbol,
     validate_timeframe,
 )
+from backend.analytics.technical.overlays import compute_indicators, parse_indicators
 from backend.api.deps import get_market_service, get_registry
 from backend.api.schemas import BarsResponse, QuoteResponse
 
 router = APIRouter(prefix="/api/market_data", tags=["market_data"])
+
+INDICATOR_MAX_POINTS = 1000
 
 #: Contract alias router: /api/securities/{instrument_id}/quote|bars
 securities_router = APIRouter(prefix="/api/securities", tags=["securities"])
@@ -86,7 +89,7 @@ def quote(
 def bars(
     symbol: str = Query(..., min_length=1, max_length=32),
     timeframe: str = Query(default="1d"),
-    limit: int = Query(default=30, ge=1, le=250),
+    limit: int = Query(default=30, ge=1, le=1000),
     svc: MarketDataService = Depends(get_market_service),
 ):
     symbol = validate_symbol(symbol)
@@ -101,6 +104,78 @@ def bars(
         raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="bars failed")) from exc
+
+
+@router.get("/indicators")
+def market_indicators(
+    symbol: str = Query(..., min_length=1, max_length=32),
+    indicators: str | None = Query(
+        default=None,
+        description="Comma-separated overlays, e.g. SMA20,EMA12,RSI14,MACD,BB20,VWAP,ATR14",
+    ),
+    timeframe: str = Query(default="1d"),
+    limit: int = Query(default=120, ge=1, le=1000),
+    svc: MarketDataService = Depends(get_market_service),
+):
+    """GET /api/market_data/indicators?symbol=&indicators=&timeframe=&limit=.
+
+    Distinct path from /bars and /quote. Same overlay validation as
+    /api/analytics (unknown -> 422 exact detail). Returns the
+    {requested, bars, max_points, series} wrapper with provenance, plus
+    flat series duplicates for the frontend passthrough.
+    """
+    symbol = validate_symbol(symbol)
+    timeframe = validate_timeframe(timeframe)
+    if indicators is None or not str(indicators).strip():
+        wanted: list[str] = []
+    else:
+        try:
+            wanted = parse_indicators(indicators)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        payload = svc.get_bars(symbol, timeframe, limit)
+    except HTTPException:
+        raise
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=sanitize_error(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="indicators failed")) from exc
+    rows = payload.get("bars", []) if isinstance(payload, dict) else []
+    provenance = dict(payload.get("provenance", {})) if isinstance(payload, dict) else {}
+    try:
+        import pandas as _pd
+
+        frame = _pd.DataFrame(
+            {
+                "open": [r["open"] for r in rows],
+                "high": [r["high"] for r in rows],
+                "low": [r["low"] for r in rows],
+                "close": [r["close"] for r in rows],
+                "volume": [float(r["volume"] or 0) for r in rows],
+            },
+            index=_pd.to_datetime([r["ts"] for r in rows]) if rows else [],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"indicators frame failed: {exc}") from exc
+    try:
+        computed = compute_indicators(frame, wanted, max_points=INDICATOR_MAX_POINTS)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    nested: dict = dict(computed)
+    nested["provenance"] = provenance
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "requested": list(wanted),
+        "bars": int(len(frame)),
+        "max_points": INDICATOR_MAX_POINTS,
+        "series": dict(computed.get("series", {})),
+        "indicators": nested,
+        "provenance": provenance,
+    }
 
 
 @securities_router.get("/{instrument_id}/quote", response_model=QuoteResponse)
@@ -134,12 +209,12 @@ def security_quote(
 def security_bars(
     instrument_id: str,
     timeframe: str = Query(default="1d"),
-    limit: int = Query(default=30, ge=1, le=250),
+    limit: int = Query(default=30, ge=1, le=1000),
     svc: MarketDataService = Depends(get_market_service),
     registry=Depends(get_registry),
 ):
     instrument_id = validate_instrument_id(instrument_id)
-    timeframe = _check_timeframe(timeframe)
+    timeframe = validate_timeframe(timeframe)
     try:
         inst = registry.get_by_id(instrument_id)
     except HTTPException:

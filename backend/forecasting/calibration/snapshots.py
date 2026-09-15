@@ -35,6 +35,7 @@ portable across Postgres and SQLite.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -296,10 +297,12 @@ def build_snapshot(
         assert_no_leakage(train_idx, test_idx, horizon)
         train_close = closes_feat.iloc[train_idx]
         train_feat = features.iloc[train_idx]
+        # One log-return pass per fold (shared by drift + venue drift fits).
+        train_lret = log_returns(train_close).dropna()
         try:
             drift_p: float | None = float(
                 HistoricalDriftBaseline()
-                .fit(log_returns(train_close).dropna())
+                .fit(train_lret)
                 .direction_probability(horizon).value)
         except (ValueError, TypeError):
             drift_p = None
@@ -319,7 +322,7 @@ def build_snapshot(
             try:
                 extra_p = float(
                     SseDriftBaseline()
-                    .fit(log_returns(train_close).dropna())
+                    .fit(train_lret)
                     .direction_probability(horizon).value)
             except (ValueError, TypeError):
                 extra_p = None
@@ -327,7 +330,7 @@ def build_snapshot(
             try:
                 extra_p = float(
                     EuxDriftBaseline()
-                    .fit(log_returns(train_close).dropna())
+                    .fit(train_lret)
                     .direction_probability(horizon).value)
             except (ValueError, TypeError):
                 extra_p = None
@@ -391,6 +394,22 @@ def build_snapshot(
 
     if not y_true:
         return zero()
+    # Calibration-input hygiene: score only finite (label, proba) pairs.
+    # The ensemble above only emits clipped finite probabilities, so this is
+    # normally a no-op; it guards the Brier/ECE inputs against any future
+    # non-finite leak instead of letting NaN poison the snapshot metrics.
+    scored: list[tuple[float, float]] = []
+    for _y, _p in zip(y_true, y_prob):
+        try:
+            _yf, _pf = float(_y), float(_p)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(_yf) and math.isfinite(_pf):
+            scored.append((_yf, _pf))
+    if not scored:
+        return zero()
+    y_true = [s[0] for s in scored]
+    y_prob = [s[1] for s in scored]
     n_windows = int(len(y_true))
     warning = (
         "insufficient windows (n<10): scores unreliable"

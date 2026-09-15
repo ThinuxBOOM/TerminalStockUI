@@ -19,6 +19,164 @@ function compact(v) {
 function finite(v) {
   return typeof v === "number" && Number.isFinite(v);
 }
+// ---------------------------------------------------------------------------
+// Per-market liquidity primitives (Frontend Agent 2 revamp).
+// All values stay native (no FX); missing data renders as placeholder,
+// never faked.
+// ---------------------------------------------------------------------------
+function BreadthBar({ advancers = 0, decliners = 0, unchanged = 0, total = 0, mic = "" }) {
+  const adv = Number.isFinite(Number(advancers)) && Number(advancers) > 0 ? Math.floor(Number(advancers)) : 0;
+  const dec = Number.isFinite(Number(decliners)) && Number(decliners) > 0 ? Math.floor(Number(decliners)) : 0;
+  const unch = Number.isFinite(Number(unchanged)) && Number(unchanged) > 0 ? Math.floor(Number(unchanged)) : 0;
+  let t = Number(total);
+  if (!Number.isFinite(t) || t <= 0) t = adv + dec + unch;
+  else t = Math.floor(t);
+  const advW = t > 0 ? (adv / t) * 100 : 0;
+  const decW = t > 0 ? (dec / t) * 100 : 0;
+  const unchW = t > 0 ? Math.max(0, 100 - advW - decW) : 0;
+  const label = mic ? `${mic}: ${adv} advancers, ${dec} decliners, ${unch} unchanged` : `${adv} adv / ${dec} dec / ${unch} unch`;
+  return React.createElement(
+    "div",
+    { className: "min-w-0" },
+    React.createElement(
+      "div",
+      {
+        className: "flex h-2 w-full overflow-hidden rounded bg-term-border",
+        role: "img",
+        "aria-label": label,
+        title: `adv ${adv} / dec ${dec} / unch ${unch}`
+      },
+      React.createElement("div", { className: "h-full bg-term-green", style: { width: `${advW}%` } }),
+      React.createElement("div", { className: "h-full bg-term-red", style: { width: `${decW}%` } }),
+      React.createElement("div", { className: "h-full bg-term-muted", style: { width: `${unchW}%` } })
+    ),
+    React.createElement(
+      "div",
+      { className: "mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]" },
+      React.createElement("span", { className: "text-term-green" }, "▲ ", adv),
+      React.createElement("span", { className: "text-term-red" }, "▼ ", dec),
+      React.createElement("span", { className: "text-term-muted" }, "■ ", unch)
+    )
+  );
+}
+function NativeMeter({ value, max, currency = "USD", label = "Turnover", note }) {
+  const has = finite(value);
+  const pct = has && finite(max) && max > 0 && value > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const text = has ? compact(value) : "unavailable";
+  return React.createElement(
+    "div",
+    { className: "min-w-0" },
+    React.createElement(
+      "div",
+      { className: "flex items-center justify-between gap-2 text-xs" },
+      React.createElement("span", { className: "text-term-muted" }, label),
+      React.createElement(
+        "span",
+        { className: "text-term-text", title: note ?? `${label} in native ${currency} — no FX conversion` },
+        text,
+        has ? React.createElement("span", { className: "ml-1 text-[10px] text-term-muted" }, currency) : null
+      )
+    ),
+    React.createElement(
+      "div",
+      {
+        className: "mt-1 h-1.5 w-full overflow-hidden rounded bg-term-border",
+        role: "img",
+        "aria-label": `${label}: ${has ? `${text} ${currency}` : "unavailable"}`,
+        title: has ? `${text} ${currency} (native, no FX)` : `${label} unavailable`
+      },
+      has && value > 0
+        ? React.createElement("div", { className: "h-full rounded bg-[#3b82a0]", style: { width: `${Math.max(2, pct)}%` } })
+        : null
+    )
+  );
+}
+function RangeBar({ value, max, label = "Avg range" }) {
+  const has = finite(value);
+  const pct = has && finite(max) && max > 0 && value > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const text = has ? `${value.toFixed(2)}%` : "unavailable";
+  return React.createElement(
+    "div",
+    { className: "min-w-0" },
+    React.createElement(
+      "div",
+      { className: "flex items-center justify-between gap-2 text-xs" },
+      React.createElement("span", { className: "text-term-muted" }, label),
+      React.createElement("span", { className: "text-term-text" }, text)
+    ),
+    React.createElement(
+      "div",
+      {
+        className: "mt-1 h-1.5 w-full overflow-hidden rounded bg-term-border",
+        role: "img",
+        "aria-label": `${label}: ${text}`
+      },
+      has && value > 0
+        ? React.createElement("div", { className: "h-full rounded bg-term-cyan", style: { width: `${Math.max(2, pct)}%` } })
+        : null
+    )
+  );
+}
+function LiquiditySparkline({ history, market, mic = "" }) {
+  const pts = Array.isArray(history?.points) ? history.points : [];
+  const turnoverSeries = pts.filter((p) => finite(p?.turnover)).map((p) => p.turnover);
+  const volumeSeries = pts.filter((p) => finite(p?.volume)).map((p) => p.volume);
+  const breadthSeries = pts
+    .filter((p) => Number.isFinite(Number(p?.advancers)) && Number.isFinite(Number(p?.decliners)))
+    .map((p) => Number(p.advancers) - Number(p.decliners));
+  let series = [];
+  let kind = "turnover";
+  if (turnoverSeries.length >= 2) {
+    series = turnoverSeries;
+    kind = "turnover";
+  } else if (volumeSeries.length >= 2) {
+    series = volumeSeries;
+    kind = "volume";
+  } else if (breadthSeries.length >= 2) {
+    series = breadthSeries;
+    kind = "breadth";
+  } else {
+    return React.createElement(
+      "p",
+      { className: "rounded border border-term-border p-2 text-[11px] text-term-muted", role: "status" },
+      "No history yet — sparkline unavailable (backend /liquidity/history not deployed)."
+    );
+  }
+  const W = 120;
+  const H = 28;
+  const min = Math.min(...series);
+  const max = Math.max(...series);
+  const span = max - min || 1;
+  const step = series.length > 1 ? (W - 4) / (series.length - 1) : 0;
+  const dots = series.map((v, i) => {
+    const x = 2 + i * step;
+    const y = H - 3 - ((v - min) / span) * (H - 6);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const labelMic = mic || market?.mic || history?.mic || "";
+  return React.createElement(
+    "figure",
+    { className: "min-w-0" },
+    React.createElement("figcaption", { className: "text-[10px] text-term-muted" }, `Trend (${kind})`),
+    React.createElement(
+      "svg",
+      {
+        viewBox: `0 0 ${W} ${H}`,
+        className: "w-full rounded border border-term-border bg-term-bg",
+        role: "img",
+        "aria-label": `${labelMic} ${kind} trend: ${series.map((v) => compact(v)).join(", ")}`
+      },
+      React.createElement("polyline", {
+        points: dots.join(" "),
+        fill: "none",
+        stroke: kind === "breadth" ? GREEN : "#3b82a0",
+        strokeWidth: 1.5,
+        strokeLinejoin: "round",
+        strokeLinecap: "round"
+      })
+    )
+  );
+}
 function CrossMarketChart({ markets }) {
   const rows = useMemo(() => markets ?? [], [markets]);
   const W = 360;
@@ -169,4 +327,4 @@ function MarketDetailGraphs({ rows }) {
     /* @__PURE__ */ React.createElement("text", { x: padL, y: Hv - 5, fill: MUTED, fontSize: 9 }, "max ", compact(maxVol))
   )));
 }
-export { CrossMarketChart, MarketDetailGraphs };
+export { BreadthBar, CrossMarketChart, LiquiditySparkline, MarketDetailGraphs, NativeMeter, RangeBar };

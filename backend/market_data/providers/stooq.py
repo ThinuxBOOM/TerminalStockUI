@@ -203,12 +203,11 @@ class StooqProvider:
         self._on_call = on_call  # health hook: fn(provider, latency_ms, ok)
 
     # -- internals ------------------------------------------------------
-    def _emit(self, latency_ms: float, ok: bool) -> None:
-        if self._on_call is not None:
-            try:
-                self._on_call(self.name, latency_ms, ok)  # type: ignore[misc]
-            except Exception:
-                pass
+    def _emit(self, latency_ms: float, ok: bool, *, error=None, status_code=None) -> None:
+        from .base import emit_health as _emit_health
+
+        _emit_health(self._on_call, self.name, latency_ms, ok,
+                     error=error, status_code=status_code)
 
     def _stub_quote(self, symbol: str) -> dict:
         from ..normalization import normalize_quote  # local import: no cycle
@@ -258,6 +257,13 @@ class StooqProvider:
         # transient (retry once) rather than "unknown symbol".
         if not (text or "").strip():
             raise ProviderError(NAME, "empty response")
+        # Stooq enforces an undisclosed daily request quota per key/IP and
+        # reports it as HTTP 200 with a plain-text/HTML body (never 429),
+        # e.g. "Exceeded the daily hits limit". Detect the body explicitly
+        # so quota exhaustion reads as rate-limited (retryable, breaker +
+        # health aware) instead of masquerading as "unknown symbol".
+        if "exceeded the daily hits limit" in (text or "").lower():
+            raise ProviderError(NAME, "rate limited (daily quota)")
         # Preserve the Yahoo-style symbol for registry parity, not stooq's.
         raw = parse_stooq_csv(text, symbol=upper, stooq_symbol=stooq_symbol)
         # Euronext/US currency guard: suffix-derived above; keep as parsed.
@@ -279,16 +285,17 @@ class StooqProvider:
         if not self.breaker.allow_request():
             quote = self._stub_quote(upper)
             quote["circuit_open"] = True
-            self._emit(0.0, False)
+            self._emit(0.0, False, error="circuit open (breaker)")
             return quote
 
         self.limiter.acquire()  # stub: counted, never blocks local run
         started = time.perf_counter()
         try:
             raw = self._fetch_raw(upper, market)
-        except ProviderError:
+        except ProviderError as exc:
             self.breaker.record_failure()
-            self._emit((time.perf_counter() - started) * 1000, False)
+            self._emit((time.perf_counter() - started) * 1000, False,
+                       error=f"{type(exc).__name__}: {exc}")
             quote = self._stub_quote(upper)
             quote["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
             return quote

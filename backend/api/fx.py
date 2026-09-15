@@ -41,10 +41,39 @@ _fx_provider: FXProvider | None = None
 
 
 def get_fx_provider() -> FXProvider:
-    """Singleton FX provider (override in tests via dependency_overrides)."""
+    """Singleton FX provider (override in tests via dependency_overrides).
+
+    Passive FX health: wired to the shared ProviderHealthTracker so live
+    /api/fx calls feed the same per-provider latency/error/breaker stats
+    as the equity chain (quota-aware; never raises).
+    """
     global _fx_provider
     if _fx_provider is None:
-        _fx_provider = FXProvider()
+        try:
+            from backend.api.deps import get_health_tracker as _get_ht
+
+            _tracker = _get_ht()
+        except Exception:
+            _tracker = None
+
+        def _hook(p, ms, ok, **kw):  # type: ignore[no-untyped-def]
+            if _tracker is None:
+                return
+            try:
+                _tracker.record(p, ms, ok, status_code=kw.get("status_code"),
+                                error=kw.get("error"))
+            except TypeError:
+                try:
+                    _tracker.record(p, ms, ok)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            _fx_provider = FXProvider(on_call=_hook if _tracker is not None else None)
+        except Exception:
+            _fx_provider = FXProvider()
     return _fx_provider
 
 

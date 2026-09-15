@@ -110,20 +110,27 @@ def dcf_sensitivity(
         return unavailable(DCF_STUB_FORMULA, list(sources),
                            "discount_rates must be positive finite numbers")
 
-    grid = pd.DataFrame(index=pd.Index(disc, name="discount_rate"),
+    # Vectorized grid (no Python cell loop): near-term PV per discount rate
+    # plus a broadcast Gordon terminal value; r <= gt cells stay NaN.
+    # Same arithmetic as the legacy nested loop (ascending-year summation).
+    disc_arr = np.asarray(disc, dtype=float)
+    term_arr = np.asarray(term, dtype=float)
+    years_idx = np.arange(1, years + 1, dtype=float)
+    near_term = fcf * (1.0 + g) ** years_idx
+    discount_factors = (1.0 + disc_arr)[:, None] ** years_idx[None, :]
+    pv_near = (near_term[None, :] / discount_factors).sum(axis=1)
+    fcf_n = float(near_term[-1])
+    r_grid = disc_arr[:, None]
+    gt_grid = term_arr[None, :]
+    valid = r_grid > gt_grid
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terminal = fcf_n * (1.0 + gt_grid) / (r_grid - gt_grid)
+        values = pv_near[:, None] + terminal / ((1.0 + r_grid) ** years)
+    values = np.where(valid, values, np.nan)
+    grid = pd.DataFrame(values,
+                        index=pd.Index(disc, name="discount_rate"),
                         columns=pd.Index(term, name="terminal_growth"),
                         dtype=float)
-    near_term = np.array([fcf * (1.0 + g) ** t for t in range(1, years + 1)])
-    for r in disc:
-        discount_factors = np.array([(1.0 + r) ** t for t in range(1, years + 1)])
-        pv_near = float(np.sum(near_term / discount_factors))
-        fcf_n = float(near_term[-1])
-        for gt in term:
-            if r <= gt:
-                grid.loc[r, gt] = np.nan
-            else:
-                terminal = fcf_n * (1.0 + gt) / (r - gt)
-                grid.loc[r, gt] = pv_near + terminal / ((1.0 + r) ** years)
     return MetricResult(grid, DCF_STUB_FORMULA, sources, "ok")
 
 
@@ -164,7 +171,8 @@ def peer_compare(
             notes.append(name)
             continue
         median = float(np.median(peer_vals))
-        rank_asc = 1 + sum(1 for v in peer_vals if v < t)
+        # Vectorized rank: 1 + #{peers strictly below target} (1 = lowest).
+        rank_asc = int(1 + np.sum(np.asarray(peer_vals, dtype=float) < t))
         out[name] = {"status": "ok", "target": t, "peer_median": median,
                      "peer_count": len(peer_vals),
                      "diff_vs_median": t - median, "rank_asc": rank_asc}

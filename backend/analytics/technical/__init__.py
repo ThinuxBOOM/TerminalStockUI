@@ -11,6 +11,7 @@ from .indicators import (
     volatility,
     volume_anomaly,
 )
+from .overlays import SUPPORTED_INDICATORS, compute_indicators, parse_indicators
 
 __all__ = [
     "sma",
@@ -22,4 +23,7 @@ __all__ = [
     "volatility",
     "volume_anomaly",
     "is_volume_anomaly",
+    "SUPPORTED_INDICATORS",
+    "parse_indicators",
+    "compute_indicators",
 ]

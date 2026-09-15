@@ -1,0 +1,733 @@
+import { api, coalesceInflight, getBars, getScreener } from "./client";
+import { getMarketTopRows } from "./markets";
+
+// Frontend 4+5: per-market index ("ASPI-style" benchmark) + Top-20-only
+// composite, frontend-only on top of existing quote/bars/screener and
+// /api/markets/* endpoints. No new backend routes required; the proposed
+// native endpoint shape lives in docs/API_CONTRACT.md (M9 proposal appendix)
+// for the backend team.
+//
+// Data honesty rules (same bar as the rest of the terminal):
+// - No hardcoded prices anywhere in this module (config carries SYMBOLS only).
+// - Proxy labelling: caret index symbols (^IXIC, ^FCHI, ...) are rejected by
+//   backend validate_symbol (SYMBOL_RE has no `^`), so each MIC lists
+//   frontend-safe proxy symbols. Charts ALWAYS badge proxy series as PROXY.
+// - Native currency only; Top-20 tables never rank across currencies
+//   (FX gate respected: no converted_price, no cross-market ranking).
+
+// ---------------------------------------------------------------------------
+// Benchmark registry (symbols only — never prices).
+//
+// Primary = canonical benchmark for the venue. Proxies = frontend-safe
+// symbols tried in order when the primary is unreachable (422 on `^`,
+// unknown symbol, or empty bars). XSHG needs no proxy: 000001.SS is valid
+// under the current backend alphabet.
+//
+// TODO(backend): relax validate_symbol to allow a leading `^` (or serve the
+// proposed GET /api/markets/{mic}/index) so primaries resolve directly.
+// TODO(data): confirm Euronext ETF proxy symbols (CAC.PA, IAEX.AS) against
+// the vendor feed; EWN/EWQ/EWK (iShares MSCI single-country ETFs) are the
+// last-resort proxies and are USD-denominated — the chart labels the actual
+// quote currency, never the venue currency, when a proxy is used.
+const ASPI_BENCHMARKS = {
+  XNYS: {
+    mic: "XNYS",
+    venue: "NYSE",
+    indexLabel: "NYSE Composite",
+    indexSymbol: "^NYA",
+    proxies: ["SPY"],
+    currency: "USD",
+    timezone: "America/New_York",
+    enabled: true,
+  },
+  XNAS: {
+    mic: "XNAS",
+    venue: "Nasdaq",
+    indexLabel: "Nasdaq Composite",
+    indexSymbol: "^IXIC",
+    proxies: ["QQQ"],
+    currency: "USD",
+    timezone: "America/New_York",
+    enabled: true,
+  },
+  XSHG: {
+    mic: "XSHG",
+    venue: "SSE",
+    indexLabel: "SSE Composite",
+    indexSymbol: "000001.SS",
+    proxies: [],
+    currency: "CNY",
+    timezone: "Asia/Shanghai",
+    enabled: true,
+  },
+  XPAR: {
+    mic: "XPAR",
+    venue: "Euronext Paris",
+    indexLabel: "CAC 40",
+    indexSymbol: "^FCHI",
+    proxies: ["CAC.PA", "EWQ"],
+    currency: "EUR",
+    timezone: "Europe/Paris",
+    enabled: true,
+  },
+  XAMS: {
+    mic: "XAMS",
+    venue: "Euronext Amsterdam",
+    indexLabel: "AEX",
+    indexSymbol: "^AEX",
+    proxies: ["IAEX.AS", "EWN"],
+    currency: "EUR",
+    timezone: "Europe/Amsterdam",
+    enabled: true,
+  },
+  XBRU: {
+    mic: "XBRU",
+    venue: "Euronext Brussels",
+    indexLabel: "BEL 20",
+    indexSymbol: "^BFX",
+    proxies: ["EWK"],
+    currency: "EUR",
+    timezone: "Europe/Brussels",
+    enabled: true,
+  },
+  // Extensible slot: Colombo Stock Exchange All-Share Price Index (Sri Lanka
+  // ASPI). Disabled until the venue is added to config/markets.yaml (see the
+  // M9 proposal appendix); enabling = set enabled:true + confirm the vendor
+  // index symbol. Existing 6 MICs are untouched by this entry.
+  // TODO(data): confirm the vendor symbol for the CSE ASPI (^CSE unverified).
+  XCOL: {
+    mic: "XCOL",
+    venue: "Colombo (CSE)",
+    indexLabel: "CSE All-Share Price Index (ASPI)",
+    indexSymbol: "^CSE",
+    proxies: [],
+    currency: "LKR",
+    timezone: "Asia/Colombo",
+    enabled: false,
+  },
+};
+
+const ASPI_MICS = Object.values(ASPI_BENCHMARKS)
+  .filter((b) => b.enabled)
+  .map((b) => b.mic);
+const ALL_ASPI_MICS = Object.keys(ASPI_BENCHMARKS);
+
+// Backend VALID_TIMEFRAMES (backend/security/validation.py); anything else 422s.
+const ASPI_TIMEFRAMES = ["1d", "1wk", "1mo"];
+const ASPI_LIMIT = { "1d": 90, "1wk": 52, "1mo": 36 };
+const TOP20_LIMIT = 20;
+const TOP20_BARS_LIMIT = 60;
+const TOP20_MIN_SERIES = 3;
+
+// TODO(seed-list): if neither /api/markets/{mic}/liquidity nor /api/screener
+// can serve a market, Top-20 could fall back to a curated constituent seed
+// list per MIC. Intentionally EMPTY — rendering seed symbols without live
+// rows would be fake breadth. Add symbols here only with a plan to enrich
+// every row via getQuote; until then the UI shows an honest EmptyState.
+const TOP20_SEED = {};
+
+function benchmarkForMic(mic) {
+  const upper = String(mic ?? "").trim().toUpperCase();
+  return ASPI_BENCHMARKS[upper] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Future-proof cache keys: namespaced by future user_id/tier so per-user or
+// tiered index caching can land without key migration. No auth is implemented
+// — callers pass nulls today and everything resolves to guest/free.
+// e.g. aspi:<mic>:<tf>:<userId||guest>:<tier||free>
+function normId(v, fallback) {
+  const s = String(v ?? "").trim();
+  return s !== "" ? s : fallback;
+}
+
+function aspiCacheKey(mic, timeframe = "1d", userId = null, tier = null) {
+  const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
+  const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
+  return ["aspi", m, tf, `u:${normId(userId, "guest")}`, `t:${normId(tier, "free")}`];
+}
+
+function aspiInflightKey(mic, timeframe = "1d", userId = null, tier = null) {
+  const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
+  const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
+  return `aspi:${m}:${tf}:${normId(userId, "guest")}:${normId(tier, "free")}`;
+}
+
+function top20CacheKey(mic, userId = null, tier = null) {
+  const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
+  return ["aspi-top20", m, `u:${normId(userId, "guest")}`, `t:${normId(tier, "free")}`];
+}
+
+function top20InflightKey(mic, userId = null, tier = null) {
+  const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
+  return `aspi-top20:${m}:${normId(userId, "guest")}:${normId(tier, "free")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (deterministic, covered by aspi.test.js).
+
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isRecord(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function strOrNull(v) {
+  return typeof v === "string" && v.trim() !== "" ? v : null;
+}
+
+// Candles ({time, close}) -> sorted, deduped [{t, close}]. Drops invalid
+// rows instead of zero-filling; never invents points.
+function closesFromCandles(candles) {
+  if (!Array.isArray(candles)) return [];
+  const byTime = new Map();
+  for (const c of candles) {
+    if (!isRecord(c)) continue;
+    const t = strOrNull(c.time);
+    const close = numOrNull(c.close);
+    if (t === null || close === null) continue;
+    byTime.set(t, close);
+  }
+  return [...byTime.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([t, close]) => ({ t, close }));
+}
+
+// Normalized per-market index series (what AspiChart renders).
+function normalizeAspiSeries(input) {
+  const r = isRecord(input) ? input : {};
+  const mic = String(r.mic ?? "").trim().toUpperCase() || "UNKNOWN";
+  const points = closesFromCandles(r.candles);
+  const prov = isRecord(r.provenance)
+    ? r.provenance
+    : {
+        source: "aspi:missing-provenance",
+        as_of: new Date().toISOString(),
+        delay_minutes: -1,
+        quality_grade: "U",
+        fallback_used: true,
+        missing_fields: ["provenance"],
+      };
+  return {
+    mic,
+    label: strOrNull(r.label) ?? mic,
+    symbol: strOrNull(r.symbol) ?? strOrNull(r.usedSymbol) ?? "UNKNOWN",
+    usedSymbol: strOrNull(r.usedSymbol) ?? strOrNull(r.symbol) ?? "UNKNOWN",
+    isProxy: r.isProxy === true,
+    timeframe: strOrNull(r.timeframe) ?? "1d",
+    points,
+    count: points.length,
+    start: points.length > 0 ? points[0].t : null,
+    end: points.length > 0 ? points[points.length - 1].t : null,
+    lastClose: points.length > 0 ? points[points.length - 1].close : null,
+    provenance: prov,
+    fallback_used: prov.fallback_used === true,
+  };
+}
+
+// Rebase a close series to 100 at its first point (unitless index scale).
+// Values are rounded to 6dp so rebased points stay exact for base-100
+// comparisons and SVG labels (kills FP dust like 110.00000000000001).
+function rebaseSeries(points) {
+  const clean = (Array.isArray(points) ? points : []).filter(
+    (p) => isRecord(p) && strOrNull(p.t) !== null && numOrNull(p.close ?? p.value) !== null
+  );
+  if (clean.length === 0) return [];
+  const base = Number(clean[0].close ?? clean[0].value);
+  if (!Number.isFinite(base) || base === 0) return [];
+  return clean.map((p) => ({ t: p.t, value: Math.round((Number(p.close ?? p.value) / base) * 100 * 1e6) / 1e6 }));
+}
+
+const EQUAL_WEIGHT_METHODOLOGY =
+  "Equal-weighted mean of per-constituent rebased closes (base 100 = first " +
+  "close in window). Index-weighted needs market-cap weights, which no " +
+  "current endpoint exposes — see docs/API_CONTRACT.md M9 proposal.";
+
+const CAP_WEIGHT_METHODOLOGY =
+  "Cap-weighted mean of per-constituent rebased closes (base 100), weights = " +
+  "per-symbol market-cap when every used constituent carries a finite cap; " +
+  "otherwise falls back to equal-weighted with reason=missing market-cap weights.";
+
+// Equal-weighted Top-20 composite over the UNION of dates (a constituent
+// contributes only on dates it actually traded — no forward-fill, no
+// synthetic points). Requires >= minSeries usable series and >= 2 dates.
+// opts.weights: optional {SYMBOL: marketCap} for cap-weighted mode; when
+// every used constituent has a finite cap the composite is cap-weighted,
+// otherwise it falls back to equal-weighted with an honest reason.
+function computeEqualWeightedIndex(seriesList, opts = {}) {
+  const minSeries = Number.isFinite(Number(opts.minSeries)) ? Number(opts.minSeries) : TOP20_MIN_SERIES;
+  const weights = opts?.weights && typeof opts.weights === "object" ? opts.weights : null;
+  const requested = Array.isArray(seriesList) ? seriesList.length : 0;
+  const rebased = [];
+  for (const s of Array.isArray(seriesList) ? seriesList : []) {
+    if (!isRecord(s) || !Array.isArray(s.points) || s.points.length === 0) continue;
+    const rb = rebaseSeries(s.points);
+    if (rb.length > 0) {
+      const sym = strOrNull(s.symbol) ?? "UNKNOWN";
+      let cap = null;
+      if (weights) {
+        const rawCap = weights[sym] ?? weights[String(sym).toUpperCase()];
+        const n = Number(rawCap);
+        cap = Number.isFinite(n) && n > 0 ? n : null;
+      }
+      rebased.push({ symbol: sym, points: rb, cap });
+    }
+  }
+  const useCapWeighted = weights !== null && rebased.length > 0 && rebased.every((s) => s.cap !== null);
+  const acc = new Map();
+  for (const s of rebased) {
+    const w = useCapWeighted ? s.cap : 1;
+    for (const p of s.points) {
+      const hit = acc.get(p.t) ?? { sum: 0, wsum: 0, n: 0 };
+      hit.sum += p.value * w;
+      hit.wsum += w;
+      hit.n += 1;
+      acc.set(p.t, hit);
+    }
+  }
+  const dates = [...acc.keys()].sort();
+  const weighting = useCapWeighted ? "cap-weighted" : "equal-weighted";
+  const base = {
+    points: [],
+    constituentsUsed: rebased.length,
+    constituentsRequested: requested,
+    start: dates.length > 0 ? dates[0] : null,
+    end: dates.length > 0 ? dates[dates.length - 1] : null,
+    methodology: useCapWeighted ? CAP_WEIGHT_METHODOLOGY : EQUAL_WEIGHT_METHODOLOGY,
+    weighting,
+    reason: weights !== null && !useCapWeighted ? "missing market-cap weights — fell back to equal-weighted" : null,
+  };
+  if (rebased.length < minSeries) {
+    return { ...base, reason: `only ${rebased.length} of ${requested} constituents returned bars (need ${minSeries})` };
+  }
+  if (dates.length < 2) {
+    return { ...base, reason: "fewer than 2 shared trading dates across constituents" };
+  }
+  return {
+    ...base,
+    points: dates.map((t) => {
+      const hit = acc.get(t);
+      const n = hit.n;
+      const denom = useCapWeighted ? hit.wsum : n;
+      return { t, value: Math.round((hit.sum / denom) * 1e6) / 1e6, n };
+    }),
+  };
+}
+
+function computeCapWeightedIndex(seriesList, weights, opts = {}) {
+  return computeEqualWeightedIndex(seriesList, { ...opts, weights });
+}
+
+function pickLiquidityRow(r) {
+  const rec = isRecord(r) ? r : {};
+  return {
+    symbol: strOrNull(rec.symbol) ?? "UNKNOWN",
+    company_name: strOrNull(rec.company_name),
+    currency: strOrNull(rec.currency),
+    price: numOrNull(rec.price),
+    change_pct: numOrNull(rec.change_pct),
+    volume: numOrNull(rec.volume),
+    turnover: numOrNull(rec.turnover),
+    range_pct: numOrNull(rec.range_pct),
+    market_state: strOrNull(rec.market_state),
+    market_cap: numOrNull(rec.market_cap ?? rec.marketCap ?? rec.cap),
+  };
+}
+
+function pickScreenerRow(r) {
+  const rec = isRecord(r) ? r : {};
+  return {
+    symbol: strOrNull(rec.symbol) ?? "UNKNOWN",
+    company_name: strOrNull(rec.company_name),
+    currency: strOrNull(rec.currency),
+    price: numOrNull(rec.price),
+    change_pct: numOrNull(rec.change_pct),
+    volume: numOrNull(rec.volume),
+    turnover: numOrNull(rec.turnover),
+    range_pct: numOrNull(rec.range_pct),
+    market_state: strOrNull(rec.market_state),
+    market_cap: numOrNull(rec.market_cap ?? rec.marketCap ?? rec.cap),
+  };
+}
+
+// Fill company_name/currency/market_cap gaps in liquidity rows from screener
+// results (matched by symbol). Never overwrites a present value, never
+// invents one. market_cap is the only cap-weighted opt-in (turnover ignored).
+function enrichConstituentsWithScreener(rows, screenerResults) {
+  const bySymbol = new Map();
+  for (const s of Array.isArray(screenerResults) ? screenerResults : []) {
+    if (!isRecord(s)) continue;
+    const sym = strOrNull(s.symbol);
+    if (sym !== null && !bySymbol.has(sym.toUpperCase())) bySymbol.set(sym.toUpperCase(), s);
+  }
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const rec = isRecord(row) ? { ...row } : { ...pickLiquidityRow(row) };
+    const hit = bySymbol.get(String(rec.symbol ?? "").toUpperCase());
+    if (hit) {
+      if (strOrNull(rec.company_name) === null && strOrNull(hit.company_name) !== null) {
+        rec.company_name = hit.company_name;
+      }
+      if (strOrNull(rec.currency) === null && strOrNull(hit.currency) !== null) {
+        rec.currency = String(hit.currency).trim().toUpperCase();
+      }
+      if (numOrNull(rec.market_cap) === null) {
+        const cap = numOrNull(hit.market_cap ?? hit.marketCap ?? hit.cap);
+        if (cap !== null && cap > 0) rec.market_cap = cap;
+      }
+    }
+    return rec;
+  });
+}
+
+// Top-20 selection. Preferred: liquidity rows (server-sorted by native
+// turnover). Fallback: screener rank order (direction_probability) —
+// labelled as fallback. Empty in -> empty out (seed list stays a TODO;
+// fake constituents are never rendered).
+function normalizeTop20(input = {}, micFallback = "") {
+  const r = isRecord(input) ? input : {};
+  const mic = String(r.mic ?? micFallback ?? "").trim().toUpperCase() || "UNKNOWN";
+  const limit = Math.min(50, Math.max(1, Number(r.limit ?? TOP20_LIMIT) || TOP20_LIMIT));
+  const liqRows = Array.isArray(r.liquidityRows) ? r.liquidityRows : null;
+  const scrRows = Array.isArray(r.screenerRows) ? r.screenerRows : null;
+  if (liqRows !== null && liqRows.length > 0) {
+    return {
+      mic,
+      rows: liqRows.slice(0, limit).map(pickLiquidityRow),
+      methodology: "liquidity-turnover",
+      methodologyNote:
+        `Top ${Math.min(limit, liqRows.length)} by native turnover (price x volume, no FX) ` +
+        `from GET /api/markets/${mic}/liquidity?sort=turnover&limit=${limit}.`,
+      reason: null,
+    };
+  }
+  if (scrRows !== null && scrRows.length > 0) {
+    return {
+      mic,
+      rows: scrRows.slice(0, limit).map(pickScreenerRow),
+      methodology: "screener-rank-fallback",
+      methodologyNote:
+        `Liquidity endpoint unavailable — first ${Math.min(limit, scrRows.length)} screener rows ` +
+        `(ranked by forecast direction_probability, NOT by size). Turnover-sorted ` +
+        `Top-20 needs GET /api/markets/${mic}/liquidity (see API proposal).`,
+      reason: null,
+    };
+  }
+  return {
+    mic,
+    rows: [],
+    methodology: "unavailable",
+    methodologyNote: "",
+    reason:
+      "No liquidity or screener rows for this market (TOP20_SEED is an empty " +
+      "TODO by design — constituents are never fabricated).",
+  };
+}
+
+// Merge per-series provenance envelopes into one composite envelope:
+// oldest as_of wins, sources joined, fallback sticky, missing unioned,
+// delay = max, grade = worst (fallback forces D).
+function combineAspiProvenance(entries, sourceFallback = "aspi:composite") {
+  const list = (Array.isArray(entries) ? entries : []).filter(isRecord);
+  if (list.length === 0) {
+    return {
+      source: sourceFallback,
+      as_of: new Date().toISOString(),
+      delay_minutes: -1,
+      quality_grade: "U",
+      fallback_used: true,
+      missing_fields: ["provenance"],
+    };
+  }
+  let oldest = null;
+  for (const e of list) {
+    const ms = Date.parse(e.as_of);
+    if (Number.isFinite(ms) && (oldest === null || ms < oldest)) oldest = ms;
+  }
+  const sources = [...new Set(list.map((e) => String(e.source ?? "unknown")))].sort();
+  const fallback = list.some((e) => e.fallback_used === true);
+  const missing = [...new Set(list.flatMap((e) => (Array.isArray(e.missing_fields) ? e.missing_fields : []).map(String)))].sort();
+  const delays = list.map((e) => Number(e.delay_minutes)).filter((n) => Number.isFinite(n));
+  const rank = { A: 0, B: 1, C: 2, D: 3, U: 4 };
+  let grade = "U";
+  let worst = -1;
+  for (const e of list) {
+    const g = String(e.quality_grade ?? "U").trim().toUpperCase();
+    const r = rank[g] ?? 4;
+    if (r > worst) {
+      worst = r;
+      grade = rank[g] !== undefined ? g : "U";
+    }
+  }
+  return {
+    source: sources.join("+") || sourceFallback,
+    as_of: oldest !== null ? new Date(oldest).toISOString() : new Date().toISOString(),
+    delay_minutes: delays.length > 0 ? Math.max(...delays) : -1,
+    quality_grade: fallback ? "D" : grade,
+    fallback_used: fallback,
+    missing_fields: missing,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fetchers (frontend-only; existing endpoints only).
+
+function httpStatus(err) {
+  const e = err;
+  const s = e?.response?.status ?? e?.status;
+  return typeof s === "number" ? s : null;
+}
+
+function isEndpointMissingError(err) {
+  const s = httpStatus(err);
+  return s === 404 || s === 501;
+}
+
+// Per-market benchmark series. Prefers the native backend endpoint
+// GET /api/markets/{mic}/index (server-side proxy chain, same symbols as
+// below); falls back to the frontend getBars proxy chain when the endpoint
+// is missing (404/501) so older backends keep working. A 422 on `^`-symbols
+// falls through to the proxy chain. Zero-candle successes count as a miss.
+function normalizeNativeIndexSeries(raw, micFallback = "") {
+  const r = isRecord(raw) ? raw : {};
+  const mic = String(r.mic ?? micFallback ?? "").trim().toUpperCase() || "UNKNOWN";
+  const listRaw = Array.isArray(r.points) ? r.points : [];
+  const candles = [];
+  for (const p of listRaw) {
+    if (!isRecord(p)) continue;
+    const t = strOrNull(p.t);
+    const close = numOrNull(p.close ?? p.value);
+    if (t === null || close === null) continue;
+    // Native points carry close only; synthesize flat OHLC so the shared
+    // closesFromCandles path stays exact (no invented range).
+    candles.push({ time: t, open: close, high: close, low: close, close });
+  }
+  return normalizeAspiSeries({
+    mic,
+    label: strOrNull(r.label) ?? mic,
+    symbol: strOrNull(r.symbol) ?? strOrNull(r.usedSymbol) ?? "UNKNOWN",
+    usedSymbol: strOrNull(r.usedSymbol) ?? strOrNull(r.symbol) ?? "UNKNOWN",
+    isProxy: r.is_proxy === true || r.isProxy === true,
+    timeframe: strOrNull(r.timeframe) ?? "1d",
+    candles,
+    provenance: isRecord(r.provenance) ? r.provenance : undefined,
+  });
+}
+
+async function getAspiSeries(mic, timeframe = "1d", opts = {}) {
+  const cfg = benchmarkForMic(mic);
+  if (!cfg || cfg.enabled !== true) {
+    throw new Error(`no benchmark configured for market ${String(mic ?? "").trim().toUpperCase() || "UNKNOWN"}`);
+  }
+  const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
+  const limit = ASPI_LIMIT[tf] ?? 90;
+  const userId = opts?.userId ?? null;
+  const tier = opts?.tier ?? null;
+  const signal = opts?.signal;
+  return coalesceInflight(aspiInflightKey(cfg.mic, tf, userId, tier), async () => {
+    // Native endpoint first (backend owns the proxy chain + provenance).
+    try {
+      const { data } = await api.get(`/api/markets/${encodeURIComponent(cfg.mic)}/index`, {
+        params: { timeframe: tf },
+        timeout: 60000,
+        ...(signal ? { signal } : {}),
+      });
+      const native = normalizeNativeIndexSeries(data, cfg.mic);
+      if (native.points.length > 0) return native;
+    } catch (err) {
+      if (!isEndpointMissingError(err)) {
+        // 422 (disabled venue) and 502 (all candidates failed) are honest
+        // backend answers — fall through to the frontend chain only when the
+        // endpoint itself is missing; otherwise surface the backend detail
+        // via the frontend chain attempt below (which carries the same
+        // symbols) unless it also fails.
+        if (httpStatus(err) === 422 || httpStatus(err) === 502) {
+          // Fall through to frontend chain for a second opinion; if that
+          // also fails, prefer the backend's explicit detail.
+          try {
+            return await getAspiSeriesViaBars(cfg, tf, limit, signal);
+          } catch {
+            throw err;
+          }
+        }
+      }
+      // 404/501 or network: frontend chain below.
+      try {
+        return await getAspiSeriesViaBars(cfg, tf, limit, signal);
+      } catch (chainErr) {
+        // If the native call failed with something other than missing, keep
+        // the chain error (it tried every proxy); otherwise rethrow chain.
+        throw chainErr;
+      }
+    }
+    return getAspiSeriesViaBars(cfg, tf, limit, signal);
+  });
+}
+
+async function getAspiSeriesViaBars(cfg, tf, limit, signal) {
+  const candidates = [
+    { symbol: cfg.indexSymbol, isProxy: false },
+    ...(Array.isArray(cfg.proxies) ? cfg.proxies : []).map((p) => ({ symbol: p, isProxy: true })),
+  ];
+  let lastError = null;
+  let sawEmpty = false;
+  for (const c of candidates) {
+    try {
+      const bars = await getBars(c.symbol, tf, limit, signal ? { signal } : undefined);
+      const candles = Array.isArray(bars?.candles) ? bars.candles : [];
+      if (candles.length === 0) {
+        sawEmpty = true;
+        continue;
+      }
+      return normalizeAspiSeries({
+        mic: cfg.mic,
+        label: `${cfg.venue} — ${cfg.indexLabel}`,
+        symbol: bars.symbol ?? c.symbol,
+        usedSymbol: c.symbol,
+        isProxy: c.isProxy,
+        timeframe: bars.timeframe ?? tf,
+        candles,
+        provenance: bars.provenance,
+      });
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error(
+    sawEmpty
+      ? `index bars empty for ${cfg.mic} (${cfg.indexSymbol}) — no proxy configured`
+      : `index unavailable for ${cfg.mic}`
+  );
+}
+
+// Top-20 constituents for a market. Preferred path: server-side
+// turnover-sorted liquidity rows (limit 20) enriched with company/currency
+// from the screener. Fallback path (liquidity endpoint missing): screener
+// rank order, honestly labelled. Other errors propagate to ErrorState.
+async function getTop20Constituents(mic, opts = {}) {
+  const upper = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
+  const userId = opts?.userId ?? null;
+  const tier = opts?.tier ?? null;
+  const signal = opts?.signal;
+  return coalesceInflight(top20InflightKey(upper, userId, tier), async () => {
+    try {
+      const liq = await getMarketTopRows(upper, { limit: TOP20_LIMIT, sort: "turnover" });
+      const liqRows = Array.isArray(liq?.rows) ? liq.rows : [];
+      let screenerResults = [];
+      try {
+        const screen = await getScreener(
+          { market: upper, minDirection: 0, limit: 50 },
+          signal ? { signal } : undefined
+        );
+        screenerResults = Array.isArray(screen?.results) ? screen.results : [];
+      } catch {
+        screenerResults = [];
+      }
+      const picked = normalizeTop20({ mic: upper, liquidityRows: liqRows, limit: TOP20_LIMIT }, upper);
+      // Honesty override: getMarketTopRows itself falls back to a
+      // client-side screener computation (quality D, no turnover/volume)
+      // when the liquidity endpoint is missing. A turnover-sorted claim
+      // would be false there — relabel as screener-rank fallback.
+      const liqFallback = liq?.provenance?.fallback_used === true;
+      const anyTurnover = picked.rows.some((r) => numOrNull(r.turnover) !== null);
+      const relabelled =
+        picked.methodology === "liquidity-turnover" && liqFallback && !anyTurnover
+          ? {
+              ...picked,
+              methodology: "screener-rank-fallback",
+              methodologyNote:
+                `Liquidity endpoint unavailable (client screener fallback, quality D) — ` +
+                `first ${picked.rows.length} screener rows (ranked by forecast ` +
+                `direction_probability, NOT by size). Turnover-sorted Top-20 needs ` +
+                `GET /api/markets/${upper}/liquidity (see API proposal).`,
+            }
+          : picked;
+      return {
+        ...relabelled,
+        rows: enrichConstituentsWithScreener(relabelled.rows, screenerResults),
+        provenance: isRecord(liq?.provenance) ? liq.provenance : combineAspiProvenance([], `aspi-top20:${upper}`),
+        fallback_used: liqFallback,
+      };
+    } catch (err) {
+      if (!isEndpointMissingError(err)) throw err;
+      const screen = await getScreener(
+        { market: upper, minDirection: 0, limit: 50 },
+        signal ? { signal } : undefined
+      );
+      const picked = normalizeTop20(
+        { mic: upper, screenerRows: Array.isArray(screen?.results) ? screen.results : [], limit: TOP20_LIMIT },
+        upper
+      );
+      return {
+        ...picked,
+        provenance: combineAspiProvenance([], `client-fallback:screener-rank:${upper}`),
+        fallback_used: true,
+      };
+    }
+  });
+}
+
+// Bars for each Top-20 constituent (for the equal-weighted composite).
+// allSettled: one bad symbol never kills the composite; skips are reported.
+async function getTop20Bars(symbols, timeframe = "1d", opts = {}) {
+  const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
+  const limit = Math.min(ASPI_LIMIT[tf] ?? 90, TOP20_BARS_LIMIT);
+  const signal = opts?.signal;
+  const clean = [...new Set((Array.isArray(symbols) ? symbols : []).map((s) => String(s ?? "").trim()).filter(Boolean))].slice(
+    0,
+    TOP20_LIMIT
+  );
+  const settled = await Promise.allSettled(
+    clean.map((sym) => getBars(sym, tf, limit, signal ? { signal } : undefined))
+  );
+  const series = [];
+  const skipped = [];
+  settled.forEach((s, i) => {
+    const sym = clean[i];
+    if (s.status !== "fulfilled") {
+      skipped.push({ symbol: sym, reason: s.reason instanceof Error ? s.reason.message : String(s.reason ?? "bars failed") });
+      return;
+    }
+    const points = closesFromCandles(s.value?.candles);
+    if (points.length === 0) {
+      skipped.push({ symbol: sym, reason: "no bars returned" });
+      return;
+    }
+    series.push({ symbol: s.value?.symbol ?? sym, points, provenance: s.value?.provenance ?? null });
+  });
+  return { series, skipped };
+}
+
+export {
+  ALL_ASPI_MICS,
+  ASPI_BENCHMARKS,
+  ASPI_LIMIT,
+  ASPI_MICS,
+  ASPI_TIMEFRAMES,
+  CAP_WEIGHT_METHODOLOGY,
+  EQUAL_WEIGHT_METHODOLOGY,
+  TOP20_LIMIT,
+  TOP20_MIN_SERIES,
+  TOP20_SEED,
+  aspiCacheKey,
+  aspiInflightKey,
+  benchmarkForMic,
+  closesFromCandles,
+  combineAspiProvenance,
+  computeCapWeightedIndex,
+  computeEqualWeightedIndex,
+  enrichConstituentsWithScreener,
+  getAspiSeries,
+  getTop20Bars,
+  getTop20Constituents,
+  normalizeAspiSeries,
+  normalizeNativeIndexSeries,
+  normalizeTop20,
+  rebaseSeries,
+  top20CacheKey,
+  top20InflightKey,
+};

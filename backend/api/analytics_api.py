@@ -13,9 +13,10 @@ from __future__ import annotations
 import math
 
 import pandas as pd
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from backend.analytics.common import MetricResult
+from backend.analytics.technical.overlays import compute_indicators, parse_indicators
 from backend.analytics.fundamentals import (
     debt_to_assets,
     debt_to_equity,
@@ -46,6 +47,7 @@ from backend.market_data.service import MarketDataService
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 BAR_LIMIT = 120
+INDICATOR_MAX_POINTS = 1000
 EMPTY_STATEMENTS: dict = {}
 NOTE = (
     "Statement feed not wired in M3: fundamentals/quality/valuation report "
@@ -173,6 +175,10 @@ def _valuation_bundle() -> dict:
 @router.get("/{symbol}")
 def get_analytics(
     symbol: str,
+    indicators: str | None = Query(
+        default=None,
+        description="Comma-separated overlays, e.g. SMA20,EMA12,RSI14,MACD,BB20,VWAP,ATR14",
+    ),
     svc: MarketDataService = Depends(get_market_service),
 ) -> dict:
     """Deterministic analytics for one symbol (technical live, statements unavailable)."""
@@ -181,6 +187,16 @@ def get_analytics(
     sym = (symbol or "").strip().upper()
     if not sym:
         raise _HTTPException(status_code=422, detail="symbol must be a non-empty string")
+    # Overlay request parsing (Backend Agent 5 contract): comma-separated,
+    # validated; unknown -> 422 with the exact detail string. Blank/omitted
+    # means no overlay work (backward compat: no `indicators` key).
+    if indicators is None or not str(indicators).strip():
+        wanted: list[str] = []
+    else:
+        try:
+            wanted = parse_indicators(indicators)
+        except ValueError as exc:
+            raise _HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         bars = svc.get_bars(sym, timeframe="1d", limit=BAR_LIMIT)
     except _HTTPException:
@@ -217,7 +233,7 @@ def get_analytics(
     if frame.empty or len(frame) < 2:
         raise _HTTPException(status_code=422, detail=f"insufficient history for {sym!r}: {len(frame)} bars")
     provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}
-    return {
+    out: dict = {
         "symbol": sym,
         "as_of": str(provenance.get("as_of")),
         "provenance": provenance,
@@ -228,3 +244,12 @@ def get_analytics(
         "note": NOTE,
         "disclosure": DISCLOSURE,
     }
+    if wanted:
+        try:
+            computed = compute_indicators(frame, wanted, max_points=INDICATOR_MAX_POINTS)
+        except ValueError as exc:
+            raise _HTTPException(status_code=422, detail=str(exc)) from exc
+        payload: dict = dict(computed)
+        payload["provenance"] = provenance
+        out["indicators"] = payload
+    return out

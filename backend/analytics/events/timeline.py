@@ -12,6 +12,7 @@ downgrade quality to "degraded" with a reason.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -98,7 +99,24 @@ def normalize_events(
         if date is None or pd.isna(date):
             dropped += 1
             continue
-        factor = _parse_split_factor(row) if event_type == "split" else None
+        if event_type == "split":
+            # A split row without a positive finite adjustment factor cannot
+            # adjust prices (and a null factor would silently skip the split).
+            # Drop + count it instead of emitting an unusable row.
+            factor = _parse_split_factor(row)
+            try:
+                factor_ok = (
+                    factor is not None
+                    and math.isfinite(float(factor))
+                    and float(factor) > 0
+                )
+            except (TypeError, ValueError):
+                factor_ok = False
+            if not factor_ok:
+                dropped += 1
+                continue
+        else:
+            factor = None
         canada.append({
             "date": date,
             "event_type": event_type,

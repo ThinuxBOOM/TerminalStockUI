@@ -68,6 +68,16 @@ def _create_engine(url: str):
         return create_engine(
             url, future=True, connect_args={"check_same_thread": False}
         )
+    # Delegate pooled-endpoint detection to the supabase helper when
+    # available (single source of truth for :6543/?pgbouncer); fall back to
+    # the local check so a broken helper never breaks engine creation.
+    try:
+        from backend.db.supabase import create_supabase_engine, is_supabase_pooled
+
+        if is_supabase_pooled(url) or _is_serverless_postgres(url):
+            return create_supabase_engine(url)
+    except Exception:
+        pass
     pooled = _is_serverless_postgres(url)
     url = _normalize_postgres_url(url)
     # psycopg3 rejects ?pgbouncer=true as a libpq option — it is a

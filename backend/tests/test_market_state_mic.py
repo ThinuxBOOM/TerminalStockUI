@@ -37,6 +37,13 @@ def _svc_with_fixed_as_of(fixed_as_of: datetime) -> MarketDataService:
 
     Wraps the real stub so price/currency/missing-field shape stays
     realistic; only ``as_of`` is pinned for determinism.
+
+    Also neutralizes the quote-snapshot read-through: on the fallback path
+    get_quote prefers the last LIVE snapshot from the CWD sqlite DB, which
+    would discard the pinned ``as_of`` and make results depend on whatever
+    rows earlier runs left behind (e.g. a same-day AAPL snapshot turns the
+    stale test below into "closed"). Snapshot persistence itself is covered
+    by the snapshot tests; here it is orthogonal noise.
     """
     tracker = ProviderHealthTracker()
     provider = YFinanceProvider(
@@ -45,6 +52,10 @@ def _svc_with_fixed_as_of(fixed_as_of: datetime) -> MarketDataService:
     svc = MarketDataService(
         registry=InstrumentRegistry(), provider=provider, health=tracker, cache=None
     )
+    try:
+        svc._read_quote_snapshot = lambda *a, **k: None  # type: ignore[method-assign]
+    except Exception:
+        pass
     orig_get = provider.get_quote
 
     def _fixed(symbol: str, *a, **k):  # type: ignore[no-untyped-def]

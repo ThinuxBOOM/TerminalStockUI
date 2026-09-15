@@ -101,3 +101,27 @@ def test_blend_rejects_bad_quant():
         blend_forecast(1.5, _opinion(0.5))
     with pytest.raises(ValueError):
         blend_forecast(float("nan"), _opinion(0.5))
+
+
+def test_stub_opinion_blends_like_any_opinion():
+    """Resilience stubs (timeout/circuit/no-key) still blend bounded."""
+    from backend.ai.providers.base import build_stub_opinion
+
+    from backend.ai.evidence import build_evidence_packet
+
+    packet = build_evidence_packet(
+        "AAPL",
+        {"top_bullish": [{"label": "trend"}], "summary": {"rsi": 55}},
+        {"source": "yfinance", "quality_grade": "B", "delay_minutes": 15},
+    )
+    stub = build_stub_opinion(packet, provider="gemini", model="gemini-3.7-flash",
+                              horizon=21, reason="router fallback: TimeoutError")
+    assert stub.stub is True
+    out = blend_forecast(0.64, stub, ai_weight=0.2, ai_enabled=True)
+    assert out["ai_applied"] is True
+    assert abs(out["blended_prob"] - 0.64) <= AI_WEIGHT_MAX + 1e-9
+    assert out["ai_weight"] <= AI_WEIGHT_MAX
+    # Disabled path still passes the quant core through intact.
+    off = blend_forecast(0.64, stub, ai_weight=0.2, ai_enabled=False)
+    assert off["blended_prob"] == pytest.approx(0.64)
+    assert off["ai_applied"] is False

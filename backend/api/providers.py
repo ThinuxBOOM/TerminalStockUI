@@ -17,50 +17,182 @@ PROBE_SYMBOL = "AAPL"
 #: bloat the health tracker with unbounded provider keys.
 MARKET_DATA_PROBE_PROVIDERS = ("yfinance", "akshare", "alpaca", "stooq")
 
+#: Additional data providers probeable via the same endpoint (free-tier
+#: gap-fillers + FX single-pair ping). Kept separate so the legacy
+#: MARKET_DATA_PROBE_PROVIDERS allow-list stays untouched.
+EXTENDED_DATA_PROBE_PROVIDERS = ("finnhub", "twelvedata", "fx")
+
+#: AI providers probeable via the same endpoint (lightweight model-list
+#: ping, no completion = no costly call). Never returns key material.
+AI_PROBE_PROVIDERS = ("gemini", "openai", "anthropic", "xai")
+
+#: Every name accepted by POST /api/providers/health/test.
+ALL_PROBE_PROVIDERS = (
+    MARKET_DATA_PROBE_PROVIDERS + EXTENDED_DATA_PROBE_PROVIDERS + AI_PROBE_PROVIDERS
+)
+
+#: Authenticated providers get an extra ``configured`` flag on health rows
+#: (free-tier data providers need no key, so they are always True).
+_AUTH_PROBE_PROVIDERS = frozenset(
+    {"alpaca", "finnhub", "twelvedata", "gemini", "openai", "anthropic", "xai"}
+)
+
+
+def _configured_for(name: str) -> bool | None:
+    """Read-only configured flag for authenticated providers. Never raises,
+    never returns key material. None when the check itself is unavailable."""
+    try:
+        key = str(name or "").strip().lower()
+    except Exception:
+        return None
+    if key not in _AUTH_PROBE_PROVIDERS:
+        return True  # free-tier: nothing to configure
+    if key in ("gemini", "openai", "anthropic", "xai"):
+        try:
+            return bool(_is_configured(key))
+        except Exception:
+            return None
+    try:
+        if key == "alpaca":
+            from backend.market_data.providers.alpaca import AlpacaProvider
+
+            return bool(AlpacaProvider().configured)
+        if key == "finnhub":
+            from backend.market_data.providers.finnhub_free import FinnhubProvider
+
+            return bool(FinnhubProvider().configured)
+        if key == "twelvedata":
+            from backend.market_data.providers.twelvedata_free import TwelveDataProvider
+
+            return bool(TwelveDataProvider().configured)
+    except Exception:
+        return None
+    return None
+
+
+def _enriched_stat(tracker: ProviderHealthTracker, name: str) -> dict:
+    """tracker.stats(name) + read-only ``configured`` for auth providers."""
+    try:
+        stats = tracker.stats(name)
+    except Exception:
+        stats = {
+            "provider": name, "kind": "unknown", "state": "unknown",
+            "latency_p50_ms": 0.0, "latency_p95_ms": 0.0,
+            "error_rate_1h": 0.0, "error_rate_5m": 0.0,
+            "calls_1h": 0, "calls_5m": 0, "total_calls": 0,
+            "circuit": "closed", "last_check": None, "last_success": None,
+            "consecutive_failures": 0,
+            "quota": {"limited": False, "reason": None, "status_code": None,
+                      "updated_at": None, "auth_required": name in _AUTH_PROBE_PROVIDERS},
+        }
+    if stats.get("total_calls", 0) == 0:
+        stats = {**stats, "provider": name}
+    if name in _AUTH_PROBE_PROVIDERS:
+        try:
+            stats["configured"] = _configured_for(name)
+        except Exception:
+            pass
+    return stats
+
 
 @router.get("/health")
 def providers_health(tracker: ProviderHealthTracker = Depends(get_health_tracker)):
-    """GET /api/providers/health -> per-provider latency/error/circuit state."""
-    stats = tracker.all_stats()
-    if not stats:
-        stats = [{
+    """GET /api/providers/health -> per-provider latency/error/circuit state.
+
+    Backward-compatible shape ``{"providers": [...]}``; each row keeps the
+    legacy keys (provider/latency_p50_ms/latency_p95_ms/error_rate_1h/
+    calls_1h/total_calls/circuit/last_check) and adds kind/state/
+    error_rate_5m/calls_5m/last_success/consecutive_failures/quota
+    (+ configured for authenticated providers). Rows cover every known
+    provider even before their first call. Read-only: never probes, never
+    blocks on upstream networks.
+    """
+    try:
+        from backend.market_data.health import KNOWN_PROVIDERS as _KNOWN
+    except Exception:
+        _KNOWN = ALL_PROBE_PROVIDERS
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for _name in _KNOWN:
+        try:
+            rows.append(_enriched_stat(tracker, _name))
+        except Exception:
+            continue
+        seen.add(_name)
+    try:
+        for extra in tracker.all_stats() or []:
+            try:
+                pname = str(extra.get("provider", "unknown"))
+            except Exception:
+                continue
+            if pname not in seen:
+                seen.add(pname)
+                if pname in _AUTH_PROBE_PROVIDERS and "configured" not in extra:
+                    try:
+                        extra = dict(extra)
+                        extra["configured"] = _configured_for(pname)
+                    except Exception:
+                        pass
+                rows.append(extra)
+    except Exception:
+        pass
+    if not rows:
+        rows = [{
             "provider": "yfinance", "latency_p50_ms": 0.0, "latency_p95_ms": 0.0,
             "error_rate_1h": 0.0, "calls_1h": 0, "total_calls": 0,
             "circuit": "closed", "last_check": None,
         }]
-    return {"providers": stats}
+    rows.sort(key=lambda r: str(r.get("provider", "unknown")))
+    return {"providers": rows}
 
 
 @router.post("/health/test")
 def test_provider(provider: str = "yfinance", svc=Depends(get_market_service)):
-    """Health probe: fetch a reference quote and return the fresh stats."""
+    """Health probe: lightweight per-provider ping + fresh enriched stats.
+
+    Data providers: single quote (AAPL) / single FX pair (EUR/USD) ping —
+    no history fan-out, no costly calls. AI providers: model-list ping
+    (no completion). Results are recorded into the shared tracker (passive-
+    compatible metrics with quota context: 429 -> degraded, not down).
+    Unknown names are rejected (422) to bound tracker keys.
+    """
     from fastapi import HTTPException as _HTTPException
 
-    from ..market_data.providers.base import ProviderError as _ProviderError
-
     name = (provider or "").strip().lower() or "yfinance"
-    if name not in MARKET_DATA_PROBE_PROVIDERS:
+    if name not in ALL_PROBE_PROVIDERS:
         raise _HTTPException(
             status_code=422,
-            detail=f"unknown provider; expected one of {list(MARKET_DATA_PROBE_PROVIDERS)}",
+            detail=f"unknown provider; expected one of {list(ALL_PROBE_PROVIDERS)}",
         )
+    _ = svc  # kept dependency (override seam); probing is per-provider below.
     try:
-        svc.get_quote(PROBE_SYMBOL)
+        tracker = get_health_tracker()
+    except Exception as exc:
+        raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
+    try:
+        from backend.market_data.health import probe_provider as _probe
+    except Exception as exc:
+        raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
+    try:
+        stats = _probe(name, tracker, timeout_s=5.0)
     except _HTTPException:
         raise
-    except _ProviderError as exc:
-        raise _HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         raise _HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
     try:
-        tracker = get_health_tracker()
-        stats = tracker.stats(name)
+        if not isinstance(stats, dict) or "provider" not in stats:
+            stats = tracker.stats(name)
     except Exception as exc:
         raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
-    if stats["total_calls"] == 0:
+    if stats.get("total_calls", 0) == 0:
         stats = {**stats, "provider": name}
+    if name in _AUTH_PROBE_PROVIDERS and "configured" not in stats:
+        try:
+            stats["configured"] = _configured_for(name)
+        except Exception:
+            pass
     return stats
 
 

@@ -23,14 +23,17 @@ from backend.workers.jobs import (
 
 
 def test_job_registry_lists_four_jobs():
-    assert set(JOB_REGISTRY) == {
+    # Original four jobs are always registered; Agent 3 adds snapshot/scoring
+    # jobs alongside (superset, never a rename/removal).
+    assert {
         "ingest_bars",
         "refresh_forecast",
         "evaluate_alerts",
         "generate_report",
-    }
+    } <= set(JOB_REGISTRY)
+    assert {"capture_snapshot", "score_forecasts"} <= set(JOB_REGISTRY)
     assert sorted(JOB_NAMES) == sorted(JOB_REGISTRY)
-    assert len(JOB_REGISTRY) == 4
+    assert len(JOB_REGISTRY) == 6
 
 
 def _assert_provenance(result: dict, job: str):

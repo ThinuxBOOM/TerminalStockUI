@@ -96,22 +96,30 @@ def test_pooled_engine_disables_prepared_statements(monkeypatch):
     from sqlalchemy.pool import NullPool
 
     import backend.db.session as sess
+    import backend.db.supabase as supabase_module
 
+    # Spy at the real call site: the pooled path delegates to
+    # supabase.create_supabase_engine, which uses ITS OWN create_engine
+    # reference — patching sess.create_engine never fires. Reset the
+    # engine cache first so get_engine actually constructs (no stale
+    # cached engine from an earlier test short-circuits the spy).
+    sess.reset_engine()
     captured: dict = {}
-    real_create = sess.create_engine
+    real_create = supabase_module.create_engine
 
     def _fake(url, **kwargs):
         captured.clear()
         captured.update(kwargs)
         return real_create(url, **kwargs)
 
-    monkeypatch.setattr(sess, "create_engine", _fake)
+    monkeypatch.setattr(supabase_module, "create_engine", _fake)
     engine = sess.get_engine(POOLED)
     try:
         assert captured.get("poolclass") is NullPool
         assert captured.get("connect_args") == {"prepare_threshold": None}
     finally:
         engine.dispose()
+        sess.reset_engine()
 
 
 def test_direct_engine_keeps_default_prepares(monkeypatch):

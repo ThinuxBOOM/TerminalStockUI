@@ -145,3 +145,90 @@ def test_verify_chain_catches_tamper_and_gap(tmp_path):
         rows = db.execute(select(AuditLog).order_by(AuditLog.id)).scalars().all()
         rows[1].payload = {"tampered": True}
         assert not verify_rows(rows)["ok"]
+
+
+# --- Agent 6: enriched aggregation, state matrix, alert hook -------------------
+
+def test_aggregate_preserves_quota_state_passthrough():
+    from backend.observability.provider_metrics import aggregate_provider_calls
+
+    now = datetime.now(timezone.utc)
+    calls = [{"latency_ms": 120, "ok": True, "t": now}]
+    quota = {"limited": True, "reason": "rate_limited", "status_code": 429,
+             "updated_at": now.isoformat(), "auth_required": False}
+    stats = aggregate_provider_calls("yfinance", calls, circuit="closed",
+                                     quota=quota, state="degraded",
+                                     last_success=now.isoformat(),
+                                     consecutive_failures=0)
+    assert stats["kind"] == "data"
+    assert stats["state"] == "degraded"
+    assert stats["quota"]["limited"] is True
+    assert stats["quota"]["status_code"] == 429
+    assert stats["last_success"] == now.isoformat()
+    assert stats["consecutive_failures"] == 0
+    # Legacy keys intact.
+    assert stats["latency_p50_ms"] > 0 and stats["error_rate_1h"] == 0.0
+
+
+def test_derive_state_matrix_data_vs_ai():
+    from backend.observability.provider_metrics import derive_state
+
+    assert derive_state(kind="data", total=0) == "unknown"
+    assert derive_state(kind="ai", total=0, quota_limited=True,
+                        quota_reason="unconfigured") == "unconfigured"
+    assert derive_state(kind="data", total=10, circuit="open") == "down"
+    assert derive_state(kind="data", total=10, circuit="open", quota_limited=True,
+                        quota_reason="rate_limited") == "degraded"
+    assert derive_state(kind="data", total=10, circuit="half-open") == "degraded"
+    assert derive_state(kind="ai", total=10, quota_limited=True,
+                        quota_reason="unconfigured") == "unconfigured"
+    assert derive_state(kind="data", total=10, error_5m=0.5, calls_5m=10) == "degraded"
+    assert derive_state(kind="data", total=10) == "up"
+
+
+def test_emit_alert_never_raises_and_throttles_audit():
+    from backend.observability.provider_metrics import emit_alert
+
+    emit_alert("yfinance", "high_error_rate", "test alert",
+               {"state": "degraded", "circuit": "closed", "error_rate_5m": 0.5,
+                "calls_5m": 10, "consecutive_failures": 3})
+    # Immediate repeat: log fires, audit throttled — still never raises.
+    emit_alert("yfinance", "high_error_rate", "test alert",
+               {"state": "degraded", "circuit": "closed"})
+    emit_alert("xai", "weird", "x" * 5000, {"unserializable": object()})
+
+
+def test_dashboard_enriched_rows_and_quota_alert():
+    from backend.observability.dashboard import KNOWN_PROVIDERS, build_dashboard
+
+    tracker = ProviderHealthTracker()
+    tracker.record("yfinance", 120, True)
+    for _ in range(6):
+        tracker.record("stooq", 80, False, status_code=429, error="rate limited (429)")
+    data = build_dashboard(tracker)
+    by_name = {p["provider"]: p for p in data["providers"]}
+    for name in KNOWN_PROVIDERS:
+        assert name in by_name, f"dashboard missing {name}"
+        for key in ("kind", "state", "error_rate_5m", "calls_5m", "last_success",
+                    "consecutive_failures", "quota"):
+            assert key in by_name[name], f"{name} missing {key!r}"
+    assert by_name["yfinance"]["kind"] == "data"
+    assert by_name["gemini"]["kind"] == "ai"
+    stooq = by_name["stooq"]
+    assert stooq["quota"]["limited"] is True
+    assert stooq["state"] == "degraded"
+    assert any(a["reason"] == "quota_limited" and a["provider"] == "stooq"
+               for a in data["alerts"])
+    assert "stooq" in data["summary"]["degraded_providers"]
+    assert data["summary"]["degraded"] is True
+
+
+def test_dashboard_half_open_warns_not_critical():
+    tracker = ProviderHealthTracker()
+    tracker.record("fx", 50, True)
+    tracker.set_circuit("fx", "half-open")
+    data = build_dashboard(tracker)
+    assert any(a["reason"] == "circuit_half_open" and a["provider"] == "fx"
+               for a in data["alerts"])
+    assert not any(a["reason"] == "circuit_open" and a["provider"] == "fx"
+                   for a in data["alerts"])

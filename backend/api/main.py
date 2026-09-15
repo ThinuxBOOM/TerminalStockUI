@@ -73,6 +73,8 @@ from backend.api.alerts import router as alerts_router
 from backend.api.cron import router as cron_router
 from backend.api.fx import router as fx_router
 from backend.api.markets import router as markets_router
+from backend.api.liquidation_proxy import router as liquidation_router
+from backend.api.market_index import router as market_index_router
 from backend.api.screener import router as screener_router
 
 
@@ -153,6 +155,8 @@ def create_app() -> FastAPI:
     app.include_router(fx_router)
     app.include_router(screener_router)
     app.include_router(markets_router)
+    app.include_router(liquidation_router)
+    app.include_router(market_index_router)
 
     @app.get("/", tags=["health"])
     def root() -> dict:

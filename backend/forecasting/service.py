@@ -34,8 +34,12 @@ from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.features.features import (
     FEATURE_VERSION,
     build_extended_features,
+    build_feature_bundle,
     build_features,
+    clear_feature_cache,
+    corporate_action_flags,
     log_returns,
+    thin_liquidity_flags,
 )
 from backend.forecasting.features.sse import (
     SSE_FEATURE_VERSION,
@@ -210,6 +214,10 @@ def clear_forecast_cache() -> None:  # test hook
     except Exception:
         pass
     try:
+        clear_feature_cache()
+    except Exception:
+        pass
+    try:
         _cached_target_date.cache_clear()
     except Exception:
         pass
@@ -233,15 +241,71 @@ def _cap_stub_confidence(level: str, provenance: dict) -> str:
     return level
 
 
-def _trend_persistence_signal(ohlcv: pd.DataFrame) -> float | None:
+def _corporate_action_assessment(closes) -> tuple[bool, list[str]]:
+    """Lineage screen: unadjusted splits masquerade as +-50-100% day moves.
+
+    Bars are assumed split/dividend-adjusted upstream (ingest auto_adjust).
+    A single-day SIMPLE drop <= -45% (unadjusted 2:1 split signature) or
+    jump >= +90% (unadjusted 1:2 reverse-split signature) flags the lineage
+    and hard-caps confidence at low. Vectorized via
+    :func:`corporate_action_flags`; never raises (unknown -> no flag).
+    """
+    try:
+        flags = corporate_action_flags(closes)
+    except Exception:
+        return False, []
+    notes: list[str] = []
+    hard = False
+    try:
+        if flags.get("has_crash_drop"):
+            notes.append(
+                "possible unadjusted corporate action (single-day drop <= -45%)")
+            hard = True
+        if flags.get("has_jump"):
+            notes.append(
+                "possible unadjusted corporate action (single-day jump >= +90%)")
+            hard = True
+    except Exception:
+        pass
+    return hard, notes
+
+
+def _thin_liquidity_note(ohlcv) -> str | None:
+    """Thin-liquidity screen for the confidence penalty (never raises).
+
+    Estimates from non-trading stretches (halts, illiquid names, stub gaps)
+    deserve less confidence: one notch via :func:`_penalize_confidence`
+    (floor low), with the reason disclosed in provenance missing_fields.
+    """
+    try:
+        volume = ohlcv["volume"]
+    except Exception:
+        return None
+    try:
+        flags = thin_liquidity_flags(volume)
+    except Exception:
+        return None
+    try:
+        if flags.get("is_thin"):
+            return str(flags.get("reason") or "thin liquidity")
+    except Exception:
+        return None
+    return None
+
+
+def _trend_persistence_signal(ohlcv: pd.DataFrame, _ext: pd.DataFrame | None = None) -> float | None:
     """4th ensemble member from past market data (trend persistence).
 
     Past-only: 63d trailing return scaled by 63d volatility + drawdown
     penalty + RSI persistence. Deterministic, bounded [0, 1], None when
     history is too short or non-finite. Never raises.
+
+    ``_ext`` accepts a precomputed extended-feature frame (from
+    :func:`build_feature_bundle`) so callers that already built features
+    skip the rebuild; values are identical either way (same formulas).
     """
     try:
-        ext = build_extended_features(ohlcv)
+        ext = _ext if _ext is not None else build_extended_features(ohlcv)
     except Exception:
         return None
     try:
@@ -298,6 +362,12 @@ def _confidence(
       * ai_disagreement > AI_DISAGREEMENT_THRESHOLD -> one notch down
         (wires AI second-opinion clash into the displayed label).
     ``regime=None`` / ``drawdown_prob=None`` are no-ops (backward compat).
+
+    NOTE (future per-user calibration hook): per-user / per-tier confidence
+    shaping (e.g. learned agreement thresholds) must plug in HERE as a pure
+    post-processing step on (level, spread, provenance) — behind auth/tiers
+    owned by another agent. This function stays global-deterministic: no
+    user identity, no wall clock, no I/O. Do NOT implement auth/tiers here.
     """
     if n_models <= 1:
         level = "low"
@@ -536,26 +606,21 @@ class ForecastService:
         provenance = dict(bars.get("provenance", {}))
         # Corporate-action lineage: bars are assumed split/dividend-adjusted
         # (ingest uses auto_adjust=True). An unadjusted 2:1 split looks like a
-        # -50% single-day crash. Detect that signature and cap confidence.
-        try:
-            _rets = ohlcv["close"].pct_change().dropna()
-            _crash = bool((_rets <= -0.45).any()) if len(_rets) else False
-        except Exception:
-            _crash = False
-        if _crash:
+        # -50% single-day crash; an unadjusted 1:2 reverse split looks like a
+        # +100% single-day jump. Flag that signature and cap confidence.
+        # Thin liquidity (halts / illiquid names) costs one notch, not a cap.
+        corp_cap, corp_notes = _corporate_action_assessment(ohlcv["close"])
+        thin_note = _thin_liquidity_note(ohlcv)
+        if corp_notes or thin_note:
             _mf = list(provenance.get("missing_fields") or [])
-            _mf.append("possible unadjusted corporate action (single-day drop <= -45%)")
+            _mf.extend(corp_notes)
+            if thin_note:
+                _mf.append(thin_note)
             provenance["missing_fields"] = _mf
+        _crash = corp_cap
         stamp = as_of or str(provenance.get("as_of"))
-        base_data_version = _data_version({**provenance, "as_of": stamp})
-        sse = _is_sse(symbol, bars)
-        eux = _is_euronext(symbol, bars) and not sse
-        if sse:
-            data_version = f"{base_data_version}-sse"
-        elif eux:
-            data_version = f"{base_data_version}-eux"
-        else:
-            data_version = base_data_version
+        _, sse, eux, data_version = self._resolve_versions(
+            symbol, bars, provenance, stamp)
         # Short-TTL cache: horizon tab switches + screener re-renders skip
         # the ensemble recompute (key includes data_version day stamp).
         if as_of is None:
@@ -566,7 +631,10 @@ class ForecastService:
             if isinstance(cached, dict) and cached.get("horizon_days") == horizon:
                 return cached
         closes = ohlcv["close"]
-        features = build_features(ohlcv)
+        # Single-validate feature bundle: v1 frame for the logistic fit and
+        # the v2 frame for the trend-persistence member share one validation
+        # + RSI pass (identical values to separate builds, ~2x less work).
+        features, ext_features = build_feature_bundle(ohlcv)
 
         # -- direction ensemble (drift + momentum + logistic) ------------
         lret = log_returns(closes).dropna()
@@ -599,9 +667,10 @@ class ForecastService:
             pass  # single-class / too-few-rows / sklearn missing: drift+momentum
         # 4th member: trend-persistence from past market data (63d trend +
         # drawdown + RSI persistence). Additive; failure skips cleanly so
-        # thin ensembles keep their existing behavior.
+        # thin ensembles keep their existing behavior. Reuses the v2 frame
+        # from the bundle above (no rebuild; identical values).
         try:
-            trend_p = _trend_persistence_signal(ohlcv)
+            trend_p = _trend_persistence_signal(ohlcv, _ext=ext_features)
             if trend_p is not None and 0.0 <= float(trend_p) <= 1.0:
                 probas["trend-persistence"] = float(trend_p)
         except Exception:
@@ -734,6 +803,13 @@ class ForecastService:
             )
             model_version = ENSEMBLE_VERSION
             feature_version = FEATURE_VERSION
+        # Thin-liquidity honesty: non-trading stretches cost one notch (the
+        # reason is already disclosed in provenance missing_fields above).
+        if thin_note:
+            try:
+                confidence = _penalize_confidence(confidence)
+            except Exception:
+                pass
         # Honesty cap: stub/stale (fallback or grade C) never serves "high".
         try:
             confidence = _cap_stub_confidence(confidence, provenance)
@@ -821,6 +897,10 @@ class ForecastService:
         if len(self.records) > MAX_RECORDS:
             del self.records[: len(self.records) - MAX_RECORDS]
 
+        # NOTE (future per-user calibration hook): per-user probability
+        # shaping belongs here as a pure function of (payload, user_tier) —
+        # owned by another agent (auth/tiers). Never branch global
+        # determinism on identity here; identical inputs stay identical.
         payload = {
             "symbol": symbol.strip().upper(),
             "horizon_days": horizon,
@@ -863,16 +943,17 @@ class ForecastService:
         ohlcv, bars = self._load(symbol)
         provenance = dict(bars.get("provenance", {}))
         # Corporate-action lineage (mirrors forecast()): unadjusted splits
-        # look like -45% single-day crashes; flag + cap confidence.
-        try:
-            _rets = ohlcv["close"].pct_change().dropna()
-            _crash = bool((_rets <= -0.45).any()) if len(_rets) else False
-        except Exception:
-            _crash = False
-        if _crash:
+        # look like -45% single-day crashes, reverse splits like +90% jumps;
+        # flag + cap confidence. Thin liquidity costs one notch per horizon.
+        corp_cap, corp_notes = _corporate_action_assessment(ohlcv["close"])
+        thin_note = _thin_liquidity_note(ohlcv)
+        if corp_notes or thin_note:
             _mf = list(provenance.get("missing_fields") or [])
-            _mf.append("possible unadjusted corporate action (single-day drop <= -45%)")
+            _mf.extend(corp_notes)
+            if thin_note:
+                _mf.append(thin_note)
             provenance["missing_fields"] = _mf
+        _crash = corp_cap
         stamp = as_of or str(provenance.get("as_of"))
         _, sse, eux, data_version = self._resolve_versions(symbol, bars, provenance, stamp)
         # Cache fast path: all three horizons warm -> return without recompute.
@@ -887,8 +968,34 @@ class ForecastService:
             except Exception:
                 pass
         closes = ohlcv["close"]
-        features = build_features(ohlcv)
+        # ONE bars load + ONE feature build shared by all horizons (bundle
+        # shares validation + RSI across v1/v2). Venue features, regime,
+        # staleness and the venue MIC are horizon-independent: hoist them.
+        features, ext_features = build_feature_bundle(ohlcv)
         lret = log_returns(closes).dropna()
+        mic = _target_mic(symbol, bars, sse, eux)
+        try:
+            _fallback_all = bool(provenance.get("fallback_used"))
+        except Exception:
+            _fallback_all = False
+        _stale_all = False
+        try:
+            _asof_dt = datetime.fromisoformat(
+                str(provenance.get("as_of") or stamp or "").replace("Z", "+00:00"))
+            if _asof_dt.tzinfo is None:
+                _asof_dt = _asof_dt.replace(tzinfo=timezone.utc)
+            _stale_all = (
+                datetime.now(timezone.utc) - _asof_dt).total_seconds() / 86400.0 > 7.0
+        except Exception:
+            _stale_all = False
+        if sse:
+            try:
+                sse_features_all = build_sse_features(ohlcv)
+                proximity_all = limit_proximity_triggered(sse_features_all)
+            except ValueError:
+                proximity_all = False
+        else:
+            proximity_all = False
         try:
             bands_all = return_quantiles(
                 closes, horizons=list(FORECAST_HORIZONS),
@@ -902,7 +1009,7 @@ class ForecastService:
         except Exception:
             regime_res, regime = None, "normal"
         try:
-            trend_p = _trend_persistence_signal(ohlcv)
+            trend_p = _trend_persistence_signal(ohlcv, _ext=ext_features)
             if trend_p is not None and not 0.0 <= float(trend_p) <= 1.0:
                 trend_p = None
         except Exception:
@@ -1012,11 +1119,9 @@ class ForecastService:
                     "upper_q": float(us_range["upper_q"]),
                     "n_windows": int(us_range["n_windows"]),
                 }
-                try:
-                    sse_features = build_sse_features(ohlcv)
-                    proximity_fired = limit_proximity_triggered(sse_features)
-                except ValueError:
-                    proximity_fired = False
+                # Limit proximity is horizon-independent (same trailing bars):
+                # hoisted above the loop (identical values, one build).
+                proximity_fired = proximity_all
                 base_conf = _confidence(
                     float(max(probas.values()) - min(probas.values())) if probas else 0.0,
                     len(probas), str(provenance.get("quality_grade") or "U"),
@@ -1066,24 +1171,16 @@ class ForecastService:
                 confidence = _cap_stub_confidence(confidence, provenance)
             except Exception:
                 pass
+            # Thin-liquidity honesty (mirrors forecast()): one notch, floored.
+            if thin_note:
+                try:
+                    confidence = _penalize_confidence(confidence)
+                except Exception:
+                    pass
             # Staleness + fallback + crash honesty (mirrors forecast()):
-            # stub/fallback bars, >7d-old data, or a crash signature cap
-            # confidence at low.
-            try:
-                _fallback = bool(provenance.get("fallback_used"))
-            except Exception:
-                _fallback = False
-            _stale = False
-            try:
-                _asof_raw = str(provenance.get("as_of") or stamp or "")
-                _asof_dt = datetime.fromisoformat(_asof_raw.replace("Z", "+00:00"))
-                if _asof_dt.tzinfo is None:
-                    _asof_dt = _asof_dt.replace(tzinfo=timezone.utc)
-                _age_days = (datetime.now(timezone.utc) - _asof_dt).total_seconds() / 86400.0
-                _stale = _age_days > 7.0
-            except Exception:
-                _stale = False
-            if _fallback or _stale or _crash:
+            # stub/fallback bars, >7d-old data, or a crash/jump signature cap
+            # confidence at low (hoisted: provenance/stamp are loop-fixed).
+            if _fallback_all or _stale_all or _crash:
                 confidence = "low"
             clean_direction = _finite_or_none(direction)
             if clean_direction is None:
@@ -1100,9 +1197,7 @@ class ForecastService:
                 if probas[name] is not None and name in MEMBER_VERSIONS
             ]
             instrument_id = bars.get("instrument_id") or f"stub-{sym_upper}"
-            target_date = _cached_target_date(
-                stamp, horizon, _target_mic(symbol, bars, sse, eux)
-            )
+            target_date = _cached_target_date(stamp, horizon, mic)
             record = {
                 "forecast_id": _deterministic_id(symbol, horizon, stamp, data_version),
                 "instrument_id": instrument_id,

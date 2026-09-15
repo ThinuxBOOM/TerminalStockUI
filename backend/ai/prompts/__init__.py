@@ -51,16 +51,49 @@ def get_prompt(profile: str) -> str:
     return path.read_text(encoding="utf-8").strip() + "\n"
 
 
-def render_prompt(profile: str, packet: EvidencePacket, *, horizon: int | None = None) -> str:
-    """Render template + evidence packet JSON into the final model prompt."""
+# Token-efficient input budgets per profile (~4 chars/token).
+# Quick Insight ~300-600 tokens, Forecast Assist ~1000, Deep Research 4000
+# max, Report ~2000. render_prompt() truncates ONLY the packet JSON (never
+# the template) so prompts stay within budget without losing instructions.
+MAX_PROMPT_TOKENS_BY_PROFILE: dict[str, int] = {
+    "quick_insight": 600,
+    "forecast_assist": 1000,
+    "deep_research": 4000,
+    "report": 2000,
+}
+
+
+def estimate_prompt_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token) for budget logging."""
+    return max(1, len(text or "") // 4)
+
+
+def render_prompt(
+    profile: str,
+    packet: EvidencePacket,
+    *,
+    horizon: int | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Render template + budget-truncated evidence packet JSON."""
     template = get_prompt(profile)
+    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if key not in _PROFILE_FILES:
+        # get_prompt already raised; keep mypy happy.
+        key = "quick_insight"
     effective_horizon = horizon
     if effective_horizon not in (5, 21, 63):
-        effective_horizon = _PROFILE_HORIZON_HINT.get((profile or "").strip().lower().replace(" ", "_").replace("-", "_")) or 21
-    packet_json = packet.model_dump_json(indent=1)
-    # Hard bound: prompts never exceed ~12k chars (packet builder already caps).
-    if len(packet_json) > 9000:
-        packet_json = packet_json[:9000] + '\n  "...truncated": true\n}'
+        effective_horizon = _PROFILE_HORIZON_HINT.get(key) or 21
+    budget = int(max_tokens or MAX_PROMPT_TOKENS_BY_PROFILE.get(key, 600))
+    try:
+        from backend.ai.evidence import packet_prompt_json
+
+        packet_json = packet_prompt_json(packet, key, max_tokens=budget)
+    except Exception:
+        packet_json = packet.model_dump_json(indent=1)
+        budget_chars = max(512, budget * 4)
+        if len(packet_json) > budget_chars:
+            packet_json = packet_json[:budget_chars] + '\n  "...truncated": true\n}'
     return (
         f"{template}\n"
         f"TIME_HORIZON_DAYS: {effective_horizon}\n"

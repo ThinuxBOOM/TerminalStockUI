@@ -6,6 +6,9 @@ from backend.observability.provider_metrics import (
     aggregate_all,
     aggregate_provider_calls,
     check_error_alert,
+    derive_state,
+    emit_alert,
+    provider_kind,
     record_call,
 )
 
@@ -14,6 +17,9 @@ __all__ = [
     "aggregate_provider_calls",
     "build_dashboard",
     "check_error_alert",
+    "derive_state",
+    "emit_alert",
+    "provider_kind",
     "record_call",
     "verify_chain",
     "verify_rows",

@@ -7,11 +7,17 @@ provenance + model/feature/data versions and is runnable in-memory via::
     python -m backend.workers.jobs --list
     python -m backend.workers.jobs --job ingest_bars --symbol AAPL
 
-Jobs (registry of 4):
+Jobs (registry of 6):
   - ingest_bars(symbol)            -> fetch/normalize OHLCV bars (stub)
   - refresh_forecast(symbol)       -> deterministic forecast refresh (stub)
   - evaluate_alerts()              -> alert-condition evaluation (stub)
   - generate_report(symbol, profile) -> scheduled report build (stub)
+  - capture_snapshot(symbol, timeframe) -> compressed market snapshot
+    (interval-configurable: 15m intraday / 1h daily; persists to
+    market_snapshots when the table exists, in-memory fallback otherwise)
+  - score_forecasts(symbol)        -> point-in-time forecast scoring
+    (survivorship-aware; writes forecast_accuracy + refreshes the
+    calibration_snapshots realized window)
 
 Every job returns a JSON-serializable dict carrying a spec Sec 4 style
 provenance envelope (source/as_of/delay_minutes/quality_grade/
@@ -54,6 +60,26 @@ except Exception:  # pragma: no cover
 WORKER_VERSION = "workers-v1"
 QUEUE_NAME = "onemarket"
 DATA_VERSION_FALLBACK_PREFIX = "bars-"
+
+#: Snapshot cadence defaults (minutes): intraday timeframes capture every
+#: 15m, daily+ captures hourly. Overridable via env without code changes.
+SNAPSHOT_INTERVAL_INTRADAY_MIN = 15
+SNAPSHOT_INTERVAL_DAILY_MIN = 60
+SNAPSHOT_DAILY_TIMEFRAMES = ("1d", "1w", "1mo")
+
+
+def snapshot_interval_min(timeframe: str | None = None) -> int:
+    """Capture cadence for *timeframe* (env-overridable, never raises)."""
+    tf = (timeframe or "1d").strip() or "1d"
+    try:
+        if tf in SNAPSHOT_DAILY_TIMEFRAMES:
+            return max(1, int(os.getenv("SNAPSHOT_INTERVAL_DAILY_MIN",
+                                       str(SNAPSHOT_INTERVAL_DAILY_MIN))))
+        return max(1, int(os.getenv("SNAPSHOT_INTERVAL_INTRADAY_MIN",
+                                   str(SNAPSHOT_INTERVAL_INTRADAY_MIN))))
+    except (TypeError, ValueError):
+        return SNAPSHOT_INTERVAL_DAILY_MIN if tf in SNAPSHOT_DAILY_TIMEFRAMES \
+            else SNAPSHOT_INTERVAL_INTRADAY_MIN
 
 logger = logging.getLogger("onemarket.workers")
 
@@ -254,11 +280,169 @@ def generate_report(symbol: str, profile: str = "quick_insight",
     return _log_result(result)
 
 
+def capture_snapshot(symbol: str, timeframe: str = "1d", db: Any = None,
+                     **kwargs: Any) -> dict:
+    """Capture a compressed market snapshot for *symbol*/*timeframe*.
+
+    Fetches bars via ``MarketDataService.get_bars`` (offline stub fallback),
+    compresses with :mod:`backend.market_data.snapshot_store` (smallest of
+    gzip+json / delta-q100+gzip wins) and persists to ``market_snapshots``
+    when the table exists — otherwise the bounded in-memory fallback (graceful
+    degrade before migration 0006). Optional kwargs: ``market`` (fake/service
+    injection, tests), ``interval_min`` (cadence override; defaults to
+    :func:`snapshot_interval_min`). Never raises on missing data: zero
+    usable bars is ``ok=False`` with a reason, never an exception.
+    """
+    job = "capture_snapshot"
+    sym = (symbol or "").strip().upper() or "AAPL"
+    tf = (timeframe or kwargs.get("timeframe") or "1d").strip() or "1d"
+    try:
+        interval = int(kwargs.get("interval_min") or snapshot_interval_min(tf))
+    except (TypeError, ValueError):
+        interval = snapshot_interval_min(tf)
+    provenance = build_provenance(job, symbol=sym, timeframe=tf)
+    market = kwargs.get("market")
+    if market is None:
+        try:
+            from backend.api.deps import get_market_service
+
+            market = get_market_service()
+        except Exception:
+            try:
+                from backend.market_data.service import MarketDataService
+
+                market = MarketDataService()
+            except Exception as exc:
+                result = {"job": job, "ok": False, "symbol": sym, "timeframe": tf,
+                          "errors": {"_batch": type(exc).__name__},
+                          "provenance": provenance}
+                _audit(db, job=job, entity_id=sym,
+                       payload={"ok": False, "error": type(exc).__name__})
+                return _log_result(result)
+    try:
+        payload = market.get_bars(sym, timeframe=tf, limit=250)
+    except Exception as exc:
+        result = {"job": job, "ok": False, "symbol": sym, "timeframe": tf,
+                  "errors": {"bars": f"{type(exc).__name__}: {str(exc)[:200]}"},
+                  "provenance": provenance}
+        _audit(db, job=job, entity_id=sym,
+               payload={"ok": False, "error": type(exc).__name__})
+        return _log_result(result)
+    rows = [r for r in (payload.get("bars") or [])
+            if isinstance(r, dict) and r.get("close") is not None
+            and r.get("open") is not None and r.get("high") is not None
+            and r.get("low") is not None]
+    provenance_block = payload.get("provenance") if isinstance(payload, dict) else None
+    try:
+        from backend.market_data import snapshot_store as _store
+
+        if not rows:
+            raise ValueError("no complete bars to snapshot")
+        prov = dict(provenance_block or {})
+        saved = _store.save_snapshot(
+            db, symbol=sym, timeframe=tf, bars=rows,
+            source=str(prov.get("source") or "yfinance"),
+            quality_grade=str(prov.get("quality_grade") or "C"),
+            provenance=prov)
+    except ValueError as exc:
+        result = {"job": job, "ok": False, "symbol": sym, "timeframe": tf,
+                  "errors": {"bars": f"{type(exc).__name__}: {str(exc)[:200]}"},
+                  "provenance": provenance}
+        _audit(db, job=job, entity_id=sym,
+               payload={"ok": False, "error": type(exc).__name__})
+        return _log_result(result)
+    except Exception as exc:  # pragma: no cover - defensive, never break ticks
+        result = {"job": job, "ok": False, "symbol": sym, "timeframe": tf,
+                  "errors": {"_batch": type(exc).__name__},
+                  "provenance": provenance}
+        _audit(db, job=job, entity_id=sym,
+               payload={"ok": False, "error": type(exc).__name__})
+        return _log_result(result)
+    result = {
+        "job": job, "ok": bool(saved.get("ok")), "symbol": sym, "timeframe": tf,
+        "interval_min": interval, "snapshot_id": saved.get("snapshot_id"),
+        "persisted": bool(saved.get("persisted")),
+        "encoding": saved.get("encoding"), "n_bars": saved.get("n_bars"),
+        "raw_bytes": saved.get("raw_bytes"),
+        "compressed_bytes": saved.get("compressed_bytes"),
+        "ratio": saved.get("ratio"),
+        "size_reduction_pct": saved.get("size_reduction_pct"),
+        "reason": saved.get("reason"),
+        "detail": "compressed OHLCV snapshot (market_snapshots or in-memory fallback)",
+        "provenance": provenance,
+    }
+    _audit(db, job=job, entity_id=f"{sym}:{tf}",
+           payload={"symbol": sym, "timeframe": tf,
+                    "encoding": saved.get("encoding"),
+                    "n_bars": saved.get("n_bars"),
+                    "persisted": bool(saved.get("persisted"))})
+    return _log_result(result)
+
+
+def score_forecasts(symbol: str | None = None, db: Any = None,
+                    **kwargs: Any) -> dict:
+    """Score matured forecasts point-in-time (survivorship-aware).
+
+    Without ``db`` this stays pure in-memory (nothing to score: ``scored=0``,
+    ``ok=True``) so unit tests and ``--once`` never need infrastructure.
+    With ``db`` it runs
+    :func:`backend.forecasting.accuracy.score_due_forecasts`: forecasts whose
+    ``target_date`` is observable are scored from stored bars only, accuracy
+    rows are appended, and the matching ``calibration_snapshots`` row gains a
+    ``members["realized"]`` window feeding confidence evolution. Optional
+    kwargs: ``symbols`` (list filter; ``symbol`` also accepted),
+    ``market`` (reserved injection seam, currently unused — closes always
+    resolve from stored bars to stay point-in-time).
+    """
+    job = "score_forecasts"
+    provenance = build_provenance(job)
+    syms: list[str] = []
+    for raw in ([symbol] if symbol else []) + list(kwargs.get("symbols") or []):
+        text = (raw or "").strip() if isinstance(raw, str) else ""
+        if text:
+            syms.append(text[:32])
+    if db is None:
+        result = {"job": job, "ok": True, "scored": 0, "unscored": 0,
+                  "symbols": syms, "stub": True,
+                  "detail": "in-memory stub: no DB, nothing scored",
+                  "provenance": provenance}
+        return _log_result(result)
+    try:
+        from backend.forecasting.accuracy import score_due_forecasts
+
+        outcome = score_due_forecasts(db, symbols=syms or None)
+    except Exception as exc:
+        logger.warning("score_forecasts job failed: %s", type(exc).__name__)
+        result = {"job": job, "ok": False, "scored": 0, "unscored": 0,
+                  "symbols": syms,
+                  "errors": {"_batch": f"{type(exc).__name__}: {str(exc)[:200]}"},
+                  "provenance": provenance}
+        _audit(db, job=job, entity_id="all",
+               payload={"ok": False, "error": type(exc).__name__})
+        return _log_result(result)
+    result = {"job": job, "ok": not outcome.get("errors"), "symbols": syms,
+              "scored": int(outcome.get("scored") or 0),
+              "unscored": int(outcome.get("unscored") or 0),
+              "hits": int(outcome.get("hits") or 0),
+              "brier_mean": outcome.get("brier_mean"),
+              "errors": dict(outcome.get("errors") or {}),
+              "detail": "point-in-time scoring; per-row accuracy follows the "
+                        "forecasts-tied window, aggregates persist via calibration",
+              "disclosure": "Not investment advice. For informational purposes only.",
+              "provenance": provenance}
+    _audit(db, job=job, entity_id="all",
+           payload={"scored": result["scored"], "unscored": result["unscored"],
+                    "hits": result["hits"]})
+    return _log_result(result)
+
+
 JOB_REGISTRY: dict[str, Callable[..., dict]] = {
     "ingest_bars": ingest_bars,
     "refresh_forecast": refresh_forecast,
     "evaluate_alerts": evaluate_alerts,
     "generate_report": generate_report,
+    "capture_snapshot": capture_snapshot,
+    "score_forecasts": score_forecasts,
 }
 JOB_NAMES: list[str] = sorted(JOB_REGISTRY)
 
@@ -309,8 +493,10 @@ def run_once(symbols: tuple[str, ...] = ("AAPL",), profile: str = "quick_insight
     for sym in syms:
         results[f"ingest_bars:{sym}"] = ingest_bars(sym, db=db)
         results[f"refresh_forecast:{sym}"] = refresh_forecast(sym, db=db)
+        results[f"capture_snapshot:{sym}"] = capture_snapshot(sym, db=db)
         results[f"generate_report:{sym}:{profile}"] = generate_report(sym, profile, db=db)
     results["evaluate_alerts"] = evaluate_alerts(db=db)
+    results["score_forecasts"] = score_forecasts(db=db)
     return {"ok": all(r.get("ok") for r in results.values()), "results": results}
 
 
@@ -320,6 +506,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--list", action="store_true", help="Print the job registry and exit.")
     parser.add_argument("--job", default=None, help="Run a single job by name.")
     parser.add_argument("--symbol", default="AAPL", help="Symbol for single-job runs.")
+    parser.add_argument("--timeframe", default="1d", help="Bars timeframe for capture_snapshot.")
     parser.add_argument("--profile", default="quick_insight", help="Report profile for generate_report.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -329,10 +516,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(list_jobs(), indent=2))
         return 0
     if args.job:
-        result = enqueue(args.job, **({"symbol": args.symbol, "profile": args.profile}
-                                      if args.job == "generate_report"
-                                      else ({} if args.job == "evaluate_alerts"
-                                            else {"symbol": args.symbol})))
+        if args.job == "generate_report":
+            job_kwargs: dict[str, Any] = {"symbol": args.symbol, "profile": args.profile}
+        elif args.job == "capture_snapshot":
+            job_kwargs = {"symbol": args.symbol, "timeframe": args.timeframe}
+        elif args.job in ("evaluate_alerts", "score_forecasts"):
+            job_kwargs = {}
+        else:
+            job_kwargs = {"symbol": args.symbol}
+        result = enqueue(args.job, **job_kwargs)
         print(json.dumps(result, indent=2, default=str))
         return 0 if result.get("ok") else 1
     if args.once:

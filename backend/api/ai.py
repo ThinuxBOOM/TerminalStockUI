@@ -35,6 +35,92 @@ router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 _ai_router: AIRouter | None = None
 
+#: Deep-research job store (distributed when Redis is configured, else
+#: process-local). Jobs are best-effort: missing cache degrades to memory.
+_jobs_memory: dict[str, dict[str, Any]] = {}
+
+
+def _jobs_store() -> Any | None:
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        return _get_cache()
+    except Exception:
+        return None
+
+
+def _job_get(job_id: str) -> dict[str, Any] | None:
+    key = f"ai:job:{job_id}"
+    try:
+        store = _jobs_store()
+        if store is not None:
+            raw = store.get(key)
+            if isinstance(raw, dict):
+                return raw
+    except Exception:
+        pass
+    return _jobs_memory.get(job_id)
+
+
+def _job_put(job_id: str, doc: dict[str, Any], ttl_s: int = 3600) -> None:
+    key = f"ai:job:{job_id}"
+    try:
+        store = _jobs_store()
+        if store is not None:
+            store.set(key, doc, ttl_s=ttl_s)
+    except Exception:
+        pass
+    try:
+        if len(_jobs_memory) > 500:
+            _jobs_memory.pop(next(iter(_jobs_memory)))
+        _jobs_memory[job_id] = doc
+    except Exception:
+        pass
+
+
+def _persist_ledger(
+    ai: AIRouter,
+    *,
+    provider: str,
+    model: str,
+    profile: str,
+    call_type: str,
+    packet: EvidencePacket,
+    cached: bool,
+    user_tier: str | None,
+    token_credits: int | None,
+) -> None:
+    """Best-effort ai_token_ledger persist from the router's last entry."""
+    try:
+        entry = ai.token_log[-1] if getattr(ai, "token_log", None) else None
+        prompt_tok = int((entry or {}).get("prompt_tokens") or 0)
+        comp_tok = int((entry or {}).get("completion_tokens") or 0)
+        lat_raw = (entry or {}).get("latency_ms") or 0
+        try:
+            lat_ms = max(0, int(float(lat_raw)))
+        except (TypeError, ValueError):
+            lat_ms = None
+        from backend.db.session import get_session_factory
+        from backend.db.writers import log_ai_tokens
+
+        Session = get_session_factory()
+        db = Session()
+        try:
+            log_ai_tokens(
+                db, provider=provider, model=model, profile=profile,
+                call_type=call_type, input_tokens=0 if cached else prompt_tok,
+                output_tokens=0 if cached else comp_tok, latency_ms=lat_ms,
+                evidence_hash=getattr(packet, "evidence_hash", None),
+                user_id=None, tier=user_tier,
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def get_ai_router() -> AIRouter:
     global _ai_router
@@ -56,6 +142,11 @@ def reset_ai_router() -> None:  # test hook
 class InsightBody(BaseModel):
     symbol: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
     profile: str = Field(default="quick_insight", max_length=64)
+    # Future tier-routing stubs: accepted + logged, NEVER enforced today.
+    # Free 20/day Quick-only / Silver 1000+400+100 / Gold +Grok / Platinum unlimited+Deep.
+    user_tier: str | None = Field(default=None, max_length=32)
+    call_type: str | None = Field(default=None, max_length=64)
+    token_credits: int | None = Field(default=None)
 
 
 class ForecastOpinionBody(BaseModel):
@@ -66,6 +157,10 @@ class ForecastOpinionBody(BaseModel):
     ai_weight: float | None = Field(default=None)
     ai_enabled: bool = True
     quant_confidence_label: str | None = Field(default=None, max_length=16)
+    # Future tier-routing stubs: accepted + logged, NEVER enforced today.
+    user_tier: str | None = Field(default=None, max_length=32)
+    call_type: str | None = Field(default=None, max_length=64)
+    token_credits: int | None = Field(default=None)
 
 
 class ProviderHealthTestBody(BaseModel):
@@ -193,7 +288,11 @@ async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router))
     # get_quote/yfinance are blocking sync I/O — keep the event loop free.
     packet = await asyncio.to_thread(_build_packet, body.symbol)
     try:
-        opinion, cached = await ai.get_insight(packet, profile=profile)
+        opinion, cached = await ai.get_insight(
+            packet, profile=profile,
+            user_tier=body.user_tier, call_type=body.call_type or "insight",
+            token_credits=body.token_credits,
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -201,6 +300,11 @@ async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ai insight failed: {exc}") from exc
     logger.info("ai insight %s", redact_mapping({"symbol": packet.symbol, "profile": profile, "cached": cached}))
+    _persist_ledger(
+        ai, provider=opinion.provider, model=opinion.model, profile=profile,
+        call_type="opinion", packet=packet, cached=cached,
+        user_tier=body.user_tier, token_credits=body.token_credits,
+    )
     return {
         "symbol": packet.symbol,
         "profile": profile,
@@ -236,7 +340,11 @@ async def post_forecast_opinion(
     # Blocking market-data lookup — run off the event loop (see post_insight).
     packet = await asyncio.to_thread(_build_packet, body.symbol)
     try:
-        opinion, cached = await ai.get_insight(packet, profile=profile, horizon=horizon)
+        opinion, cached = await ai.get_insight(
+            packet, profile=profile, horizon=horizon,
+            user_tier=body.user_tier, call_type=body.call_type or "forecast_opinion",
+            token_credits=body.token_credits,
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -261,6 +369,11 @@ async def post_forecast_opinion(
     logger.info(
         "ai forecast_opinion %s",
         redact_mapping({"symbol": packet.symbol, "horizon": horizon, "cached": cached}),
+    )
+    _persist_ledger(
+        ai, provider=opinion.provider, model=opinion.model, profile=profile,
+        call_type="forecast", packet=packet, cached=cached,
+        user_tier=body.user_tier, token_credits=body.token_credits,
     )
     try:
         provenance = packet.freshness.model_dump(mode="json")
@@ -320,3 +433,77 @@ def providers_health_test(
         except Exception as exc:
             results.append({"provider": target, "error": f"{type(exc).__name__}: {exc}"})
     return {"providers": results}
+
+
+class DeepResearchJobBody(BaseModel):
+    symbol: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
+    horizon: int = Field(default=21)
+    user_tier: str | None = Field(default=None, max_length=32)
+    call_type: str | None = Field(default=None, max_length=64)
+    token_credits: int | None = Field(default=None)
+
+
+async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str | None,
+                        call_type: str | None, token_credits: int | None) -> None:
+    """Background deep_research worker (never raises; writes job doc)."""
+    try:
+        packet = await asyncio.to_thread(_build_packet, symbol)
+    except Exception as exc:
+        _job_put(job_id, {"job_id": job_id, "status": "error",
+                          "error": f"packet failed: {type(exc).__name__}",
+                          "symbol": symbol, "horizon": horizon})
+        return
+    try:
+        ai = get_ai_router()
+        opinion, cached = await ai.get_insight(
+            packet, profile="deep_research", horizon=horizon,
+            user_tier=user_tier, call_type=call_type or "deep_research",
+            token_credits=token_credits,
+        )
+        _persist_ledger(ai, provider=opinion.provider, model=opinion.model,
+                        profile="deep_research", call_type="evidence",
+                        packet=packet, cached=cached,
+                        user_tier=user_tier, token_credits=token_credits)
+        _job_put(job_id, {"job_id": job_id, "status": "done",
+                          "symbol": packet.symbol, "horizon": horizon,
+                          "provider": opinion.provider, "model": opinion.model,
+                          "opinion": opinion.model_dump(mode="json"),
+                          "packet_id": packet.packet_id,
+                          "evidence_hash": packet.evidence_hash,
+                          "cached": cached, "disclaimer": DISCLAIMER})
+    except Exception as exc:
+        _job_put(job_id, {"job_id": job_id, "status": "error",
+                          "error": f"{type(exc).__name__}: {exc}"[:280],
+                          "symbol": symbol, "horizon": horizon})
+
+
+@router.post("/deep_research_job", status_code=202)
+async def post_deep_research_job(body: DeepResearchJobBody) -> dict[str, Any]:
+    """Enqueue a deep_research call; poll GET /api/ai/jobs/{id}.
+
+    Long-response path: deep_research allows 25s per attempt + retries, which
+    risks gateway timeouts on serverless. This 202+poll path returns instantly
+    while the worker fills the job doc. The sync /insight+profile=deep_research
+    path is unchanged. Tier fields are logged only (no gating — future prep).
+    """
+    from fastapi.responses import JSONResponse as _JR  # local import, no dep change
+    import uuid as _uuid
+
+    horizon = _check_horizon(body.horizon)
+    clean = (body.symbol or "").strip().upper()
+    job_id = _uuid.uuid4().hex[:16]
+    _job_put(job_id, {"job_id": job_id, "status": "pending",
+                      "symbol": clean, "horizon": horizon})
+    asyncio.create_task(_run_deep_job(job_id, clean, horizon, body.user_tier,
+                                      body.call_type, body.token_credits))
+    return _JR(status_code=202, content={"job_id": job_id, "status": "pending",
+              "status_url": f"/api/ai/jobs/{job_id}",
+              "symbol": clean, "horizon": horizon})
+
+
+@router.get("/jobs/{job_id}")
+def get_ai_job(job_id: str) -> dict[str, Any]:
+    doc = _job_get((job_id or "").strip())
+    if not doc:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    return doc

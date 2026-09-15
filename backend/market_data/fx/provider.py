@@ -244,12 +244,11 @@ class FXProvider:
         self._ecb_entry: tuple[float, str | None, dict[str, float]] | None = None
 
     # -- internals ------------------------------------------------------
-    def _emit(self, latency_ms: float, ok: bool) -> None:
-        if self._on_call is not None:
-            try:
-                self._on_call(self.name, latency_ms, ok)  # type: ignore[misc]
-            except Exception:
-                pass
+    def _emit(self, latency_ms: float, ok: bool, *, error=None, status_code=None) -> None:
+        from backend.market_data.providers.base import emit_health as _emit_health
+
+        _emit_health(self._on_call, self.name, latency_ms, ok,
+                     error=error, status_code=status_code)
 
     def _cache_get(self, key: str) -> dict | None:
         entry = self._cache.get(key)
@@ -437,19 +436,20 @@ class FXProvider:
         if not self.breaker.allow_request():
             payload = self._stub_payload(b, q)
             payload["circuit_open"] = True
-            self._emit(0.0, False)
+            self._emit(0.0, False, error="circuit open (breaker)")
             return payload
 
         self.limiter.acquire()  # stub: counted, never blocks local run
         started = time.perf_counter()
         try:
             raw = self._fetch_raw(b, q)
-        except ProviderError:
+        except ProviderError as exc_first:
             try:
                 raw = self._fetch_yahoo(b, q)
-            except ProviderError:
+            except ProviderError as exc:
                 self.breaker.record_failure()
-                self._emit((time.perf_counter() - started) * 1000, False)
+                self._emit((time.perf_counter() - started) * 1000, False,
+                           error=f"{type(exc).__name__}: {exc} (first: {exc_first})")
                 payload = self._stub_payload(b, q)
                 payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
                 return payload
@@ -461,7 +461,8 @@ class FXProvider:
             # Malformed/non-finite upstream rate: degrade to the flagged
             # stub instead of leaking NaN/inf (get_rate never raises here).
             self.breaker.record_failure()
-            self._emit((time.perf_counter() - started) * 1000, False)
+            self._emit((time.perf_counter() - started) * 1000, False,
+                       error="non-finite upstream rate")
             payload = self._stub_payload(b, q)
             payload["circuit_open"] = self.breaker.state != CircuitBreaker.CLOSED
             return payload

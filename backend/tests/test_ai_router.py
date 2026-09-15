@@ -27,6 +27,26 @@ from backend.api import ai as ai_api
 from backend.security.secrets import EncryptedSecretStore, redact_mapping
 
 
+def _clear_global_ai_cache() -> None:
+    """Evict the process-global dist cache (backend.cache singleton).
+
+    AIRouter reads through local -> global dist, and every test below uses
+    the identical evidence packet (same dist key). Without this, whichever
+    test runs first poisons the rest with cache hits (0 provider calls,
+    zeroed token logs, breakers that never trip). Cache is perf-only, so
+    clearing between tests is always safe. Never raises.
+    """
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _c = _get_cache()
+        _clear = getattr(_c, "clear", None)
+        if callable(_clear):
+            _clear()
+    except Exception:
+        pass
+
+
 @pytest.fixture()
 def empty_store(monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-for-ai-router-tests")
@@ -48,10 +68,12 @@ def empty_store(monkeypatch):
 
     base_module.set_default_secret_store(store)
     ai_api.reset_ai_router()
+    _clear_global_ai_cache()
     yield store
     base_module.set_default_secret_store(None)
     secrets_module.reset_fernet()
     ai_api.reset_ai_router()
+    _clear_global_ai_cache()
 
 
 def _packet(symbol: str = "AAPL"):
@@ -225,3 +247,202 @@ def test_api_performance_and_health_redacted(empty_store):
     assert {"gemini", "openai", "anthropic", "xai"} <= names
     single = client.post("/api/ai/providers/health/test", json={"provider": "openai"})
     assert single.json()["providers"][0]["configured"] is True
+
+
+# ---------------------------------------------------------------------------
+# Efficiency + resilience (Agent 4): per-profile timeout/token/cache config,
+# input/output token logging, request coalescing, timeout stubs, circuit
+# breaker, parallel batch, tier stubs (logged, never enforced).
+# ---------------------------------------------------------------------------
+
+
+def test_profile_config_timeouts_tokens_cache():
+    from backend.ai.router import PROFILE_CONFIG
+
+    assert set(PROFILE_CONFIG) == {"quick_insight", "forecast_assist", "deep_research", "report"}
+    quick, forecast, deep, report = (
+        PROFILE_CONFIG["quick_insight"], PROFILE_CONFIG["forecast_assist"],
+        PROFILE_CONFIG["deep_research"], PROFILE_CONFIG["report"],
+    )
+    assert quick["timeout_s"] == 8.0
+    assert deep["timeout_s"] == 25.0
+    assert quick["max_prompt_tokens"] <= 600
+    assert forecast["max_prompt_tokens"] == 1000
+    assert deep["max_prompt_tokens"] == 4000
+    assert report["cache_ttl_s"] >= deep["cache_ttl_s"] >= quick["timeout_s"]
+    # DEFAULT_PROFILE_MAP untouched: every profile still defaults to Gemini Flash.
+    for profile, (provider, model) in DEFAULT_PROFILE_MAP.items():
+        assert provider == "gemini" and "flash" in model
+
+
+def test_token_log_splits_input_output(empty_store):
+    router = AIRouter(secret_store=empty_store)
+    packet = _packet()
+    asyncio.run(router.get_insight(packet, profile="quick_insight"))
+    entry = router.token_log[-1]
+    for field in ("prompt_tokens", "prompt_tokens_est", "completion_tokens_est",
+                  "total_tokens_est", "cached", "stub", "latency_ms"):
+        assert field in entry, field
+    assert entry["total_tokens_est"] == entry["prompt_tokens"] + entry["completion_tokens_est"]
+    assert entry["prompt_tokens"] > 0 and entry["completion_tokens_est"] > 0
+    assert "api_key" not in str(entry)
+    # Ledger mirrors the call for future billing.
+    totals = router.ledger.totals()
+    assert totals and totals[0]["total_tokens"] > 0
+
+
+def test_request_coalescing_dedups_inflight(empty_store):
+    import asyncio as _asyncio
+
+    calls = {"n": 0}
+
+    class SlowProvider(BaseProvider):
+        name = "gemini"
+        default_model = "gemini-3.7-flash"
+
+        async def insight(self, packet, *, profile="quick_insight", horizon=None):
+            calls["n"] += 1
+            await _asyncio.sleep(0.2)
+            return AIOpinion(
+                direction="neutral", probability=0.5,
+                time_horizon_days=horizon or 21,
+                catalysts=["trend"], risks=["valuation"],
+                evidence_ids=packet.evidence_ids or ["ev-1"],
+                limitations=["Not investment advice."],
+                provider=self.name, model=self.model,
+            )
+
+    router = AIRouter(providers={"gemini": SlowProvider(secret_store=empty_store)})
+
+    async def _burst():
+        packet = _packet()
+        return await _asyncio.gather(*(
+            router.get_insight(packet, profile="quick_insight") for _ in range(5)
+        ))
+
+    results = asyncio.run(_burst())
+    assert calls["n"] == 1  # 5 concurrent identical packets -> 1 provider call
+    assert all(isinstance(opinion, AIOpinion) for opinion, _ in results)  # all resolved
+    assert {opinion.probability for opinion, _ in results} == {0.5}
+    coalesced = [e for e in router.token_log if e.get("coalesced")]
+    assert len(coalesced) == 4  # leader logs normally, 4 followers coalesced
+
+
+def test_slow_provider_degrades_to_timeout_stub(empty_store):
+    import asyncio as _asyncio
+
+    class HangingProvider(BaseProvider):
+        name = "gemini"
+        default_model = "gemini-3.7-flash"
+
+        async def insight(self, packet, *, profile="quick_insight", horizon=None):
+            await _asyncio.sleep(30)  # far beyond any test timeout
+            raise AssertionError("must never get here")
+
+    router = AIRouter(
+        providers={"gemini": HangingProvider(secret_store=empty_store)},
+        profile_config={"quick_insight": {"max_retries": 0, "backoff_base_s": 0.0}},
+    )
+    packet = _packet()
+    opinion, cached = asyncio.run(
+        router.get_insight(packet, profile="quick_insight", timeout_s=1.0)
+    )
+    assert cached is False
+    assert isinstance(opinion, AIOpinion) and opinion.stub is True
+    assert "timeout" in " ".join(opinion.limitations).lower()
+    assert router.breaker_state("gemini") == "closed"  # single timeout != open
+
+
+def test_circuit_breaker_opens_on_repeated_transient_failures(empty_store):
+    class BoomProvider(BaseProvider):
+        name = "gemini"
+        default_model = "gemini-3.7-flash"
+        calls = 0
+
+        async def insight(self, packet, *, profile="quick_insight", horizon=None):
+            type(self).calls += 1
+            raise RuntimeError("boom")
+
+    provider = BoomProvider(secret_store=empty_store)
+    router = AIRouter(
+        providers={"gemini": provider},
+        profile_config={"quick_insight": {"max_retries": 0, "backoff_base_s": 0.0}},
+    )
+    packet = _packet()
+    for _ in range(5):  # failure threshold -> breaker opens
+        opinion, _ = asyncio.run(router.get_insight(packet, profile="quick_insight"))
+        assert opinion.stub is True
+        router.clear_cache()  # force a live attempt each round
+    assert router.breaker_state("gemini") == "open"
+    before = BoomProvider.calls
+    opinion, _ = asyncio.run(router.get_insight(packet, profile="quick_insight"))
+    assert opinion.stub is True  # fast circuit-open stub, provider untouched
+    assert BoomProvider.calls == before
+    assert "circuit-open" in " ".join(opinion.limitations).lower()
+
+
+def test_no_key_stubs_never_trip_breaker(empty_store):
+    router = AIRouter(secret_store=empty_store)  # no keys -> stub path
+    packet = _packet()
+    for _ in range(7):
+        opinion, _ = asyncio.run(router.get_insight(packet, profile="quick_insight"))
+        assert opinion.stub is True
+        router.clear_cache()
+    assert router.breaker_state("gemini") == "closed"
+
+
+def test_parallel_batch_dedups_identical_packets(empty_store):
+    calls = {"n": 0}
+
+    class CountingProvider(BaseProvider):
+        name = "gemini"
+        default_model = "gemini-3.7-flash"
+
+        async def insight(self, packet, *, profile="quick_insight", horizon=None):
+            calls["n"] += 1
+            return AIOpinion(
+                direction="neutral", probability=0.5,
+                time_horizon_days=horizon or 21,
+                catalysts=["trend"], risks=["valuation"],
+                evidence_ids=packet.evidence_ids or ["ev-1"],
+                limitations=["Not investment advice."],
+                provider=self.name, model=self.model,
+            )
+
+    router = AIRouter(providers={"gemini": CountingProvider(secret_store=empty_store)})
+    packet = _packet()
+    results = asyncio.run(router.get_insights_parallel([packet, packet, packet]))
+    assert len(results) == 3
+    assert calls["n"] == 1
+    assert all(isinstance(opinion, AIOpinion) for opinion, _ in results)
+
+
+def test_tier_stubs_logged_never_enforced(empty_store):
+    router = AIRouter(secret_store=empty_store)
+    packet = _packet()
+    # Platinum + deep works exactly like free + quick: no gating today.
+    deep_opinion, _ = asyncio.run(router.get_insight(
+        packet, profile="deep_research", user_tier="platinum",
+        call_type="deep_research", token_credits=999,
+    ))
+    quick_opinion, _ = asyncio.run(router.get_insight(
+        packet, profile="quick_insight", user_tier="free", call_type="insight",
+    ))
+    assert isinstance(deep_opinion, AIOpinion) and isinstance(quick_opinion, AIOpinion)
+    tiers = [e.get("user_tier") for e in router.token_log]
+    assert "platinum" in tiers and "free" in tiers
+    ledger_rows = router.ledger.totals()
+    assert {row["profile"] for row in ledger_rows} >= {"deep_research", "quick_insight"}
+
+
+def test_per_profile_cache_ttl(empty_store):
+    router = AIRouter(secret_store=empty_store)
+    assert router.cache_ttl_for("report") >= router.cache_ttl_for("deep_research")
+    assert router.cache_ttl_for("deep_research") > router.cache_ttl_for("quick_insight")
+    packet = _packet()
+    asyncio.run(router.get_insight(packet, profile="report"))
+    key = router.cache_key("report", packet, None, "gemini", "gemini-3.7-flash")
+    import time as _time
+
+    remaining = router._cache[key][0] - _time.monotonic()
+    assert remaining > router.cache_ttl_for("quick_insight")  # report TTL is longer

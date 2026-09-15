@@ -149,11 +149,15 @@ def quality_of(n_dropped: int) -> str:
 
 
 def get_number(data: Mapping[str, Any], key: str) -> float | None:
-    """Extract a finite float from a statement mapping; None/NaN -> None."""
+    """Extract a finite float from a statement mapping; None/NaN -> None.
+
+    Booleans are NOT numbers here (``float(True) == 1.0`` would silently
+    turn a flag into a statement value); bool fields read as missing.
+    """
     if not isinstance(data, Mapping):
         return None
     value = data.get(key, None)
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         number = float(value)

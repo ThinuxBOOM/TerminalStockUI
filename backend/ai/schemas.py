@@ -300,9 +300,37 @@ def parse_opinion_strict(raw: str | bytes | dict[str, Any]) -> AIOpinion:
 # ---------------------------------------------------------------------------
 
 
+class TokenUsage(BaseModel):
+    """Billing-grade token accounting per AI call (redacted, no key material).
+
+    Logged by AIRouter._log_tokens + TokenLedger for future per-tier quota
+    enforcement. All fields optional-tolerant so old entries still parse.
+    """
+
+    provider: str = Field(default="unknown", max_length=64)
+    model: str = Field(default="unknown", max_length=120)
+    profile: str = Field(default="quick_insight", max_length=64)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    cached: bool = False
+    stub: bool = False
+    # Tier stubs (future billing; never enforced today).
+    user_tier: str | None = Field(default=None, max_length=32)
+    call_type: str | None = Field(default=None, max_length=64)
+    token_credits: int | None = Field(default=None)
+
+
 class InsightRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     profile: str = Field(default="quick_insight", max_length=64)
+    # --- future tier-routing stubs (accepted + logged, NEVER enforced) ---
+    # Free: 20/day Quick only / Silver: 1000+400+100 / Gold: +Grok /
+    # Platinum: unlimited+Deep. Enforcement lands later; today any value
+    # (or none) behaves identically.
+    user_tier: str | None = Field(default=None, max_length=32)
+    call_type: str | None = Field(default=None, max_length=64)
+    token_credits: int | None = Field(default=None)
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -317,6 +345,10 @@ class ForecastOpinionRequest(BaseModel):
     quant_prob: float | None = Field(default=None)
     ai_weight: float | None = Field(default=None)
     ai_enabled: bool = True
+    # --- future tier-routing stubs (accepted + logged, NEVER enforced) ---
+    user_tier: str | None = Field(default=None, max_length=32)
+    call_type: str | None = Field(default=None, max_length=64)
+    token_credits: int | None = Field(default=None)
 
     @field_validator("symbol", mode="before")
     @classmethod

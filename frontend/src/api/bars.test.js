@@ -130,3 +130,96 @@ describe("normalizeAIHealthTest (POST /api/ai/providers/health/test contract)", 
     expect(normalizeAIHealthTest(null, "gemini")).toBeNull();
   });
 });
+describe("indicator request helpers (timeframes + favorites stub)", () => {
+  it("TIMEFRAME_PRESETS wires 1D/1W/1M/3M/1Y/2Y/5Y to bars-API limits within the backend cap", async () => {
+    const { TIMEFRAME_PRESETS, BARS_MAX_LIMIT, BARS_BACKEND_CAP, resolveTimeframePreset } = await import("./client");
+    expect(TIMEFRAME_PRESETS.map((p) => p.id)).toEqual(["1D", "1W", "1M", "3M", "1Y", "2Y", "5Y"]);
+    expect(TIMEFRAME_PRESETS.map((p) => p.limit)).toEqual([5, 7, 30, 90, 250, 500, 1000]);
+    expect(BARS_MAX_LIMIT).toBe(1000);
+    expect(BARS_BACKEND_CAP).toBe(1000);
+    expect(resolveTimeframePreset("1y").limit).toBe(250);
+    expect(resolveTimeframePreset("5y").limit).toBe(1000);
+    expect(resolveTimeframePreset("bogus").id).toBe("3M");
+  });
+  it("normalizeIndicatorList canonicalizes aliases, dedupes, drops unknowns", async () => {
+    const { normalizeIndicatorList, buildIndicatorsParam } = await import("./client");
+    expect(normalizeIndicatorList(["sma20", "SMA-50", "ema12", "RSI", "macd", "bb", "vwap", "atr", "bogus", "SMA20"])).toEqual(
+      ["SMA20", "SMA50", "EMA12", "RSI14", "MACD", "BB20", "VWAP", "ATR14"]
+    );
+    expect(normalizeIndicatorList("SMA20, ema26")).toEqual(["SMA20", "EMA26"]);
+    expect(buildIndicatorsParam(["SMA20", "RSI14"])).toBe("SMA20,RSI14");
+    expect(buildIndicatorsParam([])).toBeUndefined();
+  });
+  it("per-user favorites stub namespaces by future user_id (guest fallback, node-safe)", async () => {
+    const { favoriteIndicatorsKey, loadFavoriteIndicators, saveFavoriteIndicators } = await import("./client");
+    expect(favoriteIndicatorsKey(undefined)).toBe("indicators:guest");
+    expect(favoriteIndicatorsKey("u123")).toBe("indicators:u123");
+    expect(loadFavoriteIndicators(undefined, ["SMA20"])).toEqual(["SMA20"]);
+    expect(saveFavoriteIndicators(undefined, ["SMA20"])).toBe(false);
+  });
+});
+describe("normalizeIndicators (GET /api/analytics?indicators=... contract)", () => {
+  it("passes canonical per-indicator point arrays through (time-normalized, sorted)", async () => {
+    const { normalizeIndicators } = await import("./client");
+    const out = normalizeIndicators({
+      symbol: "AAPL",
+      indicators: {
+        SMA20: [
+          { time: "2026-01-15", value: 102 },
+          { ts: "2026-01-14T00:00:00+00:00", value: "101.5" },
+        ],
+        RSI14: [{ date: "2026-01-15", value: 62.5 }],
+      },
+    });
+    expect(out.SMA20).toEqual([
+      { time: "2026-01-14", value: 101.5 },
+      { time: "2026-01-15", value: 102 },
+    ]);
+    expect(out.RSI14).toEqual([{ time: "2026-01-15", value: 62.5 }]);
+  });
+  it("expands BB20 upper/middle/lower and MACD line/signal/histogram objects", async () => {
+    const { normalizeIndicators } = await import("./client");
+    const out = normalizeIndicators({
+      indicators: {
+        BB20: {
+          upper: [{ time: "2026-01-15", value: 110 }],
+          middle: [{ time: "2026-01-15", value: 100 }],
+          lower: [{ time: "2026-01-15", value: 90 }],
+        },
+        MACD: {
+          macd: [{ time: "2026-01-15", value: 1.2 }],
+          signal: [{ time: "2026-01-15", value: 1 }],
+          histogram: [{ time: "2026-01-15", value: 0.2 }],
+        },
+      },
+    });
+    expect(out.BB_UPPER).toEqual([{ time: "2026-01-15", value: 110 }]);
+    expect(out.BB_MIDDLE).toEqual([{ time: "2026-01-15", value: 100 }]);
+    expect(out.BB_LOWER).toEqual([{ time: "2026-01-15", value: 90 }]);
+    expect(out.MACD_LINE).toEqual([{ time: "2026-01-15", value: 1.2 }]);
+    expect(out.MACD_SIGNAL).toEqual([{ time: "2026-01-15", value: 1 }]);
+    expect(out.MACD_HIST).toEqual([{ time: "2026-01-15", value: 0.2 }]);
+  });
+  it("drops null/NaN values and bad times instead of zero-filling", async () => {
+    const { normalizeIndicators } = await import("./client");
+    const out = normalizeIndicators({
+      indicators: {
+        SMA20: [
+          { time: "2026-01-15", value: null },
+          { time: "bogus", value: 5 },
+          { time: "2026-01-14", value: "NaN" },
+          { time: "2026-01-13", value: 99 },
+        ],
+      },
+    });
+    expect(out.SMA20).toEqual([{ time: "2026-01-13", value: 99 }]);
+  });
+  it("returns {} for snapshot-only payloads (technical latest-values are not plottable series)", async () => {
+    const { normalizeIndicators } = await import("./client");
+    expect(
+      normalizeIndicators({ symbol: "AAPL", technical: { sma_20: { value: { kind: "series", latest: 100 } } } })
+    ).toEqual({});
+    expect(normalizeIndicators(null)).toEqual({});
+    expect(normalizeIndicators({})).toEqual({});
+  });
+});

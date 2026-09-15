@@ -66,6 +66,18 @@ markets:
     delay_minutes: 15
     enabled: true
     ingest: true
+  # Probe-ready slot: Colombo Stock Exchange (CSE ASPI). Disabled until the
+  # vendor index symbol is confirmed (^CSE unverified); enabling = flip to
+  # true + set a verified proxy list. Existing 6 MICs are untouched.
+  - mic: XCOL
+    name: Colombo Stock Exchange
+    provider_suffix: .BO
+    timezone: Asia/Colombo
+    currency: LKR
+    country: LK
+    delay_minutes: 15
+    enabled: false
+    ingest: false
   # --- template for a new market (copy, fill, restart) ---
   # - mic: XLON
   #   name: London Stock Exchange

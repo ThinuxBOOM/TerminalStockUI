@@ -2,11 +2,13 @@ import { Link, NavLink, useNavigate, useLocation } from "react-router-dom";
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 const NAV = [
   { to: "/", label: "HOME" },
+  { to: "/welcome", label: "WELCOME" },
   { to: "/search", label: "SEARCH" },
   { to: "/screener", label: "SCREENER" },
   { to: "/watchlist", label: "WATCHLIST" },
   { to: "/backtest", label: "BACKTEST" },
-  { to: "/providers", label: "PROVIDERS" }
+  { to: "/providers", label: "PROVIDERS" },
+  { to: "/login", label: "LOGIN (STUB)" }
 ];
 const SearchBar = memo(function SearchBar({ q, setQ, onSubmit, searchRef }) {
   return /* @__PURE__ */ React.createElement(

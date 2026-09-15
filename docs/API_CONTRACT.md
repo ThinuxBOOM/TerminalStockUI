@@ -654,3 +654,200 @@ unknown → `422 {"detail": "unknown provider; expected one of [...]"}` (`backen
 - Dashboard: `GET /api/providers/health` → `{providers: [...]}` with zero-row stub
   (`backend/api/providers.py:13-23`); `POST /api/providers/health/test` reference-quote
   probe (`backend/api/providers.py:26-34`).
+
+---
+
+## M9 appendix (PROPOSAL — market index / ASPI surfaces; frontend-team draft, NOT implemented)
+
+Status: **non-normative proposal** from Frontend Agent 4+5. No backend route
+changes here; existing `/api/markets/*`, `/api/market_data/*`, and
+`/api/screener` routes are untouched. The frontend ships a frontend-only
+implementation (`frontend/src/api/aspi.js` + `frontend/src/components/AspiChart.jsx`)
+on top of existing endpoints; this appendix asks the backend team for native
+surfaces so proxies and client-side composites can be retired.
+
+### Why
+
+- There is no index time series anywhere (`backend/api/markets.py` serves
+  breadth aggregates; `backend/api/screener.py` serves forecast-ranked rows).
+- Backend `validate_symbol` (`backend/security/validation.py:17`) rejects `^`,
+  so canonical benchmark symbols (`^NYA`, `^IXIC`, `^FCHI`, `^AEX`, `^BFX`)
+  422 today. The frontend falls back to ETF proxies (labelled PROXY in the UI).
+- The Top-20 composite is equal-weighted client-side because no endpoint
+  exposes market-cap weights.
+
+### Proposal 1: allow caret index symbols (smallest change)
+
+Relax `SYMBOL_RE` to accept a single leading `^` (e.g.
+`r"^\^?[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$"`), or exempt a registry-backed
+index allowlist. Frontend primaries per MIC:
+
+| MIC | Canonical index | Frontend proxy today |
+|---|---|---|
+| XNYS | `^NYA` (NYSE Composite) | `SPY` |
+| XNAS | `^IXIC` (Nasdaq Composite) | `QQQ` |
+| XSHG | `000001.SS` (SSE Composite, already valid) | — |
+| XPAR | `^FCHI` (CAC 40) | `CAC.PA`, `EWQ` |
+| XAMS | `^AEX` (AEX) | `IAEX.AS`, `EWN` |
+| XBRU | `^BFX` (BEL 20) | `EWK` |
+| XCOL (future) | CSE ASPI vendor symbol TBD | — |
+
+### Proposal 2: `GET /api/markets/{mic}/index` (preferred long-term)
+
+```http
+GET /api/markets/XNAS/index?timeframe=1d&limit=90&constituents=top20
+```
+
+- Query: `timeframe ∈ {1d, 1wk, 1mo}` (mirror `validate_timeframe`),
+  `limit` 1–250 (mirror `/api/market_data/bars`),
+  `constituents ∈ {none, top20}` (default `none`).
+- `{mic}` validates like `/{mic}/liquidity` (unknown MIC → `422`).
+- `constituents=top20` returns the turnover-sorted Top-20 with per-row
+  `weight` (index weight when known, else `null` — never fabricated) so the
+  frontend can render an index-weighted line instead of equal-weighted.
+
+```json
+{
+  "mic": "XNAS",
+  "index_symbol": "^IXIC",
+  "index_label": "Nasdaq Composite",
+  "timeframe": "1d",
+  "bars": [{ "ts": "2026-01-15", "close": 21500.12 }],
+  "constituents": [
+    {
+      "symbol": "AAPL", "company_name": "Apple Inc.", "currency": "USD",
+      "price": 232.1, "change_pct": 0.42, "turnover": 1.2e10,
+      "weight": null
+    }
+  ],
+  "weighting": "equal (market-cap weights unavailable)",
+  "turnover_note": "Turnover sums native price*volume per symbol with no FX conversion (mixed currencies).",
+  "provenance": {"source": "...", "as_of": "...", "delay_minutes": 15, "quality_grade": "B", "fallback_used": false, "missing_fields": ["market-cap-weights"]},
+  "disclosure": "Not investment advice. For informational purposes only."
+}
+```
+
+- Partial failure degrades per-symbol to `skipped: [{symbol, reason}]`
+  (the `markets.py`/`screener.py` pattern) — never a batch 500.
+- `weighting` is `"index"` only when every returned constituent carries a
+  real weight; otherwise `"equal (market-cap weights unavailable)"` and
+  `"market-cap-weights"` appears in `missing_fields`.
+
+### Proposal 3: XCOL venue slot (Sri Lanka CSE ASPI, extensible)
+
+Frontend carries a disabled `XCOL` benchmark entry (LKR, Asia/Colombo) that
+renders as a "coming soon" teaser only. To light it up (no frontend code
+change needed beyond `enabled: true`):
+
+```yaml
+# config/markets.yaml — append (MIC ^[A-Z]{4}$, real ZoneInfo timezone):
+- mic: XCOL
+  name: Colombo Stock Exchange
+  provider_suffix: ""        # confirm vendor symbol style first
+  timezone: Asia/Colombo
+  currency: LKR
+  country: LK
+  delay_minutes: 15
+  enabled: true
+  ingest: true
+```
+
+Open items for the backend team: confirm the vendor index symbol for the
+CSE All-Share Price Index, the quote suffix convention for CSE listings,
+and the trading calendar (weekend days, holidays) for `market_state`.
+
+---
+
+## Overlay appendix (chart indicators — normative, Backend Agent 5 repaired)
+
+Engine: `backend/analytics/technical/overlays.py`
+(`SUPPORTED_INDICATORS`, `parse_indicators`, `compute_indicators`).
+Pure/vectorized/deterministic; no network, randomness, or wall-clock reads.
+Formulas mirror `backend/analytics/technical/indicators.py`
+(SMA/EMA rolling/ewm, RSI Wilder, MACD 12/26/9, BB 20/2 population std,
+ATR Wilder, VWAP cumulative typical-price, volume SMA20).
+
+### Supported names + aliases
+
+Canonical `SUPPORTED_INDICATORS` (upper-case on the wire):
+
+```json
+["SMA20", "SMA50", "SMA200", "EMA12", "EMA26", "RSI14", "MACD", "BB20", "VWAP", "ATR14", "VOLUME_SMA20"]
+```
+
+Parsing is case-insensitive, ignores spaces/`_`/`-`, dedupes (first wins):
+`sma_20`/`sma-20`/`sma 20` → `SMA20`; `rsi` → `RSI14`;
+`bb`/`bollinger`/`bollinger20` → `BB20`; `atr` → `ATR14`;
+`vol`/`volume`/`vol_sma20` → `VOLUME_SMA20`.
+
+### `GET /api/analytics/{symbol}?indicators=...`
+
+- Query `indicators`: comma-separated canonical/alias names
+  (e.g. `?indicators=SMA20,EMA12,RSI14,MACD,BB20,VWAP,ATR14`).
+  Omitted/blank → backward compat: **no** `indicators` key (snapshot-only,
+  `technical` latest-values unchanged).
+- Unknown token → `422 {"detail": "unknown indicator(s): FOO; expected one of
+  ['SMA20', 'SMA50', 'SMA200', 'EMA12', 'EMA26', 'RSI14', 'MACD', 'BB20',
+  'VWAP', 'ATR14', 'VOLUME_SMA20']"}` exactly
+  (`backend/analytics/technical/overlays.py:parse_indicators`,
+  surfaced by `backend/api/analytics_api.py` + `backend/api/market_data.py`).
+- Success adds `indicators: {requested, bars, max_points, series,
+  provenance}` plus flat duplicates of each series entry at the same level
+  (so the existing frontend `normalizeIndicators()` passthrough in
+  `frontend/src/api/client.js:1356-1417` keeps working; it ignores the
+  metadata keys). `max_points` is `1000` (last-N truncation after full-history
+  computation, so SMA values stay stable).
+
+```json
+{
+  "symbol": "AAPL",
+  "provenance": {"source": "...", "as_of": "...", "delay_minutes": 15, "quality_grade": "B", "fallback_used": false, "missing_fields": []},
+  "indicators": {
+    "requested": ["SMA20", "BB20", "MACD"],
+    "bars": 120,
+    "max_points": 1000,
+    "series": {
+      "SMA20": [{"time": "2026-01-15", "value": 232.1}],
+      "BB20": {"upper": [...], "middle": [...], "lower": [...]},
+      "MACD": {"macd": [...], "signal": [...], "histogram": [...]}
+    },
+    "SMA20": [{"time": "2026-01-15", "value": 232.1}],
+    "BB20": {"upper": [...], "middle": [...], "lower": [...]},
+    "MACD": {"macd": [...], "signal": [...], "histogram": [...]},
+    "provenance": {"source": "...", "as_of": "...", "delay_minutes": 15, "quality_grade": "B", "fallback_used": false, "missing_fields": []}
+  }
+}
+```
+
+### `GET /api/market_data/indicators?symbol=&indicators=&timeframe=&limit=`
+
+Distinct path (never collides with `/quote` or `/bars`):
+`backend/api/market_data.py:market_indicators`.
+
+- `symbol` required; `indicators` optional (same parse + 422 as above);
+  `timeframe ∈ {1d, 1wk, 1mo}` (default `1d`);
+  `limit` 1–250 (default `120`, mirrors `/bars`).
+- Response: `{symbol, timeframe, requested, bars, max_points, series,
+  indicators: {requested, bars, max_points, series, provenance, +flat},
+  provenance}`.
+
+### Series semantics (both endpoints)
+
+- Point: `{time: "YYYY-MM-DD", value: number|null}` (`IndicatorPointSchema`,
+  `frontend/src/api/client.js:1268-1271`). Times are bar dates ascending,
+  deduped (last wins).
+- Single-line overlays (`SMA20/SMA50/SMA200/EMA12/EMA26/RSI14/VWAP/ATR14/
+  VOLUME_SMA20`): array of points.
+- `BB20`: `{upper, middle, lower}` arrays → frontend `BB_UPPER/BB_MIDDLE/
+  BB_LOWER`. `MACD`: `{macd, signal, histogram}` arrays → frontend
+  `MACD_LINE/MACD_SIGNAL/MACD_HIST`.
+- Warmup is `null`, never `0` (frontend drops nulls as line gaps).
+- Insufficient history or missing fields → per-indicator
+  `{"status": "unavailable", "reason": "..."}` (never fabricated, never a
+  batch 500; frontend renders no line). Minimum bars: SMA20 20, SMA50 50,
+  SMA200 200, EMA12 12, EMA26 26, RSI14 15, MACD 35, BB20 20, VWAP 1,
+  ATR14 15, VOLUME_SMA20 20.
+- Frontend alignment (read-only): `PriceChart.jsx:42-43` documents
+  `GET /api/analytics/{symbol}?indicators=...`; `SUPPORTED_INDICATORS`
+  (10 chart names, `VOLUME_SMA20` backend-only until the picker adds it)
+  drives `requestedIndicators` + legend in `SecurityBrief.jsx:65-70`.

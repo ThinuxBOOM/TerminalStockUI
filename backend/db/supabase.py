@@ -80,4 +80,11 @@ def create_supabase_engine(url: str | None = None, **kwargs):
     kwargs.setdefault("poolclass", NullPool)
     kwargs.setdefault("pool_pre_ping", True)
     kwargs.setdefault("future", True)
+    # Supabase :6543 is a transaction-mode pooler: named server-side
+    # prepared statements do not survive across checkouts
+    # (DuplicatePreparedStatement). Disable them; plain queries only.
+    # (Mirrors the pooled branch of backend/db/session._create_engine.)
+    _connect_args = dict(kwargs.get("connect_args") or {})
+    _connect_args.setdefault("prepare_threshold", None)
+    kwargs["connect_args"] = _connect_args
     return create_engine(resolved, **kwargs)

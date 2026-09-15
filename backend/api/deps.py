@@ -18,6 +18,16 @@ try:
 except Exception:  # pragma: no cover
     StooqProvider = None  # type: ignore[assignment]
 
+try:  # Free-tier US redundancy (opt-in; missing -> skipped, never crash)
+    from ..market_data.providers.finnhub_free import FinnhubProvider
+except Exception:  # pragma: no cover
+    FinnhubProvider = None  # type: ignore[assignment]
+
+try:
+    from ..market_data.providers.twelvedata_free import TwelveDataProvider
+except Exception:  # pragma: no cover
+    TwelveDataProvider = None  # type: ignore[assignment]
+
 _registry: InstrumentRegistry | None = None
 _health: ProviderHealthTracker | None = None
 _service: MarketDataService | None = None
@@ -37,33 +47,66 @@ def get_health_tracker() -> ProviderHealthTracker:
     return _health
 
 
+def _tracker_hook(tracker):  # type: ignore[no-untyped-def]
+    """Quota-aware passive hook: fn(p, ms, ok, *, status_code, error)."""
+
+    def _record(p, ms, ok, **kw):  # type: ignore[no-untyped-def]
+        try:
+            tracker.record(p, ms, ok,
+                           status_code=kw.get("status_code"), error=kw.get("error"),
+                           quota_limited=kw.get("quota_limited"))
+        except TypeError:
+            try:
+                tracker.record(p, ms, ok)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    return _record
+
+
 def get_market_service() -> MarketDataService:
     global _service
     if _service is None:
         tracker = get_health_tracker()
-        provider = YFinanceProvider(on_call=lambda p, ms, ok: tracker.record(p, ms, ok))
+        hook = _tracker_hook(tracker)
+        provider = YFinanceProvider(on_call=hook)
         # Milestone 0 chain: Alpaca live US (keys via env; unconfigured ->
         # flagged stubs) + Stooq delayed gap-filler (no key). Each has an
         # independent breaker; failures never take down yfinance/AKShare.
+        # Free-tier US redundancy: Finnhub (FINNHUB_API_KEY) + TwelveData
+        # (TWELVEDATA_API_KEY); unconfigured -> flagged stubs, skipped cost
+        # is one stub call each only when yfinance is not live.
         alpaca = None
         if AlpacaProvider is not None:
             try:
-                alpaca = AlpacaProvider(
-                    on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
-                )
+                alpaca = AlpacaProvider(on_call=hook)
             except Exception:
                 alpaca = None
         stooq = None
         if StooqProvider is not None:
             try:
-                stooq = StooqProvider(
-                    on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
-                )
+                stooq = StooqProvider(on_call=hook)
             except Exception:
                 stooq = None
+        finnhub = None
+        if FinnhubProvider is not None:
+            try:
+                finnhub = FinnhubProvider(on_call=hook)
+            except Exception:
+                finnhub = None
+        twelvedata = None
+        if TwelveDataProvider is not None:
+            try:
+                twelvedata = TwelveDataProvider(on_call=hook)
+            except Exception:
+                twelvedata = None
         _service = MarketDataService(registry=get_registry(), provider=provider,
                                      health=tracker, cache=get_cache(),
-                                     alpaca_provider=alpaca, stooq_provider=stooq)
+                                     alpaca_provider=alpaca, stooq_provider=stooq,
+                                     finnhub_provider=finnhub,
+                                     twelvedata_provider=twelvedata)
     return _service
 
 

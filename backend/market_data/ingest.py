@@ -33,6 +33,12 @@ DEFAULT_UNIVERSE: list[str] = [
 
 DEFAULT_TIMEFRAME = "1d"
 
+#: Bar-chain order for daily ingestion (overridable via ``INGEST_BAR_CHAIN``
+#: comma-list, e.g. ``yfinance,stooq``). yfinance stays first (full 2y
+#: history); stooq is a best-effort gap-filler for symbols yfinance misses.
+#: Unknown names are ignored so a typo never breaks a cron tick.
+DEFAULT_BAR_CHAIN: list[str] = ["yfinance", "stooq"]
+
 #: Single yfinance history fetch per symbol (same Ticker.history pattern as
 #: the quote provider's ``2d`` fetch, extended to daily bars).
 FETCH_PERIOD = "2y"
@@ -76,6 +82,19 @@ def default_universe() -> list[str]:
         if out:
             return out
     return list(DEFAULT_UNIVERSE)
+
+
+def bar_chain() -> list[str]:
+    """Ordered fetch fallbacks for daily bars (env ``INGEST_BAR_CHAIN``)."""
+    raw = (os.getenv("INGEST_BAR_CHAIN", "") or "").strip().lower()
+    if not raw:
+        return list(DEFAULT_BAR_CHAIN)
+    out: list[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if name in ("yfinance", "stooq") and name not in out:
+            out.append(name)
+    return out or list(DEFAULT_BAR_CHAIN)
 
 
 def _fnum(value: object) -> float | None:
@@ -202,6 +221,110 @@ def fetch_daily_bars(
     return bars
 
 
+def fetch_stooq_daily_bars(
+    provider_symbol: str,
+    period: str = FETCH_PERIOD,
+    interval: str = FETCH_INTERVAL,
+) -> list[dict]:
+    """Best-effort daily bars via Stooq CSV (no key, delayed).
+
+    Uses the daily CSV ``https://stooq.com/q/d/l/?s=<sym>&i=d`` (ascending).
+    Only ``1d`` is supported; other intervals raise so the chain skips them.
+    Raises on network/empty/unusable data; callers convert to per-symbol
+    errors or try the next chain link. Never fabricates bars.
+    """
+    symbol = (provider_symbol or "").strip().upper()
+    if not symbol:
+        raise ValueError("empty symbol")
+    if (interval or "1d").strip().lower() != "1d":
+        raise ValueError(f"stooq fallback supports 1d only, got {interval!r}")
+    try:
+        from backend.market_data.providers.stooq import to_stooq_symbol
+    except Exception as exc:
+        raise RuntimeError("stooq provider unavailable") from exc
+    try:
+        stooq_sym = to_stooq_symbol(symbol)
+    except Exception as exc:
+        raise RuntimeError(f"stooq symbol map failed for {symbol}") from exc
+    # Cap rows: stooq daily CSV returns full history; keep the trailing 2y
+    # (~504 trading days) so the fallback mirrors FETCH_PERIOD="2y".
+    import csv
+    import io
+    import urllib.request
+
+    url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "onemarket/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        raise RuntimeError(f"stooq fetch failed for {symbol}: {type(exc).__name__}") from exc
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        rows = list(reader)
+    except Exception as exc:
+        raise RuntimeError(f"stooq parse failed for {symbol}") from exc
+    bars: list[dict] = []
+    for row in rows[-600:]:
+        try:
+            day = str(row.get("Date") or row.get("date") or "").strip()[:10]
+            if not day or len(day) != 10:
+                continue
+            ts = _index_to_utc(day, symbol_hint=symbol)
+            if ts is None:
+                continue
+            close = _fnum(row.get("Close") or row.get("close"))
+            if close is None:
+                continue
+            bars.append({
+                "ts": ts,
+                "open": _fnum(row.get("Open") or row.get("open")),
+                "high": _fnum(row.get("High") or row.get("high")),
+                "low": _fnum(row.get("Low") or row.get("low")),
+                "close": close,
+                "volume": _inum(row.get("Volume") or row.get("volume")),
+            })
+        except Exception:
+            continue
+    # Drop incomplete OHLC rows (mirrors snapshot_store canonical rule).
+    bars = [b for b in bars if b.get("open") is not None and b.get("high") is not None
+            and b.get("low") is not None and b.get("close") is not None]
+    bars.sort(key=lambda item: item["ts"])
+    if not bars:
+        raise RuntimeError(f"no usable stooq bars for {symbol}")
+    return bars
+
+
+def fetch_daily_bars_with_fallback(
+    provider_symbol: str,
+    period: str = FETCH_PERIOD,
+    interval: str = FETCH_INTERVAL,
+    chain: list[str] | tuple[str, ...] | None = None,
+) -> tuple[list[dict], str]:
+    """Fetch daily bars via the ordered ``chain``; return (bars, source).
+
+    Default chain is :func:`bar_chain` (env ``INGEST_BAR_CHAIN``). Tries each
+    link in order, returning the first non-empty success. Raises the last
+    error when every link fails so callers report a per-symbol error.
+    ``source`` is the winning link name (``yfinance``/``stooq``) for
+    ``price_bars.source`` lineage.
+    """
+    links = list(chain) if chain else bar_chain()
+    last_exc: Exception | None = None
+    for link in links:
+        try:
+            if link == "stooq":
+                return fetch_stooq_daily_bars(provider_symbol, period, interval), "stooq"
+            return fetch_daily_bars(provider_symbol, period, interval), "yfinance"
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("ingest chain link failed link=%s symbol=%s", link, provider_symbol)
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"no data for {(provider_symbol or '').strip().upper()}")
+
+
 def _grade_for_ingest() -> str:
     try:
         from backend.market_data.quality import grade_quality
@@ -254,12 +377,18 @@ def _get_or_create_db_instrument(db, registry_instrument):
     return row
 
 
-def _upsert_bars(db, db_instrument, bars: list[dict], *, timeframe: str) -> int:
+def _upsert_bars(db, db_instrument, bars: list[dict], *, timeframe: str, source: str = "yfinance") -> int:
     """Idempotent upsert keyed (instrument_id, timeframe, ts). Returns count."""
     from backend.db.models import PriceBar
 
     now = _utcnow()
     grade = _grade_for_ingest()
+    try:
+        src = str(source or "yfinance").strip().lower() or "yfinance"
+    except Exception:
+        src = "yfinance"
+    if src not in ("yfinance", "stooq", "akshare", "alpaca", "finnhub", "twelvedata"):
+        src = "yfinance"
     count = 0
     for item in bars or []:
         ts = item.get("ts")
@@ -278,7 +407,7 @@ def _upsert_bars(db, db_instrument, bars: list[dict], *, timeframe: str) -> int:
             low=item.get("low"),
             close=item.get("close"),
             volume=item.get("volume"),
-            source="yfinance",
+            source=src,
             as_of=now,
             quality_grade=grade,
         ))
@@ -313,7 +442,7 @@ def ingest_symbols(
             wanted.append(text)
     if not wanted:
         return {}, {}
-    fetch = fetch_fn if fetch_fn is not None else fetch_daily_bars
+    fetch = fetch_fn if fetch_fn is not None else fetch_daily_bars_with_fallback
 
     from backend.db.session import get_session_factory, init_db
 
@@ -344,9 +473,15 @@ def ingest_symbols(
                 provider_symbol = (
                     instrument.provider_symbol or raw.strip().upper()
                 )
-                bars = fetch(provider_symbol)
+                fetched = fetch(provider_symbol)
+                # Backward compat: legacy fetch_fn returns bare bars list;
+                # the chain-aware default returns (bars, source).
+                if isinstance(fetched, tuple) and len(fetched) == 2:
+                    bars, bar_source = fetched[0], fetched[1]
+                else:
+                    bars, bar_source = fetched, "yfinance"
                 db_inst = _get_or_create_db_instrument(db, instrument)
-                count = _upsert_bars(db, db_inst, bars, timeframe=timeframe)
+                count = _upsert_bars(db, db_inst, bars, timeframe=timeframe, source=bar_source)
                 db.commit()
                 ingested[provider_symbol] = count
             except Exception as exc:

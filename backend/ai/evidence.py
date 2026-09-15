@@ -43,6 +43,53 @@ _MAX_SUMMARY_KEYS = 20
 _MAX_STR = 280
 _MAX_DETAIL = 500
 
+# ---------------------------------------------------------------------------
+# Token budgets per profile (prompt-input caps, ~4 chars/token).
+#
+# Quick Insight ~300-600 tokens, Forecast Assist ~1000, Deep Research 4000
+# max, Report ~2000. Enforced via truncation/summarization (top 5 bull/bear,
+# cap events 20, no raw candles — raw series/secrets already stripped above).
+# These keep AI calls cheap; prompts/__init__.render_prompt() truncates the
+# packet JSON to budget*4 chars so no profile can blow its budget.
+# ---------------------------------------------------------------------------
+PROFILE_TOKEN_BUDGETS: dict[str, int] = {
+    "quick_insight": 600,
+    "forecast_assist": 1000,
+    "deep_research": 4000,
+    "report": 2000,
+}
+
+# Per-profile detail clipping (chars) — quick profiles summarize harder.
+_PROFILE_DETAIL_CLIP: dict[str, int] = {
+    "quick_insight": 140,
+    "forecast_assist": 200,
+    "deep_research": 500,
+    "report": 280,
+}
+
+_PROFILE_SUMMARY_KEYS: dict[str, int] = {
+    "quick_insight": 8,
+    "forecast_assist": 12,
+    "deep_research": 20,
+    "report": 16,
+}
+
+_PROFILE_EVENT_CAP: dict[str, int] = {
+    "quick_insight": 10,
+    "forecast_assist": 12,
+    "deep_research": 20,
+    "report": 20,
+}
+
+
+def estimate_packet_tokens(packet: Any) -> int:
+    """Rough input-token estimate for a packet (~4 chars/token)."""
+    try:
+        text = packet.model_dump_json() if hasattr(packet, "model_dump_json") else str(packet)
+    except Exception:
+        text = str(packet)
+    return max(1, len(text) // 4)
+
 
 def _is_forbidden_key(key: str) -> bool:
     lowered = key.strip().lower()
@@ -257,3 +304,80 @@ def build_evidence_packet(
         top_bullish=top_bullish, top_risks=top_risks,
         events=packet_events, limitations=limitations,
     )
+
+
+def _normalize_profile_key(profile: str | None) -> str:
+    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return key if key in PROFILE_TOKEN_BUDGETS else "quick_insight"
+
+
+def summarize_packet_for_profile(packet: EvidencePacket, profile: str) -> dict[str, Any]:
+    """Return a budget-truncated dict view of a packet for prompt rendering.
+
+    - Top 5 bull / top 5 bear enforced (schema caps); events capped per
+      profile (quick 10, forecast 12, deep/report 20).
+    - Detail strings clipped per profile (quick 140 chars … deep 500).
+    - deterministic_summary keys capped per profile (quick 8 … deep 20).
+    - Never includes raw candles/statements/secrets (already stripped at
+      build time; this only shrinks further).
+    """
+    key = _normalize_profile_key(profile)
+    detail_clip = _PROFILE_DETAIL_CLIP[key]
+    max_summary_keys = _PROFILE_SUMMARY_KEYS[key]
+    event_cap = _PROFILE_EVENT_CAP[key]
+
+    def _shrink_item(item: Any) -> dict[str, Any]:
+        try:
+            data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        except Exception:
+            return {"id": "ev-?", "label": str(item)[:140], "detail": "", "source": ""}
+        return {
+            "id": str(data.get("id", ""))[:120],
+            "label": str(data.get("label", ""))[:140],
+            "detail": str(data.get("detail", ""))[:detail_clip],
+            "source": str(data.get("source", ""))[:120],
+        }
+
+    summary: dict[str, Any] = {}
+    try:
+        raw_summary = packet.deterministic_summary or {}
+    except Exception:
+        raw_summary = {}
+    for name in list(raw_summary.keys())[:max_summary_keys]:
+        try:
+            text = json.dumps(raw_summary[name], default=str)
+        except Exception:
+            text = str(raw_summary[name])
+        summary[str(name)[:120]] = text[:detail_clip]
+
+    return {
+        "packet_id": packet.packet_id,
+        "symbol": packet.symbol,
+        "evidence_hash": packet.evidence_hash,
+        "quality_grade": packet.quality_grade,
+        "freshness": packet.freshness.model_dump(mode="json") if hasattr(packet.freshness, "model_dump") else {},
+        "deterministic_summary": summary,
+        "top_bullish": [_shrink_item(i) for i in (packet.top_bullish or [])[:5]],
+        "top_risks": [_shrink_item(i) for i in (packet.top_risks or [])[:5]],
+        "events": [_shrink_item(i) for i in (packet.events or [])[:event_cap]],
+        "limitations": [str(x)[:detail_clip] for x in (packet.limitations or [])[:MAX_LIMITATIONS]],
+    }
+
+
+def packet_prompt_json(packet: EvidencePacket, profile: str, max_tokens: int | None = None) -> str:
+    """Serialize a packet for prompts, hard-truncated to a token budget.
+
+    Defaults to PROFILE_TOKEN_BUDGETS[profile]; truncation appends a marker
+    so the model knows input was summarized (never silently dropped).
+    """
+    key = _normalize_profile_key(profile)
+    budget_tokens = int(max_tokens or PROFILE_TOKEN_BUDGETS[key])
+    budget_chars = max(512, budget_tokens * 4)
+    view = summarize_packet_for_profile(packet, key)
+    try:
+        text = json.dumps(view, default=str, indent=1)
+    except Exception:
+        text = str(view)[:budget_chars]
+    if len(text) > budget_chars:
+        text = text[:budget_chars] + '\n  "...truncated": true\n}'
+    return text
