@@ -255,7 +255,7 @@ def fetch_stooq_daily_bars(
     url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "onemarket/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:
         raise RuntimeError(f"stooq fetch failed for {symbol}: {type(exc).__name__}") from exc

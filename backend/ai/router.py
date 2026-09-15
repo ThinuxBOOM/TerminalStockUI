@@ -5,7 +5,7 @@
   provider swap requires zero analytics/frontend changes.
 - Responses are cached by evidence-hash (+ profile/provider/model/horizon)
   with per-profile TTLs (quick/forecast short, deep/report longer).
-- Resilience: per-profile timeouts (8s quick … 25s deep) via
+- Resilience: per-profile timeouts (60s all profiles, debug window) via
   asyncio.wait_for, exponential-backoff retries on transient failures only,
   per-provider circuit breakers (no-key/validation stubs never trip them),
   and request coalescing (concurrent identical evidence_hash shares one
@@ -54,7 +54,7 @@ DEFAULT_PROFILE_MAP: dict[str, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 # Per-profile timeout / retry / token / cache config (single source of truth).
 #
-# timeout_s:         asyncio.wait_for guard per attempt (8s quick … 25s deep).
+# timeout_s:         asyncio.wait_for guard per attempt (60s all profiles).
 # max_retries:       extra attempts after the first on TRANSIENT failures
 #                    only (timeout / connection / 429 / 5xx). 4xx, validation
 #                    stubs and no-key stubs never retry.
@@ -68,22 +68,22 @@ DEFAULT_PROFILE_MAP: dict[str, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 PROFILE_CONFIG: dict[str, dict[str, Any]] = {
     "quick_insight": {
-        "timeout_s": 8.0, "max_retries": 1, "backoff_base_s": 0.25,
+        "timeout_s": 60.0, "max_retries": 1, "backoff_base_s": 0.25,
         "max_prompt_tokens": 600, "max_output_tokens": 400,
         "cache_ttl_s": 1800, "description": "Quick Insight: fast, cheap, ~300-600 tokens",
     },
     "forecast_assist": {
-        "timeout_s": 12.0, "max_retries": 2, "backoff_base_s": 0.4,
+        "timeout_s": 60.0, "max_retries": 2, "backoff_base_s": 0.4,
         "max_prompt_tokens": 1000, "max_output_tokens": 600,
         "cache_ttl_s": 1800, "description": "Forecast Assist: blended opinion, ~1000 tokens",
     },
     "deep_research": {
-        "timeout_s": 25.0, "max_retries": 2, "backoff_base_s": 0.5,
+        "timeout_s": 60.0, "max_retries": 2, "backoff_base_s": 0.5,
         "max_prompt_tokens": 4000, "max_output_tokens": 1200,
         "cache_ttl_s": 3600, "description": "Deep Research: thorough, up to 4000 tokens",
     },
     "report": {
-        "timeout_s": 20.0, "max_retries": 2, "backoff_base_s": 0.5,
+        "timeout_s": 60.0, "max_retries": 2, "backoff_base_s": 0.5,
         "max_prompt_tokens": 2000, "max_output_tokens": 1000,
         "cache_ttl_s": 7200, "description": "Report: scheduled output, ~2000 tokens",
     },
@@ -660,9 +660,9 @@ class AIRouter:
         breaker = self.breaker_for(provider_name)
         cache_hit_key = self.cache_key(profile, packet, horizon, provider_name, provider.model)
         try:
-            effective_timeout = float(timeout_override if timeout_override else limits.get("timeout_s", 8.0))
+            effective_timeout = float(timeout_override if timeout_override else limits.get("timeout_s", 60.0))
         except (TypeError, ValueError):
-            effective_timeout = 8.0
+            effective_timeout = 60.0
         effective_timeout = min(max(effective_timeout, 1.0), 60.0)
         try:
             max_retries = max(0, int(limits.get("max_retries", 1)))

@@ -365,7 +365,7 @@ Backend revamp (all IMPLEMENTED unless noted):
   gzip fallback). `lz4` not vendored (`zlib` covers that role); `zstd` in the
   DB CHECK. Retention: raw 30d / compressed 365d / accuracy 3y per `docs/DB_SCHEMA.md`
   (normative; `docs/DATA_QUALITY.md` still carries the older Redis-assumed spec).
-- AI efficiency: 8/12/25/20s timeouts, transient-only retries, Semaphore(8),
+- AI efficiency: 60s timeouts all profiles (debug window), transient-only retries, Semaphore(8),
   prompt budgets + truncation, circuit breaker, hybrid cache (in-memory +
   Redis-behind-`backend/cache.py`, best-effort). Token ledger dual-layer
   (in-memory + `ai_token_ledger` writers). PARTIAL by design: budgets logged

@@ -604,7 +604,7 @@ def cron_score_post(request: Request, body: ScoreRequest) -> dict:
 # ``POST /api/cron/health`` is the manual-run twin. Batches never 500.
 
 
-def _run_health_probe(timeout_s: float = 5.0) -> dict:
+def _run_health_probe(timeout_s: float = 60.0) -> dict:
     """Probe every known provider once; return enriched stats + batch status.
 
     ``ok`` is False when any provider reports state ``down`` or an open
@@ -613,9 +613,9 @@ def _run_health_probe(timeout_s: float = 5.0) -> dict:
     only unexpected exceptions land in ``errors``. Never raises.
     """
     try:
-        timeout = max(1.0, min(15.0, float(timeout_s)))
+        timeout = max(1.0, min(60.0, float(timeout_s)))
     except (TypeError, ValueError):
-        timeout = 5.0
+        timeout = 60.0
     try:
         from backend.api.deps import get_health_tracker
         from backend.market_data.health import probe_all_providers
@@ -693,7 +693,7 @@ def cron_health_get(
     timeout_s: float = Query(default=5.0, ge=1.0, le=15.0,
                              description="Per-provider ping budget in seconds"),
 ) -> dict:
-    """Vercel Cron entry: ``GET /api/cron/health[?timeout_s=5]``."""
+    """Vercel Cron entry: ``GET /api/cron/health[?timeout_s=60]``."""
     _check_cron_auth(request)
     try:
         return _run_health_probe(timeout_s)

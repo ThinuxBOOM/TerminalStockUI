@@ -71,7 +71,7 @@ DISCLOSURE = "Not investment advice. For informational purposes only."
 #: cache itself is 60s) with repeat-view speed.
 _SCREENER_CACHE_TTL_S = 45
 _SCREENER_MAX_WORKERS = 8
-_PER_SYMBOL_TIMEOUT_S = 15
+_PER_SYMBOL_TIMEOUT_S = 60
 
 #: Quality signal inputs: no statement feed in this phase, so the shared
 #: EMPTY mapping mirrors backend/api/analytics_api.py (modules return

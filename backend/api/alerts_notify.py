@@ -18,7 +18,7 @@ import os
 logger = logging.getLogger(__name__)
 
 WEBHOOK_ENV = "ALERTS_WEBHOOK_URL"
-WEBHOOK_TIMEOUT_S = 5.0
+WEBHOOK_TIMEOUT_S = 60.0
 
 
 def _redacted(event: dict) -> dict:

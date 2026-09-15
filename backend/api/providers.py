@@ -174,7 +174,7 @@ def test_provider(provider: str = "yfinance", svc=Depends(get_market_service)):
     except Exception as exc:
         raise _HTTPException(status_code=502, detail=f"health probe failed: {exc}") from exc
     try:
-        stats = _probe(name, tracker, timeout_s=5.0)
+        stats = _probe(name, tracker, timeout_s=60.0)
     except _HTTPException:
         raise
     except ValueError as exc:

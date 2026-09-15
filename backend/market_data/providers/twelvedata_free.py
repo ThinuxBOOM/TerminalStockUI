@@ -214,7 +214,7 @@ class TwelveDataProvider:
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
-        timeout_s: float = 8.0,
+        timeout_s: float = 60.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
         # Free Basic: 8 credits/min (+800/day cap). 8/60 rps, burst 8.

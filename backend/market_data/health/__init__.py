@@ -668,7 +668,7 @@ def _probe_record(
         pass
 
 
-def probe_data_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dict:
+def probe_data_provider(name: str, tracker=None, *, timeout_s: float = 60.0) -> dict:
     """Lightweight quote/FX ping for one market-data provider.
 
     Single-symbol quote (AAPL) or single FX pair (EUR/USD); no history
@@ -681,9 +681,9 @@ def probe_data_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> d
     started = _time.perf_counter()
     latency = 0.0
     try:
-        timeout = max(1.0, min(15.0, float(timeout_s)))
+        timeout = max(1.0, min(60.0, float(timeout_s)))
     except (TypeError, ValueError):
-        timeout = 5.0
+        timeout = 60.0
     if key == "fx":
         try:
             from backend.market_data.fx.provider import FXProvider
@@ -815,7 +815,7 @@ _AI_PING_PATHS: dict[str, str] = {
 }
 
 
-def probe_ai_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dict:
+def probe_ai_provider(name: str, tracker=None, *, timeout_s: float = 60.0) -> dict:
     """Lightweight AI model-list ping (no completion = no costly call).
 
     Unconfigured (no key) short-circuits without network and records an
@@ -833,9 +833,9 @@ def probe_ai_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dic
                 "error": f"unknown AI provider; expected one of {list(AI_PROVIDERS)}"}
     started = _time.perf_counter()
     try:
-        timeout = max(1.0, min(15.0, float(timeout_s)))
+        timeout = max(1.0, min(60.0, float(timeout_s)))
     except (TypeError, ValueError):
-        timeout = 5.0
+        timeout = 60.0
     api_key: str | None = None
     model = ""
     try:
@@ -961,7 +961,7 @@ def probe_ai_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dic
                 "error": msg[:280], "configured": True}
 
 
-def probe_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dict:
+def probe_provider(name: str, tracker=None, *, timeout_s: float = 60.0) -> dict:
     """Dispatch to the data or AI lightweight probe. Never raises."""
     key = (name or "").strip().lower()
     try:
@@ -976,7 +976,7 @@ def probe_provider(name: str, tracker=None, *, timeout_s: float = 5.0) -> dict:
                 "error": f"{type(exc).__name__}: {exc}"[:280]}
 
 
-def probe_all_providers(tracker=None, *, timeout_s: float = 5.0, include_ai: bool = True) -> list[dict]:
+def probe_all_providers(tracker=None, *, timeout_s: float = 60.0, include_ai: bool = True) -> list[dict]:
     """Probe every known provider (data + optionally AI). Never raises.
 
     Sequential and bounded: one lightweight ping per provider (quote/FX/AI

@@ -266,8 +266,8 @@ def test_profile_config_timeouts_tokens_cache():
         PROFILE_CONFIG["quick_insight"], PROFILE_CONFIG["forecast_assist"],
         PROFILE_CONFIG["deep_research"], PROFILE_CONFIG["report"],
     )
-    assert quick["timeout_s"] == 8.0
-    assert deep["timeout_s"] == 25.0
+    assert quick["timeout_s"] == 60.0
+    assert deep["timeout_s"] == 60.0
     assert quick["max_prompt_tokens"] <= 600
     assert forecast["max_prompt_tokens"] == 1000
     assert deep["max_prompt_tokens"] == 4000

@@ -202,7 +202,7 @@ class AlpacaProvider:
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
-        timeout_s: float = 8.0,
+        timeout_s: float = 60.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
         self.limiter = limiter or RateLimiter(rate_per_sec=3.0, burst=6)

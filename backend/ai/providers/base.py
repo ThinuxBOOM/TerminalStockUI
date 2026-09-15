@@ -31,10 +31,10 @@ PROFILE_MAX_OUTPUT_TOKENS: dict[str, int] = {
 }
 
 PROFILE_TIMEOUT_FALLBACK: dict[str, float] = {
-    "quick_insight": 8.0,
-    "forecast_assist": 12.0,
-    "deep_research": 25.0,
-    "report": 20.0,
+    "quick_insight": 60.0,
+    "forecast_assist": 60.0,
+    "deep_research": 60.0,
+    "report": 60.0,
 }
 
 
@@ -50,14 +50,14 @@ def max_output_tokens_for_profile(profile: str) -> int:
 
 
 def timeout_for_profile(profile: str) -> float:
-    """HTTP timeout (s) for a profile: 8s quick … 25s deep."""
+    """HTTP timeout (s) for a profile: 60s all profiles (debug window)."""
     key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
     try:
         from backend.ai.router import PROFILE_CONFIG  # lazy: avoid import cycle
 
-        return float(PROFILE_CONFIG.get(key, {}).get("timeout_s", PROFILE_TIMEOUT_FALLBACK.get(key, 8.0)))
+        return float(PROFILE_CONFIG.get(key, {}).get("timeout_s", PROFILE_TIMEOUT_FALLBACK.get(key, 60.0)))
     except Exception:
-        return PROFILE_TIMEOUT_FALLBACK.get(key, 8.0)
+        return PROFILE_TIMEOUT_FALLBACK.get(key, 60.0)
 
 
 def prompt_cache_hint(provider_name: str, profile: str) -> dict[str, Any]:
@@ -300,7 +300,7 @@ class BaseProvider(ABC):
         url: str,
         headers: dict[str, str],
         payload: dict[str, Any],
-        timeout_s: float = 15.0,
+        timeout_s: float = 60.0,
         max_retries: int = 1,
         backoff_base_s: float = 0.4,
     ) -> tuple[str, dict | None]:
@@ -329,7 +329,7 @@ class BaseProvider(ABC):
         url: str,
         headers: dict[str, str],
         payload: dict[str, Any],
-        timeout_s: float = 15.0,
+        timeout_s: float = 60.0,
         max_retries: int = 1,
         backoff_base_s: float = 0.4,
     ) -> str:

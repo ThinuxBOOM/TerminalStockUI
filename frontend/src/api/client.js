@@ -86,7 +86,7 @@ function resolveBaseUrl() {
 const BASE_URL = resolveBaseUrl();
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 15e3,
+  timeout: 6e4,
   headers: { "Content-Type": "application/json" }
 });
 function normalizeSymbolParam(v) {

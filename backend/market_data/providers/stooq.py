@@ -192,7 +192,7 @@ class StooqProvider:
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
-        timeout_s: float = 8.0,
+        timeout_s: float = 60.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
         # Free endpoint: be gentle (2 rps, burst 4).
