@@ -156,7 +156,7 @@ function ForecastDetails({ symbol }) {
             </h2>
             <AuditLink symbol={symbol} />
           </div>
-          <p className="mt-1 text-2xl font-bold text-term-green">
+          <p className="mt-1 text-display-sm term-num font-bold text-term-green">
             {formatPct1(f.probability)} <ProvenanceBadge p={f.provenance} />
           </p>
           <dl className="mt-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-4">

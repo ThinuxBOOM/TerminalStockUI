@@ -7,11 +7,23 @@
 }
 
 body {
-  @apply bg-term-bg text-term-text font-mono antialiased;
+  @apply bg-term-bg text-term-text font-sans antialiased;
 }
 
 .term-panel {
-  @apply bg-term-panel border border-term-border rounded-md;
+  @apply bg-term-panel border border-term-border rounded-md shadow-panel;
+}
+
+.term-panel-hero {
+  @apply bg-term-panel border border-term-border2 rounded-lg shadow-panel;
+}
+
+.term-panel-nested {
+  @apply bg-term-panel2 border border-term-border rounded;
+}
+
+.term-num {
+  @apply font-mono tabular-nums;
 }
 
 .term-input {
@@ -19,15 +31,33 @@ body {
 }
 
 .term-btn {
-  @apply px-3 py-2 rounded text-sm font-semibold bg-term-green text-black hover:opacity-90 disabled:opacity-40;
+  @apply px-3 py-2 rounded text-sm font-semibold bg-term-green text-black hover:opacity-90 disabled:opacity-40 transition-colors duration-150;
 }
 
 .term-btn-ghost {
-  @apply px-3 py-2 rounded text-sm border border-term-border text-term-text hover:border-term-green;
+  @apply px-3 py-2 rounded text-sm border border-term-border text-term-text hover:border-term-green transition-colors duration-150;
+}
+
+.term-btn-sm {
+  @apply px-2 py-1 text-2xs rounded border border-term-border text-term-muted hover:border-term-muted hover:text-term-text transition-colors duration-150;
+}
+
+.term-icon-btn {
+  @apply rounded p-1 text-term-muted hover:bg-term-panel2 hover:text-term-red transition-colors duration-150;
 }
 
 .term-label {
-  @apply text-[11px] uppercase tracking-widest text-term-muted;
+  @apply text-2xs uppercase tracking-widest text-term-muted font-sans;
+}
+
+/* Route-level fade (paired with Layout focus-management effect). */
+.route-fade {
+  animation: route-fade 150ms ease-out;
+}
+
+@keyframes route-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* M8: visible keyboard focus everywhere (a11y). */
@@ -89,5 +119,11 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .skeleton-shimmer {
     animation: none;
+  }
+  .route-fade {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
   }
 }

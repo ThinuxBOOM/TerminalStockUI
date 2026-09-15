@@ -19,6 +19,7 @@ import {
   deriveMarketCardState,
   isStaleLiquidity,
 } from "../api/markets";
+import { changeColor } from "../utils/format";
 
 const compactFmt = new Intl.NumberFormat("en", {
   notation: "compact",
@@ -66,7 +67,7 @@ function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
   if (isStaleLiquidity(m?.provenance)) {
     return (
       <article
-        className="min-w-0 rounded border border-term-border bg-term-bg p-3"
+        className="term-panel-nested min-w-0 p-3"
         aria-label={`${m?.label || m?.mic} liquidity unavailable`}
       >
         <div className="flex items-center justify-between gap-2">
@@ -93,12 +94,12 @@ function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
   }
   return (
     <article
-      className="min-w-0 rounded border border-term-border bg-term-bg p-3"
+      className="term-panel-nested min-w-0 p-3"
       aria-label={`${m.label || m.mic} liquidity and breadth`}
     >
       <div className="flex items-center justify-between gap-2">
         <h3 className="min-w-0 truncate text-sm font-bold text-term-text">{m.label || m.mic}</h3>
-        <span className="shrink-0 text-[10px] text-term-muted">n={total}</span>
+        <span className="term-num shrink-0 text-[10px] text-term-muted">n={total}</span>
       </div>
       <div className="mt-2">
         <MarketStateBadge state={cardState} mic={m.mic} provenance={m.provenance} />
@@ -115,7 +116,7 @@ function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
       <dl className="mt-2 space-y-2 text-xs">
         <div className="flex items-center justify-between gap-2">
           <dt className="text-term-muted">Avg change</dt>
-          <dd className={`font-bold ${avg.tone}`}>{avg.text}</dd>
+          <dd className={`term-num font-bold ${changeColor(m.avg_change_pct)}`}>{avg.text}</dd>
         </div>
         <NativeMeter
           value={m.turnover}

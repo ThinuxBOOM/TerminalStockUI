@@ -27,7 +27,7 @@ function IntensityBar({ value, max }) {
       <span className="inline-block h-1.5 w-16 overflow-hidden rounded bg-term-border" role="img" aria-label={`intensity ${w.toFixed(0)}% of max`}>
         <span className="block h-full rounded bg-term-amber" style={{ width: `${w}%` }} />
       </span>
-      <span className="font-mono text-[10px] text-term-muted">{Number.isFinite(value) ? value.toFixed(2) : "—"}</span>
+      <span className="term-num text-[10px] text-term-muted">{Number.isFinite(value) ? value.toFixed(2) : "—"}</span>
     </span>
   );
 }
@@ -53,7 +53,7 @@ function LiquidationCard({ mic, defaultLimit = 20 }) {
   );
 
   return (
-    <div className="min-w-0 rounded border border-term-border bg-term-bg p-3" aria-label={`${upper} liquidation proxy`}>
+    <div className="term-panel-nested min-w-0 p-3" aria-label={`${upper} liquidation proxy`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="min-w-0 truncate text-sm font-bold text-term-text">{upper} — Liquidation proxy</h4>
         <span className="shrink-0 rounded border border-term-amber px-1.5 py-0.5 text-[10px] font-bold text-term-amber" title="Heuristic from volume-anomaly x ATR-range; not exchange liquidation data">
@@ -124,15 +124,15 @@ function LiquidationCard({ mic, defaultLimit = 20 }) {
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.symbol} className="border-b border-term-border">
+                  <tr key={r.symbol} className="border-b border-term-border even:bg-term-panel2">
                     <td className="py-1 pr-2 font-bold text-term-green">{r.symbol}</td>
                     <td className="py-1 pr-2 text-term-muted" title="display heuristic only: close>=open -> short_proxy else long_proxy">
                       {r.side}
                       {r.volume_anomaly && <span className="ml-1 text-term-amber" title="volume anomaly (|vol_z| > 2)">●</span>}
                     </td>
                     <td className="py-1 pr-2"><IntensityBar value={r.intensity} max={maxI} /></td>
-                    <td className="py-1 pr-2 text-right font-mono text-[11px] text-term-text">{r.vol_z === null ? "—" : r.vol_z.toFixed(2)}</td>
-                    <td className="py-1 text-right font-mono text-[11px] text-term-text">{r.range_atr === null ? "—" : r.range_atr.toFixed(2)}</td>
+                    <td className="term-num py-1 pr-2 text-right text-[11px] text-term-text">{r.vol_z === null ? "—" : r.vol_z.toFixed(2)}</td>
+                    <td className="term-num py-1 text-right text-[11px] text-term-text">{r.range_atr === null ? "—" : r.range_atr.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -142,7 +142,7 @@ function LiquidationCard({ mic, defaultLimit = 20 }) {
       </div>
 
       {data && (
-        <p className="mt-1 text-[10px] text-term-muted" role="status">
+        <p className="term-num mt-1 text-[10px] text-term-muted" role="status">
           n={data.aggregates.n} · skipped={data.aggregates.skipped} · long_proxy={data.aggregates.long_proxy_n} · short_proxy={data.aggregates.short_proxy_n} · mean {data.aggregates.mean_intensity.toFixed(2)} · max {data.aggregates.max_intensity.toFixed(2)}
         </p>
       )}

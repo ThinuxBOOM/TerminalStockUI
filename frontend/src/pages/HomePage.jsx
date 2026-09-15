@@ -2,9 +2,7 @@ import React, { memo, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getAuditForecasts, getProvidersHealth, getQuote } from "../api/client";
-import ProvenanceBadge from "../components/ProvenanceBadge";
-import FreshnessBadge from "../components/FreshnessBadge";
-import MarketStateBadge from "../components/MarketStateBadge";
+import StatusPill from "../components/StatusPill";
 import MarketLiquidityPanel from "../components/MarketLiquidityPanel";
 import MarketIndicesSection from "../components/AspiChart";
 import LiquidationSection from "../components/LiquidationPanel";
@@ -12,7 +10,7 @@ import MarketStatusStrip from "../components/MarketStatusStrip";
 import { useMarketLiquidity } from "../hooks/useMarketLiquidity";
 import useWatchlist from "../hooks/useWatchlist";
 import CurrencyValue from "../components/CurrencyValue";
-import { formatPct1 } from "../utils/format";
+import { changeArrow, changeColor, formatPct1 } from "../utils/format";
 import Skeleton from "../components/Skeleton";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
@@ -35,24 +33,25 @@ function WatchlistRowInner({ symbol, onRemove }) {
   });
   if (q.isLoading) {
     return (
-      <li className="p-3" role="status" aria-label={`loading ${symbol}`}>
+      <li className="p-2.5" role="status" aria-label={`loading ${symbol}`}>
         <Skeleton label={`loading ${symbol}…`} lines={1} />
       </li>
     );
   }
   if (q.isError || !q.data) {
     return (
-      <li className="flex items-center justify-between gap-2 p-3 text-xs">
+      <li className="flex items-center justify-between gap-1.5 p-2.5 text-xs">
         <span className="min-w-0 truncate text-term-muted">{symbol} — unavailable</span>
-        <span className="flex shrink-0 gap-2">
+        <span className="flex shrink-0 items-center gap-1.5">
           <Link className="text-term-green" to={`/security/${encodeURIComponent(symbol)}`}>
             BRIEF →
           </Link>
           <button
             type="button"
-            className="text-term-muted hover:text-term-red"
+            className="term-icon-btn"
             onClick={() => onRemove(symbol)}
-            aria-label={`Remove ${symbol} from watchlist`}
+            aria-label="Remove from watchlist"
+            title={`Remove ${symbol} from watchlist`}
           >
             ✕
           </button>
@@ -61,30 +60,38 @@ function WatchlistRowInner({ symbol, onRemove }) {
     );
   }
   const d = q.data;
+  const chg = d.change_pct;
   return (
-    <li className="p-3">
-      <div className="flex items-center justify-between gap-2 text-sm">
-        <Link
-          to={`/security/${encodeURIComponent(symbol)}`}
-          className="min-w-0 truncate font-bold text-term-green hover:underline"
-        >
-          {d.symbol} · <CurrencyValue value={d.price} currency={d.currency ?? "USD"} />
-        </Link>
-        <span className="flex shrink-0 items-center gap-2">
-          <FreshnessBadge p={d.provenance} />
-          <button
-            type="button"
-            className="text-xs text-term-muted hover:text-term-red"
-            onClick={() => onRemove(symbol)}
-            aria-label={`Remove ${symbol} from watchlist`}
+    <li className="p-2.5">
+      <div className="flex items-center justify-between gap-1.5">
+        <div className="text-2xs uppercase tracking-widest text-term-muted font-sans">
+          <Link
+            to={`/security/${encodeURIComponent(symbol)}`}
+            className="hover:text-term-green hover:underline"
           >
-            ✕
-          </button>
+            {d.symbol}
+          </Link>
+        </div>
+        <button
+          type="button"
+          className="term-icon-btn"
+          onClick={() => onRemove(symbol)}
+          aria-label="Remove from watchlist"
+          title={`Remove ${symbol} from watchlist`}
+        >
+          ✕
+        </button>
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-baseline gap-2">
+        <span className="term-num text-display-sm font-bold text-term-text">
+          <CurrencyValue value={d.price} currency={d.currency ?? "USD"} />
+        </span>
+        <span className={`term-num text-sm font-semibold ${changeColor(chg)}`}>
+          {Number.isFinite(chg) ? `${changeArrow(chg)} ${formatPct1(Math.abs(chg) / 100)}` : "—"}
         </span>
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-2">
-        <MarketStateBadge state={d.market_state} provenance={d.provenance} />
-        <ProvenanceBadge p={d.provenance} />
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        <StatusPill freshness={d.provenance} marketState={d.market_state} provenance={d.provenance} size="sm" />
       </div>
     </li>
   );
@@ -125,7 +132,7 @@ function HomePage() {
   const showProviders = useMemo(() => providers.data ?? [], [providers.data]);
   const reports = useMemo(() => research.data?.forecasts ?? [], [research.data]);
   return (
-    <div className="grid max-w-full gap-4">
+    <div className="grid max-w-full gap-6">
       <MarketStatusStrip />
       <MarketLiquidityPanel
         data={liquidity.data ?? null}
@@ -136,8 +143,8 @@ function HomePage() {
       />
       <MarketIndicesSection />
       <LiquidationSection />
-      <div className="grid min-w-0 items-stretch gap-4 md:grid-cols-3">
-        <section className="term-panel flex min-w-0 flex-col p-4" aria-labelledby="home-watchlist">
+      <div className="grid min-w-0 items-stretch gap-6 md:grid-cols-3">
+        <section className="term-panel-hero flex min-w-0 flex-col p-4" aria-labelledby="home-watchlist">
           <div className="flex items-center justify-between gap-2">
             <h2 id="home-watchlist" className="term-label">
               Watchlist
@@ -208,16 +215,16 @@ function HomePage() {
             </div>
           )}
           {showProviders.length > 0 ? (
-            <ul className="mt-2 space-y-1 text-xs">
+            <ul className="mt-2 space-y-1.5 text-xs">
               {showProviders.map((p) => {
                 const latency = p.latency_p50_ms ?? p.latency_ms ?? p.latency_p95_ms;
                 const bad = p.status !== "ok" || (p.circuit !== undefined && p.circuit === "open");
                 // No samples: say so (never a fabricated 0ms).
                 const noSamples = (latency === void 0 || latency === null) && (p.total_calls ?? 0) === 0;
                 return (
-                  <li key={p.name} className="flex justify-between gap-2 border-b border-term-border pb-1">
+                  <li key={p.name} className="flex justify-between gap-1.5 border-b border-term-border py-2">
                     <span className="min-w-0 truncate">{p.name}</span>
-                    <span className={bad ? "text-term-red" : "text-term-green"}>
+                    <span className={`term-num ${bad ? "text-term-red" : "text-term-green"}`}>
                       {p.status}
                       {p.circuit ? ` · ${p.circuit}` : ""}
                       {latency !== void 0 && latency !== null ? ` · ${latency}ms` : noSamples ? " · no samples yet" : ""}
@@ -259,11 +266,11 @@ function HomePage() {
             </p>
           )}
           {!research.isLoading && !research.isError && reports.length > 0 && (
-            <ul className="mt-2 space-y-1 text-xs">
+            <ul className="mt-2 space-y-1.5 text-xs">
               {reports.slice(0, MAX_HOME_REPORTS).map((r, i) => (
                 <li
                   key={r.forecast_id ?? `${r.symbol ?? "unknown"}-${i}`}
-                  className="flex items-center justify-between gap-2 border-b border-term-border pb-1"
+                  className="flex items-center justify-between gap-1.5 border-b border-term-border py-2"
                 >
                   {r.symbol ? (
                     <Link
@@ -278,7 +285,7 @@ function HomePage() {
                       —{r.horizon_days ? ` · ${r.horizon_days}d` : ""}
                     </span>
                   )}
-                  <span className="shrink-0 text-term-muted">{formatPct1(r.direction_probability)}</span>
+                  <span className="term-num shrink-0 text-term-muted">{formatPct1(r.direction_probability)}</span>
                 </li>
               ))}
             </ul>

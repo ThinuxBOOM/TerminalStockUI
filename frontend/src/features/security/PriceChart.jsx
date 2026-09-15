@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createChart, LineStyle } from "lightweight-charts";
+import { createChart, CrosshairMode, LineStyle } from "lightweight-charts";
 import ProvenanceBadge from "../../components/ProvenanceBadge";
 import FreshnessBadge from "../../components/FreshnessBadge";
 import CurrencyValue from "../../components/CurrencyValue";
@@ -51,20 +51,22 @@ const MAX_DISPLAY_CANDLES = 500;
 const DASHED = LineStyle && LineStyle.Dashed ? LineStyle.Dashed : 2;
 const SOLID = LineStyle && LineStyle.Solid ? LineStyle.Solid : 0;
 
-// Overlay line colors (dark-terminal palette). Keys match normalizeIndicators.
+// Overlay line colors (term palette: grid #1c2433, text #8b94a7,
+// up #3ddc84, down #ff5c5c, cyan #56c8ff for composite/analogue lines).
+// Keys match normalizeIndicators.
 const INDICATOR_COLORS = {
   SMA20: "#f5c542",
-  SMA50: "#4da3ff",
+  SMA50: "#56c8ff",
   SMA200: "#b388ff",
   EMA12: "#ff9f43",
   EMA26: "#00d1b2",
   BB_UPPER: "#8b94a7",
   BB_MIDDLE: "#c3cad6",
   BB_LOWER: "#8b94a7",
-  VWAP: "#e35dff",
+  VWAP: "#56c8ff",
   RSI14: "#b388ff",
-  ATR14: "#4da3ff",
-  MACD_LINE: "#4da3ff",
+  ATR14: "#56c8ff",
+  MACD_LINE: "#56c8ff",
   MACD_SIGNAL: "#ff9f43"
 };
 
@@ -252,6 +254,11 @@ function PriceChart({
     const chart = createChart(node, {
       layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
       grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+        horzLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+      },
       height: 300
     });
     const series = chart.addCandlestickSeries({
@@ -278,6 +285,11 @@ function PriceChart({
     const chart = createChart(node, {
       layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
       grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+        horzLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+      },
       height: 140
     });
     oscChartRef.current = chart;
@@ -434,7 +446,7 @@ function PriceChart({
 
   const legend = legendEntries.length > 0 ? /* @__PURE__ */ h(
     "div",
-    { className: "mb-2 flex flex-wrap items-center gap-1.5", role: "group", "aria-label": `indicator overlays for ${symbol}` },
+    { className: "absolute left-2 top-2 z-10 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1.5 rounded border border-term-border bg-term-panel/85 p-1.5", role: "group", "aria-label": `indicator overlays for ${symbol}` },
     legendEntries.map((e) => {
       const off = hidden.has(e.key);
       const v = lastValueOf(indicators, e.key);
@@ -477,10 +489,11 @@ function PriceChart({
   return /* @__PURE__ */ h(
     "div",
     null,
-    legend,
     indicatorsLoading && !hasPriceOverlayData && priceOverlaysRequested && live ? /* @__PURE__ */ h(Skeleton, { label: `loading overlays for ${symbol}…`, lines: 1 }) : null,
     indicatorStatus,
-    /* @__PURE__ */ h("div", { ref: setContainerRef, className: "w-full min-h-[300px]", role: "img", "aria-label": `price chart for ${symbol}, ${candles.length} bars` }),
+    /* @__PURE__ */ h("div", { className: "relative" },
+      legend,
+      /* @__PURE__ */ h("div", { ref: setContainerRef, className: "w-full min-h-[300px]", role: "img", "aria-label": `price chart for ${symbol}, ${candles.length} bars` })),
     oscPane,
     /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, `live bars from /api/market_data/bars · ${sanitized.length} received, ${candles.length} shown${decimatedCount > 0 ? ` (bucket-merged to ${MAX_DISPLAY_CANDLES}, extremes preserved)` : ""}`),
     provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance }), indicatorsProvenance && (hasPriceOverlayData || hasOscData) ? /* @__PURE__ */ h(ProvenanceBadge, { p: indicatorsProvenance }) : null)

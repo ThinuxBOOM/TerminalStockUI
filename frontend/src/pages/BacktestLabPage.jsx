@@ -110,7 +110,7 @@ function BacktestLabPage() {
             <div className="mt-1 flex gap-2">
               {FORECAST_HORIZONS.map((h) => (
                 <label key={h} className="flex cursor-pointer items-center gap-1 text-sm">
-                  <input type="checkbox" checked={horizons.includes(h)} onChange={() => toggle(h)} />
+                  <input type="checkbox" className="accent-term-green" checked={horizons.includes(h)} onChange={() => toggle(h)} />
                   {h}d
                 </label>
               ))}
@@ -188,7 +188,7 @@ function BacktestLabPage() {
           )}
         </section>
 
-        <section className="term-panel mt-4 p-4">
+        <section className="term-panel-hero mt-4 p-4">
           <div className="flex flex-wrap items-center gap-2">
             <p className="term-label">Persisted history · {trimmedSymbol || "—"} (backend)</p>
             <SourceBadge source="SOURCE: DETERMINISTIC" />
@@ -204,14 +204,14 @@ function BacktestLabPage() {
                 <p className="mb-1 text-[11px] text-term-muted" role="status">showing first {visibleHistory.length} of {historyRows.length} runs.</p>
               )}
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 bg-term-panel z-10">
                   <tr className="text-left text-term-muted">
                     <th className="py-1 pr-2">Run</th>
                     <th className="py-1 pr-2">As of</th>
                     <th className="py-1 pr-2">Horizons</th>
-                    <th className="py-1 pr-2">Brier</th>
-                    <th className="py-1 pr-2">ECE</th>
-                    <th className="py-1 pr-2">n</th>
+                    <th className="py-1 pr-2 text-right">Brier</th>
+                    <th className="py-1 pr-2 text-right">ECE</th>
+                    <th className="py-1 pr-2 text-right">n</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -221,16 +221,16 @@ function BacktestLabPage() {
                     const horizonsList = run.horizons ?? [];
                     const scored = keys.length > 0 ? keys[0] : null;
                     return (
-                      <tr key={run.run_id ?? `run-${i}`} className="border-t border-term-border">
+                      <tr key={run.run_id ?? `run-${i}`} className="border-t border-term-border even:bg-term-panel2 transition-colors duration-150">
                         <td className="py-1 pr-2 font-mono text-[11px]">{String(run.run_id ?? "").slice(0, 8) || "—"}</td>
                         <td className="py-1 pr-2 text-term-muted">{run.as_of ?? "—"}</td>
                         <td className="py-1 pr-2">{horizonsList.length > 0 ? horizonsList.map((h) => `${h}d`).join(", ") : "—"}</td>
-                        <td className="py-1 pr-2">
+                        <td className="py-1 pr-2 text-right term-num">
                           {first?.brier === null || first?.brier === undefined ? "—" : Number(first.brier).toFixed(4)}
                           {scored !== null && <span className="ml-1 text-[10px] text-term-muted">·{scored}d</span>}
                         </td>
-                        <td className="py-1 pr-2">{first?.ece === null || first?.ece === undefined ? "—" : Number(first.ece).toFixed(4)}</td>
-                        <td className="py-1 pr-2">{first?.n_points ?? "—"}</td>
+                        <td className="py-1 pr-2 text-right term-num">{first?.ece === null || first?.ece === undefined ? "—" : Number(first.ece).toFixed(4)}</td>
+                        <td className="py-1 pr-2 text-right term-num">{first?.n_points ?? "—"}</td>
                       </tr>
                     );
                   })}
@@ -321,19 +321,19 @@ function LabResults({ r }) {
           </div>
         </div>
       </section>
-      <section className="term-panel p-4">
+      <section className="term-panel-hero p-4">
         <CalibrationChart rows={reliability} title={`Reliability diagram${scoredSuffix}`} />
         <div className="mt-2 overflow-x-auto">
           {reliability.length > visibleBins.length && (
             <p className="mb-1 text-[11px] text-term-muted" role="status">showing first {visibleBins.length} of {reliability.length} bins.</p>
           )}
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-term-panel z-10">
               <tr className="text-left text-term-muted">
                 <th className="py-1 pr-2">Bin</th>
-                <th className="py-1 pr-2">n</th>
-                <th className="py-1 pr-2">Mean predicted</th>
-                <th className="py-1 pr-2">Fraction positive</th>
+                <th className="py-1 pr-2 text-right">n</th>
+                <th className="py-1 pr-2 text-right">Mean predicted</th>
+                <th className="py-1 pr-2 text-right">Fraction positive</th>
               </tr>
             </thead>
             <tbody>
@@ -343,14 +343,14 @@ function LabResults({ r }) {
                 </tr>
               )}
               {visibleBins.map((b, i) => (
-                <tr key={`${String(b?.bin_low ?? "?")}-${String(b?.bin_high ?? "?")}-${i}`} className="border-t border-term-border">
+                <tr key={`${String(b?.bin_low ?? "?")}-${String(b?.bin_high ?? "?")}-${i}`} className="border-t border-term-border even:bg-term-panel2 transition-colors duration-150">
                   <td className="py-1 pr-2">
                     {typeof b?.bin_low === "number" && Number.isFinite(b.bin_low) ? b.bin_low.toFixed(2) : "—"}–
                     {typeof b?.bin_high === "number" && Number.isFinite(b.bin_high) ? b.bin_high.toFixed(2) : "—"}
                   </td>
-                  <td className="py-1 pr-2">{b?.count ?? "—"}</td>
-                  <td className="py-1 pr-2">{typeof b?.mean_predicted === "number" && Number.isFinite(b.mean_predicted) ? b.mean_predicted.toFixed(3) : "—"}</td>
-                  <td className="py-1 pr-2">{typeof b?.fraction_positive === "number" && Number.isFinite(b.fraction_positive) ? b.fraction_positive.toFixed(3) : "—"}</td>
+                  <td className="py-1 pr-2 text-right term-num">{b?.count ?? "—"}</td>
+                  <td className="py-1 pr-2 text-right term-num">{typeof b?.mean_predicted === "number" && Number.isFinite(b.mean_predicted) ? b.mean_predicted.toFixed(3) : "—"}</td>
+                  <td className="py-1 pr-2 text-right term-num">{typeof b?.fraction_positive === "number" && Number.isFinite(b.fraction_positive) ? b.fraction_positive.toFixed(3) : "—"}</td>
                 </tr>
               ))}
             </tbody>

@@ -31,7 +31,7 @@ function LoginStubPage() {
               type="button"
               onClick={() => setTier(t)}
               aria-pressed={tier === t}
-              className={`rounded border px-3 py-1 text-xs ${tier === t ? "border-term-green text-term-green" : "border-term-border text-term-muted"}`}
+              className={tier === t ? "term-btn text-xs" : "term-btn-ghost text-xs"}
             >
               {t}
             </button>

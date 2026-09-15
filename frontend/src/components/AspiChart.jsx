@@ -23,10 +23,11 @@ import Skeleton from "./Skeleton";
 import EmptyState from "./EmptyState";
 import ErrorState from "./ErrorState";
 
-const GREEN = "#3ddc84";
-const RED = "#ff5c5c";
-const MUTED = "#5b6b85";
-const GRID = "#1c2433";
+const GREEN = "#3ddc84"; // term-green
+const RED = "#ff5c5c"; // term-red
+const MUTED = "#8b94a7"; // term-muted
+const GRID = "#1c2433"; // term-border
+const CYAN = "#56c8ff"; // term-cyan — composite Top-20 line (distinguishes index from security green/red)
 
 const plainFmt = new Intl.NumberFormat("en", {
   minimumFractionDigits: 2,
@@ -69,7 +70,9 @@ function errorMessage(err, fallback) {
 
 // Pure SVG line/area chart (same visual language as MarketGraphs.jsx).
 // points: [{t, close}] for benchmarks or [{t, value}] for rebased composites.
-function IndexLineSvg({ points, ariaSummary, valueLabel = "value" }) {
+// `color` overrides the up/down green/red — Top-20 composites pass term-cyan
+// so the index line never reads as a single-security move.
+function IndexLineSvg({ points, ariaSummary, valueLabel = "value", color = null }) {
   const rows = useMemo(() => (Array.isArray(points) ? points : []), [points]);
   const W = 560;
   const H = 200;
@@ -102,7 +105,7 @@ function IndexLineSvg({ points, ariaSummary, valueLabel = "value" }) {
     .join(" ");
   const area = `${d} L${x(rows.length - 1).toFixed(1)},${H - padB} L${x(0).toFixed(1)},${H - padB} Z`;
   const up = vals[vals.length - 1] >= vals[0];
-  const col = up ? GREEN : RED;
+  const col = color ?? (up ? GREEN : RED);
   const first = rows[0].t;
   const last = rows[rows.length - 1].t;
   return (
@@ -182,7 +185,7 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
   }
   const d = series.data ?? null;
   return (
-    <div className="min-w-0 rounded border border-term-border bg-term-bg p-3" aria-label={`${cfg.venue} index chart`}>
+    <div className="term-panel-nested min-w-0 p-3" aria-label={`${cfg.venue} index chart`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="min-w-0 truncate text-sm font-bold text-term-text">
           {cfg.venue} — {cfg.indexLabel}
@@ -330,7 +333,7 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
     );
   }
   return (
-    <div className="min-w-0 rounded border border-term-border bg-term-bg p-3" aria-label={`${cfg.venue} Top-20 composite`}>
+    <div className="term-panel-nested min-w-0 p-3" aria-label={`${cfg.venue} Top-20 composite`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="min-w-0 truncate text-sm font-bold text-term-text">{cfg.venue} — Top-20 composite</h4>
         {constituents.data && (
@@ -364,14 +367,14 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
           />
         )}
         {!constituents.isLoading && !constituents.isError && rows.length > 0 && (
-          <div className="overflow-x-auto">
+          <div className="overflow-auto max-h-[320px]">
             <table className="w-full min-w-[420px] text-xs">
               <caption className="sr-only">
                 Top {rows.length} {cfg.venue} constituents in native currency — ordered within this market only, never ranked across currencies
               </caption>
-              <thead>
+              <thead className="sticky top-0 bg-term-panel z-10">
                 <tr className="border-b border-term-border text-left text-[10px] uppercase tracking-widest text-term-muted">
-                  <th scope="col" className="py-1 pr-2">#</th>
+                  <th scope="col" className="py-1 pr-2 text-right">#</th>
                   <th scope="col" className="py-1 pr-2">Symbol</th>
                   <th scope="col" className="py-1 pr-2">Company</th>
                   <th scope="col" className="py-1 pr-2 text-right">Price (native)</th>
@@ -383,13 +386,13 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
                   const chg = signedPct(r.change_pct);
                   const ccy = typeof r.currency === "string" && /^[A-Z]{3}$/.test(r.currency) ? r.currency : null;
                   return (
-                    <tr key={`${r.symbol}-${i}`} className="border-b border-term-border">
-                      <td className="py-1 pr-2 text-term-muted">{i + 1}</td>
+                    <tr key={`${r.symbol}-${i}`} className="border-b border-term-border even:bg-term-panel2">
+                      <td className="term-num py-1 pr-2 text-right text-term-muted">{i + 1}</td>
                       <td className="py-1 pr-2 font-bold text-term-green">{r.symbol}</td>
                       <td className="max-w-[180px] truncate py-1 pr-2 text-term-muted" title={r.company_name ?? r.symbol}>
                         {r.company_name ?? "—"}
                       </td>
-                      <td className="py-1 pr-2 text-right text-term-text">
+                      <td className="term-num py-1 pr-2 text-right text-term-text">
                         {ccy ? (
                           <CurrencyValue value={r.price} currency={ccy} />
                         ) : (
@@ -398,7 +401,7 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
                           </span>
                         )}
                       </td>
-                      <td className={`py-1 text-right ${chg.tone}`}>{chg.text}</td>
+                      <td className={`term-num py-1 text-right ${chg.tone}`}>{chg.text}</td>
                     </tr>
                   );
                 })}
@@ -468,6 +471,7 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
                   <IndexLineSvg
                     points={composite.points}
                     valueLabel="index points (base 100)"
+                    color={CYAN}
                     ariaSummary={`${cfg.venue} Top-20 ${composite.weighting} line, base 100, ${composite.points.length} points from ${composite.start} to ${composite.end}, from ${composite.constituentsUsed} constituents`}
                   />
                 </>
@@ -516,7 +520,7 @@ function MarketIndexCard({ mic, userId, tier, defaultOpen = false }) {
   const [showTop20, setShowTop20] = useState(defaultOpen);
   if (!cfg) return null;
   return (
-    <article className="min-w-0 rounded border border-term-border bg-term-panel p-3" aria-label={`${cfg.venue} market index`}>
+    <article className="term-panel-nested min-w-0 p-3" aria-label={`${cfg.venue} market index`}>
       <div className="flex items-center justify-between gap-2">
         <h3 className="min-w-0 truncate text-sm font-bold text-term-text">
           {cfg.venue} <span className="font-normal text-term-muted">({mic})</span>

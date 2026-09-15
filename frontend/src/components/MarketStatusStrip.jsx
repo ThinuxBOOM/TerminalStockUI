@@ -1,8 +1,7 @@
 import React, { memo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getQuote } from "../api/client";
-import FreshnessBadge from "./FreshnessBadge";
-import MarketStateBadge from "./MarketStateBadge";
+import StatusPill from "./StatusPill";
 import { SkeletonLine } from "./Skeleton";
 
 // Full-width market-status strip: one compact pill per venue in a
@@ -37,7 +36,7 @@ const VenuePill = memo(function VenuePill({ short, mic, symbol }) {
         <span className="truncate text-sm font-bold text-term-text">{short}</span>
         <span className="shrink-0 text-[10px] text-term-muted">{mic}</span>
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5" role="status" aria-label={`${short} state loading status`}>
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5" role="status" aria-live="polite" aria-label={`${short} state loading status`}>
         {q.isLoading && (
           <span className="w-16" role="status" aria-label="loading">
             <SkeletonLine />
@@ -45,10 +44,11 @@ const VenuePill = memo(function VenuePill({ short, mic, symbol }) {
         )}
         {q.isError && <span className="text-xs text-term-muted">unavailable</span>}
         {q.data && (
-          <>
-            <MarketStateBadge state={q.data.market_state} provenance={q.data.provenance} />
-            <FreshnessBadge p={q.data.provenance} />
-          </>
+          <StatusPill
+            marketState={q.data.market_state}
+            provenance={q.data.provenance}
+            mic={mic}
+          />
         )}
       </div>
     </div>
@@ -57,7 +57,7 @@ const VenuePill = memo(function VenuePill({ short, mic, symbol }) {
 
 function MarketStatusStrip() {
   return (
-    <section className="term-panel min-w-0 p-4" aria-labelledby="home-market-status">
+    <section className="term-panel-hero min-w-0 p-4" aria-labelledby="home-market-status">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 id="home-market-status" className="term-label">
           Market status

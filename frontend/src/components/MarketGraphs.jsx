@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 const GREEN = "#3ddc84";
 const RED = "#ff5c5c";
-const MUTED = "#5b6b85";
+const MUTED = "#8b94a7";
 const GRID = "#1c2433";
 const AXIS = "#2a3448";
 const compactFmt = new Intl.NumberFormat("en", {
@@ -86,7 +86,7 @@ function NativeMeter({ value, max, currency = "USD", label = "Turnover", note })
         title: has ? `${text} ${currency} (native, no FX)` : `${label} unavailable`
       },
       has && value > 0
-        ? React.createElement("div", { className: "h-full rounded bg-[#3b82a0]", style: { width: `${Math.max(2, pct)}%` } })
+        ? React.createElement("div", { className: "h-full rounded bg-[#56c8ff]", style: { width: `${Math.max(2, pct)}%` } })
         : null
     )
   );
@@ -169,7 +169,7 @@ function LiquiditySparkline({ history, market, mic = "" }) {
       React.createElement("polyline", {
         points: dots.join(" "),
         fill: "none",
-        stroke: kind === "breadth" ? GREEN : "#3b82a0",
+        stroke: kind === "breadth" ? GREEN : "#56c8ff",
         strokeWidth: 1.5,
         strokeLinejoin: "round",
         strokeLinecap: "round"
@@ -235,7 +235,7 @@ function CrossMarketChart({ markets }) {
       const y = padT + i * rowH;
       const v = m.total_volume;
       const w = finite(v) && v > 0 ? Math.max(2, v / maxVol * (W - padL - padR)) : 0;
-      return /* @__PURE__ */ React.createElement("g", { key: `${m.mic}-${i}` }, /* @__PURE__ */ React.createElement("text", { x: padL - 6, y: y + 14, fill: MUTED, fontSize: 10, textAnchor: "end" }, m.mic), w > 0 ? /* @__PURE__ */ React.createElement("rect", { x: padL, y: y + 4, width: w, height: 12, rx: 2, fill: "#3b82a0", fillOpacity: 0.8 }, /* @__PURE__ */ React.createElement("title", null, `${m.label}: ${compact(v)} shares`)) : null, /* @__PURE__ */ React.createElement("text", { x: W - padR + 6, y: y + 14, fill: MUTED, fontSize: 10 }, compact(v)));
+      return /* @__PURE__ */ React.createElement("g", { key: `${m.mic}-${i}` }, /* @__PURE__ */ React.createElement("text", { x: padL - 6, y: y + 14, fill: MUTED, fontSize: 10, textAnchor: "end" }, m.mic), w > 0 ? /* @__PURE__ */ React.createElement("rect", { x: padL, y: y + 4, width: w, height: 12, rx: 2, fill: "#56c8ff", fillOpacity: 0.8 }, /* @__PURE__ */ React.createElement("title", null, `${m.label}: ${compact(v)} shares`)) : null, /* @__PURE__ */ React.createElement("text", { x: W - padR + 6, y: y + 14, fill: MUTED, fontSize: 10 }, compact(v)));
     }),
     /* @__PURE__ */ React.createElement("text", { x: padL, y: H - 5, fill: MUTED, fontSize: 9 }, "max ", compact(maxVol), " shares")
   )));
@@ -322,7 +322,7 @@ function MarketDetailGraphs({ rows }) {
       const v = r.volume;
       const w = finite(v) && v > 0 ? Math.max(2, v / maxVol * (W - padL - padR)) : 0;
       const label = r.symbol.length > 12 ? r.symbol.slice(0, 12) + "\u2026" : r.symbol;
-      return /* @__PURE__ */ React.createElement("g", { key: `${r.symbol}-${i}` }, /* @__PURE__ */ React.createElement("text", { x: padL - 6, y: y + 13, fill: MUTED, fontSize: 9, textAnchor: "end" }, label), w > 0 ? /* @__PURE__ */ React.createElement("rect", { x: padL, y: y + 3, width: w, height: 11, rx: 2, fill: "#3b82a0", fillOpacity: 0.8 }, /* @__PURE__ */ React.createElement("title", null, `${r.symbol}: ${compact(v)} shares`)) : null, /* @__PURE__ */ React.createElement("text", { x: W - padR + 6, y: y + 13, fill: MUTED, fontSize: 9 }, compact(v)));
+      return /* @__PURE__ */ React.createElement("g", { key: `${r.symbol}-${i}` }, /* @__PURE__ */ React.createElement("text", { x: padL - 6, y: y + 13, fill: MUTED, fontSize: 9, textAnchor: "end" }, label), w > 0 ? /* @__PURE__ */ React.createElement("rect", { x: padL, y: y + 3, width: w, height: 11, rx: 2, fill: "#56c8ff", fillOpacity: 0.8 }, /* @__PURE__ */ React.createElement("title", null, `${r.symbol}: ${compact(v)} shares`)) : null, /* @__PURE__ */ React.createElement("text", { x: W - padR + 6, y: y + 13, fill: MUTED, fontSize: 9 }, compact(v)));
     }),
     /* @__PURE__ */ React.createElement("text", { x: padL, y: Hv - 5, fill: MUTED, fontSize: 9 }, "max ", compact(maxVol))
   )));

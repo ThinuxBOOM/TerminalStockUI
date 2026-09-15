@@ -34,7 +34,7 @@ function AIOpinionCard({
 
   if (!safe) {
     return (
-      <section className="term-panel p-4" aria-label="ai opinion">
+      <section className="term-panel border-l-2 border-term-cyan p-4" aria-label="ai opinion">
         <div className="flex flex-wrap items-center gap-2">
           <p className="term-label">AI opinion · bounded (capped 20%)</p>
           <SourceBadgeInline source={AI_DISABLED_LABEL} />
@@ -57,7 +57,7 @@ function AIOpinionCard({
     // Malformed AI probability -> safe degrade to the disabled/empty state,
     // deterministic core above is unaffected.
     return (
-      <section className="term-panel p-4" aria-label="ai opinion">
+      <section className="term-panel border-l-2 border-term-cyan p-4" aria-label="ai opinion">
         <div className="flex flex-wrap items-center gap-2">
           <p className="term-label">AI opinion · bounded</p>
           <SourceBadgeInline source={AI_DISABLED_LABEL} />
@@ -96,7 +96,7 @@ function AIOpinionCard({
         : null;
 
   return (
-    <section className="term-panel p-4" aria-label="ai opinion">
+    <section className="term-panel border-l-2 border-term-cyan p-4" aria-label="ai opinion">
       <div className="flex flex-wrap items-center gap-2">
         <p className="term-label">AI opinion · bounded</p>
         <SourceBadgeInline source={sourceLabel} />

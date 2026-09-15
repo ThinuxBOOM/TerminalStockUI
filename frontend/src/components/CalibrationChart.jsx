@@ -80,14 +80,14 @@ function CalibrationChart({ rows, height = 190, title = "Calibration", variant }
         >
           <line x1={padL} y1={padT} x2={padL} y2={H - padB} stroke="#2a3448" />
           <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="#2a3448" />
-          <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} stroke="#3b82a0" strokeDasharray="4 3" strokeWidth={1} />
-          <text x={W - padR} y={padT + 2} fill="#5b6b85" fontSize={9} textAnchor="end">perfect</text>
+          <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} stroke="#56c8ff" strokeDasharray="4 3" strokeWidth={1} />
+          <text x={W - padR} y={padT + 2} fill="#8b94a7" fontSize={9} textAnchor="end">perfect</text>
           {[0.25, 0.5, 0.75].map((t) => (
             <g key={t}>
               <line x1={x(t)} y1={padT} x2={x(t)} y2={H - padB} stroke="#1c2433" strokeWidth={1} />
               <line x1={padL} y1={y(t)} x2={W - padR} y2={y(t)} stroke="#1c2433" strokeWidth={1} />
-              <text x={x(t)} y={H - 8} fill="#5b6b85" fontSize={9} textAnchor="middle">{t.toFixed(2)}</text>
-              <text x={padL - 4} y={y(t) + 3} fill="#5b6b85" fontSize={9} textAnchor="end">{t.toFixed(2)}</text>
+              <text x={x(t)} y={H - 8} fill="#8b94a7" fontSize={9} textAnchor="middle">{t.toFixed(2)}</text>
+              <text x={padL - 4} y={y(t) + 3} fill="#8b94a7" fontSize={9} textAnchor="end">{t.toFixed(2)}</text>
             </g>
           ))}
           {safeRows.map((r, i) => {
@@ -110,8 +110,8 @@ function CalibrationChart({ rows, height = 190, title = "Calibration", variant }
               <title>{`bin ${finite(r.bin_low) ? r.bin_low.toFixed(2) : "—"}–${finite(r.bin_high) ? r.bin_high.toFixed(2) : "—"} · n=${r.count} · pred=${r.mean_predicted.toFixed(3)} · obs=${r.fraction_positive.toFixed(3)}`}</title>
             </circle>
           ))}
-          <text x={padL} y={H - 8} fill="#5b6b85" fontSize={9}>0</text>
-          <text x={x(1)} y={H - 8} fill="#5b6b85" fontSize={9} textAnchor="middle">1 · predicted →</text>
+          <text x={padL} y={H - 8} fill="#8b94a7" fontSize={9}>0</text>
+          <text x={x(1)} y={H - 8} fill="#8b94a7" fontSize={9} textAnchor="middle">1 · predicted →</text>
         </svg>
       )}
       <p className="mt-1 text-[10px] text-term-muted">

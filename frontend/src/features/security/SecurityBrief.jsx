@@ -5,7 +5,9 @@ import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getBars, getFore
 import ProvenanceBadge from "../../components/ProvenanceBadge";
 import FreshnessBadge from "../../components/FreshnessBadge";
 import MarketStateBadge from "../../components/MarketStateBadge";
+import StatusPill from "../../components/StatusPill";
 import CurrencyValue from "../../components/CurrencyValue";
+import { changeArrow, changeColor } from "../../utils/format";
 import Loading from "../../components/Loading";
 import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
@@ -45,7 +47,7 @@ function eventsFromAnalytics(a) {
 function ChartControls({ preset, onTimeframe, selected, onToggle }) {
   return (
     <div>
-      <div className="mt-2 flex flex-wrap items-center gap-1" role="group" aria-label="Chart timeframe">
+      <div className="mt-2 inline-flex rounded-md border border-term-border overflow-hidden" role="group" aria-label="Chart timeframe">
         {TIMEFRAME_PRESETS.map((p) => (
           <button
             key={p.id}
@@ -53,7 +55,7 @@ function ChartControls({ preset, onTimeframe, selected, onToggle }) {
             onClick={() => onTimeframe(p.id)}
             aria-pressed={preset.id === p.id}
             title={`${p.id} — last ${p.limit} daily bars`}
-            className={preset.id === p.id ? "rounded border border-term-green px-2 py-0.5 text-[10px] font-bold text-term-green" : "rounded border border-term-border px-2 py-0.5 text-[10px] text-term-muted"}
+            className={preset.id === p.id ? "px-3 py-1 text-2xs font-bold bg-term-green text-black" : "px-3 py-1 text-2xs font-bold text-term-muted hover:bg-term-panel2"}
           >
             {p.label}
           </button>
@@ -61,13 +63,22 @@ function ChartControls({ preset, onTimeframe, selected, onToggle }) {
       </div>
       <div className="mt-2">
         <p className="text-[10px] text-term-muted">Overlays — series from the analytics indicator API; legend toggles live on the chart</p>
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
-          {SUPPORTED_INDICATORS.map((name) => (
-            <label key={name} className="inline-flex cursor-pointer items-center gap-1 text-[11px] text-term-text">
-              <input type="checkbox" checked={selected.includes(name)} onChange={() => onToggle(name)} aria-label={`overlay ${name}`} />
-              {name}
-            </label>
-          ))}
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {SUPPORTED_INDICATORS.map((name) => {
+            const active = selected.includes(name);
+            return (
+              <button
+                key={name}
+                type="button"
+                aria-pressed={active}
+                aria-label={`overlay ${name}`}
+                onClick={() => onToggle(name)}
+                className={active ? "rounded-full border border-term-green bg-term-greenDim px-2.5 py-0.5 text-2xs font-semibold text-term-green" : "rounded-full border border-term-border px-2.5 py-0.5 text-2xs text-term-muted hover:border-term-muted"}
+              >
+                {name}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -132,7 +143,7 @@ function SecurityBrief({ symbol }) {
             <ForecastCard price={null} currency="USD" forecast={forecast} symbol={symbol} />
           </div>
         )}
-        <div className="term-panel mt-4 min-w-0 p-4">
+        <div className="term-panel-hero mt-4 min-w-0 p-4">
           <h3 className="term-label">Price chart</h3>
           <Suspense fallback={<Skeleton label="loading chart..." lines={4} />}>
             <PriceChart
@@ -189,20 +200,23 @@ function SecurityBrief({ symbol }) {
   }
   return (
     <div className="max-w-full">
-      <section className="term-panel min-w-0 p-4" aria-labelledby="brief-forecast">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="brief-forecast" className="min-w-0 text-lg font-bold">
-            {q.symbol}{" "}
-            <span className="text-sm font-normal text-term-muted">
+      <section className="term-panel-hero min-w-0 p-4" aria-labelledby="brief-forecast">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h2 id="brief-forecast" className="font-sans text-2xs uppercase tracking-widest text-term-muted">
+              {q.symbol}
+            </h2>
+            <p className="term-num text-display font-bold text-term-text">
               <CurrencyValue value={q.price} currency={q.currency ?? "USD"} />
-              {typeof q.change_pct === "number" && Number.isFinite(q.change_pct) && (
-                <span className={q.change_pct >= 0 ? "text-term-green" : "text-term-red"}>
-                  {" "}({q.change_pct >= 0 ? "+" : ""}{q.change_pct.toFixed(2)}%)
-                </span>
-              )}
-            </span>
-          </h2>
+            </p>
+            {typeof q.change_pct === "number" && Number.isFinite(q.change_pct) && (
+              <p className={`term-num text-sm font-semibold ${changeColor(q.change_pct)}`}>
+                {changeArrow(q.change_pct)} {q.change_pct >= 0 ? "+" : ""}{q.change_pct.toFixed(2)}%
+              </p>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
+            <StatusPill freshness={q.provenance} marketState={q.market_state} provenance={q.provenance} qualityGrade={q.provenance?.quality_grade ?? forecast?.quality_grade} size="lg" />
             <MarketStateBadge state={q.market_state} provenance={q.provenance} />
             <FreshnessBadge p={q.provenance} />
           </div>
@@ -227,7 +241,7 @@ function SecurityBrief({ symbol }) {
         )}
       </section>
       <section className="mt-4 grid max-w-full gap-4 md:grid-cols-2">
-        <div className="term-panel min-w-0 p-4" aria-labelledby="brief-chart">
+        <div className="term-panel-hero min-w-0 p-4" aria-labelledby="brief-chart">
           <h3 id="brief-chart" className="term-label">Price chart</h3>
           <ChartControls preset={preset} onTimeframe={setTimeframeId} selected={selectedIndicators} onToggle={toggleIndicator} />
           <Suspense fallback={<Skeleton label="loading chart…" lines={4} />}>
@@ -343,7 +357,7 @@ function ForecastCard({ price, currency, forecast: f, symbol }) {
         <ProvenanceBadge p={f.provenance} />
       </div>
       <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <p className="font-bold text-term-green">▲ BULL — why</p>
           {why.length === 0 ? (
             <p className="text-term-muted">unavailable</p>
@@ -351,7 +365,7 @@ function ForecastCard({ price, currency, forecast: f, symbol }) {
             <ul className="list-disc pl-4 text-term-muted">{why.map((b, i) => <li key={`${b}-${i}`}>{b}</li>)}</ul>
           )}
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <p className="font-bold text-term-red">▼ BEAR — risks</p>
           {risks.length === 0 ? (
             <p className="text-term-muted">unavailable</p>
@@ -406,7 +420,7 @@ function AnalyticsSnapshot({ analytics, loading, failed }) {
       {!analytics && failed && (
         <div className="mt-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
           {["Technical", "Fundamentals", "Quality", "Valuation"].map((t) => (
-            <div key={t} className="rounded border border-term-border p-2">
+            <div key={t} className="term-panel-nested p-2">
               <p className="font-bold">{t}</p>
               <p className="text-term-muted">unavailable</p>
             </div>
@@ -421,7 +435,7 @@ function SnapshotCell({ title, data }) {
   const all = Object.entries(data ?? {});
   const entries = all.slice(0, 4);
   return (
-    <div className="min-w-0 rounded border border-term-border p-2">
+    <div className="term-panel-nested min-w-0 p-2">
       <p className="font-bold">{title}</p>
       {entries.length === 0 ? (
         <p className="text-term-muted">unavailable</p>

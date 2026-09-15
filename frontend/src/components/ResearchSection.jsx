@@ -46,11 +46,11 @@ function BlendedForecastBar({ quantProb, aiProb, aiWeight }) {
   const quantWidth = Math.min(100, Math.max(0, q * 100));
   const blendedWidth = Math.min(100, Math.max(0, blended * 100));
   return (
-    <div className="rounded border border-term-border p-2" role="group" aria-label="blended forecast">
+    <div className="term-panel-nested p-2" role="group" aria-label="blended forecast">
       <p className="text-[11px] text-term-muted">
         Blended forecast <span className="font-mono">(1-w)*quant + w*ai</span>, w={w.toFixed(2)} (cap {AI_WEIGHT_CAP.toFixed(2)})
       </p>
-      <p className="mt-1 font-mono text-xs">
+      <p className="term-num mt-1 text-xs">
         ({(1 - w).toFixed(2)} × {pct(q)}) + ({w.toFixed(2)} × {a !== null ? pct(a) : "—"}) = <b>{pct(blended)}</b>
       </p>
       <div className="mt-1 h-2 w-full rounded bg-term-border" title={`quant ${pct(q)}`}>
@@ -122,61 +122,61 @@ function DeterministicEngineBlock({ forecast, calibrationHistory = [], maxWhy = 
   const iv = f.intervals ?? null;
   const sparkRows = (f.calibration ?? []).length > 0 ? f.calibration : (calibrationHistory[0]?.reliability ?? []);
   return (
-    <section className="rounded border border-term-green/40 p-3" aria-label="deterministic engine">
+    <section className="term-panel-nested border-term-green/40 p-3" aria-label="deterministic engine">
       <div className="flex flex-wrap items-center gap-2">
         <p className="term-label">(A) Deterministic Engine</p>
         <SourceBadge source="SOURCE: DETERMINISTIC" />
         <FreshnessBadge p={f.provenance} />
       </div>
-      <p className="mt-1 text-2xl font-bold text-term-green">
+      <p className="term-num mt-1 text-2xl font-bold text-term-green">
         {formatPct1(f.probability)} <span className="text-xs font-normal text-term-muted">direction probability · {f.horizon_days}d</span>
       </p>
       <dl className="mt-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">model_version</dt>
           <dd className="truncate font-bold" title={String(modelVersion)}>{String(modelVersion)}</dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">feature_version</dt>
           <dd className="truncate font-bold" title={String(featureVersion)}>{String(featureVersion)}</dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">data_version</dt>
           <dd className="truncate font-bold" title={String(dataVersion)}>{String(dataVersion)}</dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">confidence</dt>
           <dd className="font-bold">{f.confidence}</dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">expected range</dt>
-          <dd className="font-bold">
+          <dd className="term-num font-bold">
             {iv && Number.isFinite(iv.low) && Number.isFinite(iv.mid) && Number.isFinite(iv.high)
               ? `${(iv.low * 100).toFixed(1)}% / ${(iv.mid * 100).toFixed(1)}% / ${(iv.high * 100).toFixed(1)}%`
               : "unavailable"}
           </dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">regime</dt>
           <dd className="font-bold">{f.regime ?? "unavailable"}</dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">drawdown</dt>
-          <dd className="font-bold">{typeof f.drawdown === "number" && Number.isFinite(f.drawdown) ? `${(f.drawdown * 100).toFixed(1)}%` : "unavailable"}</dd>
+          <dd className="term-num font-bold">{typeof f.drawdown === "number" && Number.isFinite(f.drawdown) ? `${(f.drawdown * 100).toFixed(1)}%` : "unavailable"}</dd>
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <dt className="text-term-muted">quality</dt>
-          <dd className="font-bold text-term-cyan">{f.quality_grade}</dd>
+          <dd className="term-num font-bold text-term-cyan">{f.quality_grade}</dd>
         </div>
       </dl>
       <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <p className="font-bold text-term-green">Why (≤{maxWhy})</p>
           {why.length === 0 ? <p className="text-term-muted">unavailable</p> : (
             <ul className="list-disc pl-4 text-term-muted">{why.map((w, i) => <li key={`${w}-${i}`}>{w}</li>)}</ul>
           )}
         </div>
-        <div className="rounded border border-term-border p-2">
+        <div className="term-panel-nested p-2">
           <p className="font-bold text-term-red">Risks (≤{maxWhy})</p>
           {risks.length === 0 ? <p className="text-term-muted">unavailable</p> : (
             <ul className="list-disc pl-4 text-term-muted">{risks.map((w, i) => <li key={`${w}-${i}`}>{w}</li>)}</ul>
