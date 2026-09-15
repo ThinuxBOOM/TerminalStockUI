@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 
 class ProviderError(RuntimeError):
@@ -134,3 +136,114 @@ class RateLimiter:
             return True
         self.rejected += 1
         return False
+
+
+class QuotaLimiter:
+    """Client-side per-minute + per-day call caps (thread-safe, fail-fast).
+
+    TwelveData free Basic is ruthless about quotas, so quotes budget
+    6/min + 600/day (leaving headroom under the vendor 8/min + 800/day for
+    bars/history calls on the same key); Alpaca is generous (200/min free)
+    and capped at 150/min. acquire() records an attempt and returns True,
+    or False when a cap is hit (``rejected``/``rejected_day`` counters for
+    observability). Never raises, never blocks: providers fail fast with a
+    429-style ProviderError so the service chain falls through to the next
+    live source instead of waiting out the window.
+
+    Sliding minute window on the monotonic clock + fixed UTC-day buckets;
+    bounded memory (minute deque capped at the per-minute allowance, day map
+    pruned to recent days). A limiter bug must never break the call path, so
+    any internal error fails OPEN (admits).
+
+    Per-process scope: on serverless each instance enforces its own share.
+    That under-admits per instance (safe direction for a single warm
+    instance) but N warm instances can sum past the vendor cap — exact
+    global enforcement needs atomic Redis counters (the cache API has no
+    incr primitive today; future work).
+    """
+
+    def __init__(
+        self,
+        calls_per_minute: int | float | None = None,
+        calls_per_day: int | float | None = None,
+        name: str = "quota",
+    ) -> None:
+        self.name = str(name or "quota")
+        self._per_minute = self._clean_cap(calls_per_minute)
+        self._per_day = self._clean_cap(calls_per_day)
+        self._lock = threading.Lock()
+        self._minute_hits: deque[float] = deque()
+        self._day_counts: dict[str, int] = {}
+        self.rejected = 0
+        self.rejected_day = 0
+
+    @staticmethod
+    def _clean_cap(value: int | float | None) -> int | None:
+        try:
+            if value is None or isinstance(value, bool):
+                return None
+            number = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if number > 0 else None
+
+    def acquire(self) -> bool:
+        try:
+            now_m = time.monotonic()
+            with self._lock:
+                if self._per_minute is not None:
+                    cutoff = now_m - 60.0
+                    hits = self._minute_hits
+                    while hits and hits[0] <= cutoff:
+                        hits.popleft()
+                    if len(hits) >= self._per_minute:
+                        self.rejected += 1
+                        return False
+                day_key: str | None = None
+                if self._per_day is not None:
+                    try:
+                        day_key = datetime.now(timezone.utc).date().isoformat()
+                    except Exception:
+                        day_key = None
+                    if day_key is not None and self._day_counts.get(day_key, 0) >= self._per_day:
+                        self.rejected += 1
+                        self.rejected_day += 1
+                        return False
+                if self._per_minute is not None:
+                    self._minute_hits.append(now_m)
+                    while len(self._minute_hits) > self._per_minute:
+                        self._minute_hits.popleft()
+                if self._per_day is not None and day_key is not None:
+                    self._day_counts[day_key] = self._day_counts.get(day_key, 0) + 1
+                    if len(self._day_counts) > 3:
+                        for old in sorted(self._day_counts)[:-2]:
+                            self._day_counts.pop(old, None)
+                return True
+        except Exception:
+            return True
+
+    def status(self) -> dict:
+        """Current quota snapshot (never raises; all values best-effort)."""
+        try:
+            now_m = time.monotonic()
+            with self._lock:
+                minute_used = 0
+                if self._per_minute is not None:
+                    cutoff = now_m - 60.0
+                    minute_used = sum(1 for t in self._minute_hits if t > cutoff)
+                try:
+                    today = datetime.now(timezone.utc).date().isoformat()
+                except Exception:
+                    today = ""
+                return {
+                    "name": self.name,
+                    "calls_per_minute": self._per_minute,
+                    "calls_per_day": self._per_day,
+                    "minute_used": minute_used,
+                    "day_used": int(self._day_counts.get(today, 0)) if today else 0,
+                    "day": today,
+                    "rejected": int(self.rejected),
+                    "rejected_day": int(self.rejected_day),
+                }
+        except Exception:
+            return {"name": getattr(self, "name", "quota")}

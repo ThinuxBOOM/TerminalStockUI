@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
-from .base import CircuitBreaker, ProviderError, RateLimiter
+from .base import CircuitBreaker, ProviderError, QuotaLimiter, RateLimiter
 
 NAME = "alpaca"
 DEFAULT_DELAY_MINUTES = 0
@@ -198,14 +198,17 @@ class AlpacaProvider:
         api_secret: str | None = None,
         feed: str | None = None,
         breaker: CircuitBreaker | None = None,
-        limiter: RateLimiter | None = None,
+        limiter: RateLimiter | QuotaLimiter | None = None,
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
         timeout_s: float = 60.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
-        self.limiter = limiter or RateLimiter(rate_per_sec=3.0, burst=6)
+        # Alpaca free is generous (200/min) — cap at 150/min client-side so
+        # bursts fall through to yfinance instead of tripping the vendor.
+        self.limiter = limiter or QuotaLimiter(
+            calls_per_minute=150, name="alpaca")
         self.delay_minutes = delay_minutes
         self.stub_mode = stub_mode
         self.timeout_s = timeout_s
@@ -225,6 +228,16 @@ class AlpacaProvider:
 
         _emit_health(self._on_call, self.name, latency_ms, ok,
                      error=error, status_code=status_code)
+
+    def _acquire_quota(self) -> bool:
+        """Client-side quota gate (False when over cap). Never raises."""
+        try:
+            acquire = getattr(self.limiter, "acquire", None)
+            if acquire is None:
+                return True
+            return bool(acquire())
+        except Exception:
+            return True
 
     def _stub_quote(self, symbol: str) -> dict:
         from ..normalization import normalize_quote  # local import: no cycle
@@ -308,7 +321,17 @@ class AlpacaProvider:
             self._emit(0.0, False, error="circuit open (breaker)")
             return quote
 
-        self.limiter.acquire()  # stub: counted, never blocks local run
+        if not self._acquire_quota():
+            # Client-side cap (150/min): fail fast with a 429-style error so
+            # the service chain falls through to yfinance. Deliberately NO
+            # health emit and NO stub (see twelvedata: throttling is routine
+            # flow-control, not provider illness).
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug(
+                "alpaca client-side quota hit; falling through")
+            raise ProviderError(
+                NAME, "rate limited by client-side quota (HTTP 429)")
         started = time.perf_counter()
         try:
             raw = self._fetch_raw(upper, market)

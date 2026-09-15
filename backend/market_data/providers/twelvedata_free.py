@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
-from .base import CircuitBreaker, ProviderError, RateLimiter
+from .base import CircuitBreaker, ProviderError, QuotaLimiter, RateLimiter
 
 NAME = "twelvedata"
 DEFAULT_DELAY_MINUTES = 0  # free tier is real-time for US (this provider is US-only)
@@ -210,15 +210,19 @@ class TwelveDataProvider:
         *,
         api_key: str | None = None,
         breaker: CircuitBreaker | None = None,
-        limiter: RateLimiter | None = None,
+        limiter: RateLimiter | QuotaLimiter | None = None,
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
         timeout_s: float = 60.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
-        # Free Basic: 8 credits/min (+800/day cap). 8/60 rps, burst 8.
-        self.limiter = limiter or RateLimiter(rate_per_sec=8.0 / 60.0, burst=8)
+        # Free Basic is ruthless on quotas: hard client-side cap 6/min +
+        # 600/day for quotes (headroom under the vendor 8/min + 800/day,
+        # shared with bars/history on the same key). Over cap -> fail-fast
+        # 429 so the chain falls through instead of burning the key.
+        self.limiter = limiter or QuotaLimiter(
+            calls_per_minute=6, calls_per_day=600, name="twelvedata")
         self.delay_minutes = delay_minutes
         self.stub_mode = stub_mode
         self.timeout_s = timeout_s
@@ -240,6 +244,16 @@ class TwelveDataProvider:
 
         _emit_health(self._on_call, self.name, latency_ms, ok,
                      error=error, status_code=status_code)
+
+    def _acquire_quota(self) -> bool:
+        """Client-side quota gate (False when over cap). Never raises."""
+        try:
+            acquire = getattr(self.limiter, "acquire", None)
+            if acquire is None:
+                return True
+            return bool(acquire())
+        except Exception:
+            return True
 
     def _stub_quote(self, symbol: str) -> dict:
         from ..normalization import normalize_quote  # local import: no cycle
@@ -323,7 +337,19 @@ class TwelveDataProvider:
             self._emit(0.0, False, error="circuit open (breaker)")
             return quote
 
-        self.limiter.acquire()  # stub: counted, never blocks local run
+        if not self._acquire_quota():
+            # Client-side cap (6/min, 600/day): fail fast with a 429-style
+            # error so the service chain falls through to the next source.
+            # Deliberately NO health emit and NO stub: throttling is routine
+            # flow-control (not provider illness), and a stub here would be
+            # refused downstream anyway. Rejections are counted on the
+            # limiter (see QuotaLimiter.status) and debug-logged.
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug(
+                "twelvedata client-side quota hit; falling through")
+            raise ProviderError(
+                NAME, "rate limited by client-side quota (HTTP 429)")
         started = time.perf_counter()
         try:
             raw = self._fetch_raw(upper, market)

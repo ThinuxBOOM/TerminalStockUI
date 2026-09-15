@@ -73,6 +73,23 @@
   coverage falls back to yfinance). AI keys (Gemini/OpenAI/Anthropic/xAI)
   enable opinions only — the deterministic forecast never needs them.
 
+## Provider quotas (client-side, fail-fast)
+
+- TwelveData free Basic: **6/min + 600/day** for quotes (headroom under the
+  vendor 8/min + 800/day, shared with bars/history on the same key).
+  Alpaca free: **150/min** (under the vendor 200/min). Chain order already
+  prefers Alpaca for US symbols (alpaca → yfinance → finnhub → twelvedata →
+  stooq); quotas only decide when a leg sits out.
+- Over cap → fail-fast `ProviderError(... HTTP 429)` (retryable), never a
+  wait: the chain falls through to the next source, so quotes keep flowing
+  (usually yfinance, delayed-15). No stub served, no health sample faked —
+  throttling is flow-control, not provider illness, so it is debug-logged
+  and counted (`QuotaLimiter.status`) rather than marked degraded.
+- Scope: per-process (thread-safe sliding minute + UTC-day buckets). One
+  warm instance can never blow the budget; N warm instances on serverless
+  can sum past it — exact global enforcement needs atomic Redis counters
+  (future work).
+
 ## Provenance
 
 Every success carries `{source, as_of, delay_minutes, quality_grade,
