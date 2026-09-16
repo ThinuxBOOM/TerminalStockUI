@@ -208,6 +208,49 @@ def test_bar_chain_without_keys(isolated_db, monkeypatch):
     assert bar_chain() == ["yfinance", "stooq"]
 
 
+def test_chain_skips_alpaca_link_for_non_us_silently(isolated_db, monkeypatch):
+    """SSE/Euronext never attempt Alpaca (US-only feed, no warning spam)."""
+    def _must_not_run(symbol, **k):
+        raise AssertionError(f"Alpaca must not be attempted for {symbol}")
+
+    canned = [{"ts": datetime(2024, 1, 2, tzinfo=timezone.utc), "open": 1.0,
+               "high": 1.0, "low": 1.0, "close": 1.0, "volume": 10}]
+    monkeypatch.setattr(ingest_module, "fetch_alpaca_daily_bars", _must_not_run)
+    monkeypatch.setattr(ingest_module, "fetch_daily_bars",
+                        lambda symbol, period="2y", interval="1d": list(canned))
+    for symbol in ("600519.SS", "MC.PA", "ASML.AS", "UCB.BR"):
+        bars, source = fetch_daily_bars_with_fallback(
+            symbol, chain=["alpaca", "yfinance", "stooq"])
+        assert source == "yfinance" and bars == canned
+
+
+def test_ingest_symbols_persists_snapshot_per_symbol(isolated_db, monkeypatch):
+    """Scheduled ingest writes bars + one compressed snapshot row each."""
+    from backend.instruments.registry import InstrumentRegistry
+    from backend.market_data import snapshot_store as snapshot_module
+    from backend.market_data.ingest import ingest_symbols
+
+    def _fake_fetch(symbol, period="2y", interval="1d"):
+        return list(_120_bars())
+
+    monkeypatch.setattr(ingest_module, "fetch_daily_bars", _fake_fetch)
+    ingested, errors = ingest_symbols(["AAPL"], registry=InstrumentRegistry())
+    assert errors == {}
+    assert ingested.get("AAPL") == 120
+    Session = get_session_factory()
+    db = Session()
+    try:
+        rows = db.execute(select(PriceBar)).scalars().all()
+        assert len(rows) == 120
+        snap = snapshot_module.load_latest_snapshot(db, "AAPL", "1d")
+        assert snap is not None
+        assert snap["source"] == "yfinance"
+        assert snap["n_bars"] == 120
+        assert len(snap["bars"]) == 120
+    finally:
+        db.close()
+
+
 # --- service on-demand backfill ---------------------------------------------
 
 def _service() -> MarketDataService:

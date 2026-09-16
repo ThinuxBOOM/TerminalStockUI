@@ -1,0 +1,48 @@
+# OneMarket Analyzer — market snapshot schedule (GitHub Actions)
+#
+# Why Actions and not another Vercel cron: Hobby plans cap cron slots (both
+# are taken: /api/cron/ingest 01:00, /api/cron/calibrate 02:00 UTC), and
+# snapshots want hourly cadence this schedule provides.
+# What it does: GET /api/cron/snapshot captures one compressed 1d snapshot
+# per universe symbol (whatever feed served the bars — Alpaca for US when
+# keyed, yfinance/AKShare/Stooq otherwise — attributed in
+# market_snapshots.source). Snapshots compress at capture (best of
+# gzip/delta-q/zlib/zstd); lifecycle tiers run via retention.yml.
+# Setup (once): GitHub repo -> Settings -> Secrets and variables -> Actions ->
+#   New repository secret: APP_URL (e.g. https://terminalstockui.vercel.app,
+#   no trailing slash) and CRON_SECRET (same value as Vercel env).
+# The endpoint is idempotent (one row per call, no UNIQUE to collide) —
+# overlapping/retried runs are safe.
+
+name: Capture snapshots
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    name: capture hourly snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger snapshot
+        run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          # Normalize: strip whitespace/CR and any trailing slash (a pasted
+          # newline makes curl exit 3 with a malformed URL and no output).
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
+          code=$(curl -s -o /tmp/snap.json -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/cron/snapshot")
+          echo "HTTP status: $code"
+          cat /tmp/snap.json
+          echo ""
+          test "$code" = "200"
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

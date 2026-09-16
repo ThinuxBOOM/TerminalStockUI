@@ -440,6 +440,21 @@ def fetch_alpaca_daily_bars(
     return bars
 
 
+#: Yahoo suffixes outside Alpaca's US-only feed (mirrors
+#: providers.alpaca._NON_US_SUFFIXES; MIC unknown at this layer, so bare
+#: tickers always attempt Alpaca — US default, fast-fail otherwise).
+_NON_US_BAR_SUFFIXES = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE")
+
+
+def _is_alpaca_bars_eligible(provider_symbol: str) -> bool:
+    """US-only gate for the ``alpaca`` chain link (no network, never raises)."""
+    try:
+        upper = (provider_symbol or "").strip().upper()
+    except Exception:
+        return False
+    return bool(upper) and not upper.endswith(_NON_US_BAR_SUFFIXES)
+
+
 def fetch_daily_bars_with_fallback(
     provider_symbol: str,
     period: str = FETCH_PERIOD,
@@ -452,7 +467,8 @@ def fetch_daily_bars_with_fallback(
     link in order, returning the first non-empty success. Raises the last
     error when every link fails so callers report a per-symbol error.
     ``source`` is the winning link name (``alpaca``/``yfinance``/``stooq``)
-    for ``price_bars.source`` lineage.
+    for ``price_bars.source`` lineage. The ``alpaca`` link is US-only:
+    non-US symbols skip it silently (routing, not failure — no warning).
     """
     links = list(chain) if chain else bar_chain()
     last_exc: Exception | None = None
@@ -461,6 +477,8 @@ def fetch_daily_bars_with_fallback(
             if link == "stooq":
                 return fetch_stooq_daily_bars(provider_symbol, period, interval), "stooq"
             if link == "alpaca":
+                if not _is_alpaca_bars_eligible(provider_symbol):
+                    continue  # US-only feed: skip silently, never warn
                 return fetch_alpaca_daily_bars(provider_symbol), "alpaca"
             return fetch_daily_bars(provider_symbol, period, interval), "yfinance"
         except Exception as exc:
@@ -652,6 +670,26 @@ def ingest_symbols(
                 db_inst = _get_or_create_db_instrument(db, instrument)
                 count = _upsert_bars(db, db_inst, bars, timeframe=timeframe, source=bar_source)
                 db.commit()
+                # Snapshot-on-fetch: persist a compressed snapshot of exactly
+                # what this call sourced (all providers; winning link
+                # attributed). Best-effort after bars are durable — never
+                # breaks ingestion.
+                try:
+                    from backend.market_data import snapshot_store as _snapshots
+
+                    _snapshots.save_snapshot(
+                        db,
+                        symbol=provider_symbol,
+                        timeframe=timeframe,
+                        bars=bars,
+                        source=str(bar_source or "yfinance"),
+                        provenance={"source": str(bar_source or "yfinance"),
+                                    "fetch": "scheduled-ingest"},
+                        instrument_id=getattr(db_inst, "instrument_id", None),
+                        exchange_mic=getattr(instrument, "exchange_mic", None),
+                    )
+                except Exception:
+                    pass
                 ingested[provider_symbol] = count
             except Exception as exc:
                 try:

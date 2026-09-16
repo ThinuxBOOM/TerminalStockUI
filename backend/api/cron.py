@@ -595,6 +595,129 @@ def cron_score_post(request: Request, body: ScoreRequest) -> dict:
                 "provenance": _cron_provenance(True)}
 
 
+# --- retention purge (additive, distinct paths) --------------------------------
+# Snapshots are compressed at capture (best of gzip/delta-q/zlib/zstd, so no
+# monthly recompress batch is needed); what must run on schedule is the
+# tiered lifecycle from docs/DATA_QUALITY.md + retention.py: raw (non-gzip)
+# snapshots 30d, gzip snapshots 1y, 2y backstop, bars 5y, forecasts 3y.
+# GET is always a dry-run report; POST applies ONLY with {"apply": true}
+# (the scheduled workflow passes it weekly). Batches never 500.
+
+
+class RetentionRequest(BaseModel):
+    apply: bool = Field(default=False, description="Delete expired rows when true")
+    retention_days: dict[str, int] | None = Field(
+        default=None, description="Optional per-dataset day overrides")
+
+
+def _sanitize_retention_overrides(raw: object) -> dict[str, int] | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            if not isinstance(key, str) or not key.strip():
+                continue
+            out[key.strip()] = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
+def _run_retention(*, apply: bool, overrides: dict[str, int] | None) -> dict:
+    """Dry-run report or guarded purge (batch never 500s)."""
+    from backend.db.session import get_session_factory, init_db
+    from backend.observability import retention as retention_module
+
+    try:
+        init_db()
+        Session = get_session_factory()
+        db = Session()
+    except Exception:
+        logger.warning("retention db unavailable")
+        return {
+            "deleted": False,
+            "counts": {},
+            "total": 0,
+            "cutoffs": {},
+            "errors": {"_batch": "db unavailable"},
+            "provenance": _cron_provenance(True),
+        }
+    try:
+        if apply:
+            out = retention_module.purge(db, retention_days=overrides)
+        else:
+            out = retention_module.purge_dry_run(db, retention_days=overrides)
+        return {
+            "deleted": bool(apply),
+            "counts": dict(out.get("counts") or {}),
+            "total": int(out.get("total") or 0),
+            "cutoffs": dict(out.get("cutoffs") or {}),
+            "errors": {},
+            "provenance": _cron_provenance(False),
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron retention batch failed")
+        return {
+            "deleted": False,
+            "counts": {},
+            "total": 0,
+            "cutoffs": {},
+            "errors": {"_batch": "retention failed"},
+            "provenance": _cron_provenance(True),
+        }
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@router.get("/retention")
+def cron_retention_get(request: Request) -> dict:
+    """Dry-run report: expired-row counts per dataset, nothing deleted."""
+    _check_cron_auth(request)
+    try:
+        return _run_retention(apply=False, overrides=None)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron retention batch failed")
+        return {
+            "deleted": False,
+            "counts": {},
+            "total": 0,
+            "cutoffs": {},
+            "errors": {"_batch": "retention failed"},
+            "provenance": _cron_provenance(True),
+        }
+
+
+@router.post("/retention")
+def cron_retention_post(request: Request, body: RetentionRequest) -> dict:
+    """Purge ONLY with ``{"apply": true}``; otherwise a dry-run report."""
+    _check_cron_auth(request)
+    try:
+        return _run_retention(
+            apply=bool(body.apply),
+            overrides=_sanitize_retention_overrides(body.retention_days),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("cron retention batch failed")
+        return {
+            "deleted": False,
+            "counts": {},
+            "total": 0,
+            "cutoffs": {},
+            "errors": {"_batch": "retention failed"},
+            "provenance": _cron_provenance(True),
+        }
+
+
 # --- provider health probing (Agent 6; additive, distinct paths) ------------
 # Active healthchecks for ALL providers (data + AI) live here for Vercel Cron:
 # ``GET /api/cron/health`` runs one lightweight ping per provider (single

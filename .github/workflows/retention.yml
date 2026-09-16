@@ -1,0 +1,47 @@
+# OneMarket Analyzer — retention lifecycle schedule (GitHub Actions)
+#
+# Applies the tiered lifecycle from backend/observability/retention.py
+# (raw snapshots 30d, gzip snapshots 1y, 2y backstop, bars 5y, forecasts 3y,
+# audit 7y with head preserved): snapshots compress at capture, so the
+# scheduled work is expiring old rows, not recompressing.
+# Cadence: weekly (Sundays 03:00 UTC) — windows are days-to-years wide, so
+# weekly is plenty and each run is a small DELETE set.
+# Safety: POST {"apply": true} deletes ONLY rows older than the windows
+# (same as the local `python -m backend.observability.retention --apply`);
+# GET without apply is always a dry-run report. Batches never 500.
+# Setup (once): same APP_URL + CRON_SECRET secrets as snapshots.yml.
+
+name: Retention purge
+
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+jobs:
+  retention:
+    name: apply retention windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger retention apply
+        run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          # Normalize: strip whitespace/CR and any trailing slash (a pasted
+          # newline makes curl exit 3 with a malformed URL and no output).
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
+          code=$(curl -s -o /tmp/retention.json -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -d '{"apply": true}' \
+            "$APP_URL/api/cron/retention")
+          echo "HTTP status: $code"
+          cat /tmp/retention.json
+          echo ""
+          test "$code" = "200"
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

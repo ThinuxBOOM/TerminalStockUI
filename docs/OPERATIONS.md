@@ -73,6 +73,36 @@ Source: `docs/DATA_QUALITY.md` (M3/M4 appendix extends it for forecasts).
 | Audit logs | 7 years, append-only | Hash-chained; backup-tested |
 | Redis cache | TTL 5 min – 24 h by endpoint | Provider-health state persistent (AOF) |
 
+## 4b. Scheduled market-data calls, snapshots, and compression lifecycle
+
+Daily bars move once per session, so the schedule is session-aware rather
+than frequent. All times UTC.
+
+| What runs | Where | Cadence | Why this time |
+|---|---|---|---|
+| `GET /api/cron/ingest` (universe bars; Alpaca-first for US when `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` resolve, else yfinance/AKShare/Stooq) | Vercel cron | `0 1 * * *` (01:00) | 21:00 ET — after the US close, after Alpaca daily bars finalize; SSE/Euronext long closed |
+| `GET /api/cron/calibrate` (walk-forward snapshots) | Vercel cron | `0 2 * * *` (02:00) | After ingest lands, before the EU open |
+| `GET /api/cron/evaluate` (alerts) | GH Actions `alerts.yml` | every 15 min | Intraday cadence Vercel Hobby can't host (2-slot cap) |
+| `GET /api/cron/snapshot` (compressed 1d snapshot per universe symbol, feed-attributed in `market_snapshots.source`) | GH Actions `snapshots.yml` | hourly (`7 * * * *`) | Bounds replay-point staleness to ~1h for scoring/audits |
+| `POST /api/cron/retention` `{"apply": true}` | GH Actions `retention.yml` | weekly Sun 03:00 | Windows are days-to-years wide; weekly keeps DELETE sets small |
+
+Snapshots compress **at capture** (smallest of gzip+json /
+delta-q100+gzip / zlib / zstd wins, ~30–60 rows/KB), so no monthly
+recompress batch exists by design — the scheduled work is the tiered
+lifecycle (`retention.py`, env-overridable via `RETENTION_*_DAYS`):
+raw (non-gzip) snapshots 30d → gzip snapshots 1y → 2y backstop; bars 5y;
+forecasts/accuracy 3y; audit 7y (head never deleted). Every scheduled
+ingest/backfill call also persists one snapshot row for exactly what it
+sourced (`source` = winning chain link); snapshot writes are best-effort
+and never break ingestion. `GET /api/cron/retention` is always a dry-run
+report; deletion needs explicit `{"apply": true}` (same as the local
+`python -m backend.observability.retention --apply`).
+
+Alpaca is US-only end to end: quote chain, bar chain (skipped silently
+for `.SS/.PA/.AS/.BR`), statements are never asked of it, and the
+15-minute bars-failure cooldown keeps one slow view per outage (fast
+honest yfinance cover until it lapses).
+
 ## 5. Health / audit verification
 
 ```powershell

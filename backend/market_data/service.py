@@ -1188,6 +1188,25 @@ class MarketDataService:
                 db_inst = _get_or_create_db_instrument(db, instrument)
                 _upsert_bars(db, db_inst, bars, timeframe="1d", source=bars_source)
                 db.commit()
+                # Snapshot-on-fetch: compressed snapshot of exactly what this
+                # call sourced (Alpaca-first for US, yfinance cover/stale
+                # paths otherwise). Best-effort after bars are durable.
+                try:
+                    from backend.market_data import snapshot_store as _snapshots
+
+                    _snapshots.save_snapshot(
+                        db,
+                        symbol=provider_symbol,
+                        timeframe="1d",
+                        bars=bars,
+                        source=str(bars_source or "yfinance"),
+                        provenance={"source": str(bars_source or "yfinance"),
+                                    "fetch": "on-demand-backfill"},
+                        instrument_id=getattr(db_inst, "instrument_id", None),
+                        exchange_mic=getattr(instrument, "exchange_mic", None),
+                    )
+                except Exception:
+                    pass
             except Exception:
                 try:
                     db.rollback()
