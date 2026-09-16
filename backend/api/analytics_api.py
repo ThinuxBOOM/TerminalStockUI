@@ -49,10 +49,17 @@ router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 BAR_LIMIT = 120
 INDICATOR_MAX_POINTS = 1000
 EMPTY_STATEMENTS: dict = {}
-NOTE = (
+NOTE_UNAVAILABLE = (
     "Statement feed not wired in M3: fundamentals/quality/valuation report "
     "the analytics modules' own 'unavailable' results (no fabricated inputs)."
 )
+NOTE = NOTE_UNAVAILABLE  # compat alias (live banner now comes from _statements_note)
+#: DCF stub defaults once a real free-cash-flow is available (the stub keeps
+#: its single-stage Gordon shape; these grids only replace the previous
+#: empty-grid call that forced "unavailable").
+DCF_DEFAULT_DISCOUNT_RATES = (0.07, 0.09, 0.11)
+DCF_DEFAULT_TERMINAL_RATES = (0.01, 0.02, 0.03)
+DCF_DEFAULT_GROWTH = 0.05
 DISCLOSURE = "Not investment advice. For informational purposes only."
 
 
@@ -138,8 +145,34 @@ def _technical_bundle(frame: pd.DataFrame) -> dict:
     return out
 
 
-def _fundamentals_bundle() -> dict:
-    fin = EMPTY_STATEMENTS
+def _statements_note(info: dict) -> str:
+    """Honest banner: name the live feed + periods, or keep the M3 caveat."""
+    try:
+        source = (info or {}).get("source")
+    except Exception:
+        source = None
+    if not source:
+        return NOTE_UNAVAILABLE
+    try:
+        ends = list((info or {}).get("fiscal_ends") or [])
+        filed = (info or {}).get("filed_as_of")
+        fallback = bool((info or {}).get("fallback_used"))
+    except Exception:
+        ends, filed, fallback = [], None, False
+    detail = f"FY{', FY'.join(str(e)[:4] for e in ends)}" if ends else "latest annual"
+    if filed:
+        detail += f", filed {filed}"
+    if fallback:
+        detail += " (SEC EDGAR unreachable, Yahoo fallback)"
+    return (
+        f"Statements: {source} ({detail}); fundamentals/quality/valuation "
+        "computed from filed annuals — missing line items report "
+        "'unavailable', never zero-filled."
+    )
+
+
+def _fundamentals_bundle(fin: dict | None = None) -> dict:
+    fin = fin if isinstance(fin, dict) and fin else EMPTY_STATEMENTS
     return {
         "revenue_growth": _serialize(revenue_growth(fin)),
         "earnings_growth": _serialize(earnings_growth(fin)),
@@ -154,8 +187,8 @@ def _fundamentals_bundle() -> dict:
     }
 
 
-def _quality_bundle() -> dict:
-    fin = EMPTY_STATEMENTS
+def _quality_bundle(fin: dict | None = None) -> dict:
+    fin = fin if isinstance(fin, dict) and fin else EMPTY_STATEMENTS
     return {
         "piotroski": _serialize(piotroski_score(fin)),
         "altman_z": _serialize(altman_z(fin)),
@@ -164,10 +197,25 @@ def _quality_bundle() -> dict:
     }
 
 
-def _valuation_bundle() -> dict:
+def _valuation_bundle(fin: dict | None = None) -> dict:
+    live = fin if isinstance(fin, dict) and fin else EMPTY_STATEMENTS
+    try:
+        from backend.analytics.common import get_number as _get_number
+
+        base_fcf = _get_number(live, "base_fcf")
+    except Exception:
+        base_fcf = None
+    if base_fcf is not None and base_fcf > 0:
+        dcf = dcf_sensitivity(
+            base_fcf, DCF_DEFAULT_GROWTH,
+            list(DCF_DEFAULT_DISCOUNT_RATES),
+            list(DCF_DEFAULT_TERMINAL_RATES),
+        )
+    else:
+        dcf = dcf_sensitivity(0, DCF_DEFAULT_GROWTH, [], [])
     return {
-        "wacc": _serialize(wacc(EMPTY_STATEMENTS)),
-        "dcf_sensitivity": _serialize(dcf_sensitivity(0, 0.05, [], [])),
+        "wacc": _serialize(wacc(live)),
+        "dcf_sensitivity": _serialize(dcf),
         "peer_compare": _serialize(peer_compare({}, [])),
     }
 
@@ -233,15 +281,44 @@ def get_analytics(
     if frame.empty or len(frame) < 2:
         raise _HTTPException(status_code=422, detail=f"insufficient history for {sym!r}: {len(frame)} bars")
     provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}
+    # Free statement feed (SEC EDGAR for US, Yahoo annuals for SSE/Euronext
+    # + US fallback). Best-effort: any failure keeps today's honest
+    # "unavailable" sections (never fabricated, never a 500).
+    try:
+        mic: str | None = None
+        try:
+            registry = getattr(svc, "registry", None)
+            if registry is not None:
+                inst, _, _ = registry.resolve(sym)
+                if inst is not None:
+                    mic = getattr(inst, "exchange_mic", None)
+        except Exception:
+            mic = None
+        try:
+            last_close: float | None = float(frame["close"].iloc[-1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            last_close = None
+        from backend.market_data.statements.resolver import get_statements
+
+        fin_live, stmt_info = get_statements(
+            sym, mic, {"price": last_close} if last_close else None
+        )
+    except Exception:
+        fin_live, stmt_info = {}, {"source": None, "reason": "resolver failed"}
+    if not isinstance(fin_live, dict) or not fin_live:
+        fin_live = {}
+    if not isinstance(stmt_info, dict):
+        stmt_info = {"source": None}
     out: dict = {
         "symbol": sym,
         "as_of": str(provenance.get("as_of")),
         "provenance": provenance,
         "technical": _technical_bundle(frame),
-        "fundamentals": _fundamentals_bundle(),
-        "quality": _quality_bundle(),
-        "valuation": _valuation_bundle(),
-        "note": NOTE,
+        "fundamentals": _fundamentals_bundle(fin_live),
+        "quality": _quality_bundle(fin_live),
+        "valuation": _valuation_bundle(fin_live),
+        "statements": _json_safe(stmt_info),
+        "note": _statements_note(stmt_info),
         "disclosure": DISCLOSURE,
     }
     if wanted:

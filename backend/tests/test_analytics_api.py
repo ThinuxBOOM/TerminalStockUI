@@ -40,14 +40,20 @@ def test_analytics_bundle_shape_and_provenance():
             _assert_metric_envelope(metric, f"{section}.{name}")
 
 
-def test_analytics_technical_live_and_statement_sections_unavailable_by_design():
+def test_analytics_technical_live_and_statement_sections_unavailable_by_design(monkeypatch):
+    import backend.market_data.statements.resolver as resolver_module
+
+    # Pin the feed to failed: statement families report unavailable (honest),
+    # regardless of network availability in the test environment.
+    monkeypatch.setattr(resolver_module, "get_statements",
+                        lambda *a, **k: ({}, {"source": None, "reason": "offline"}))
     client = _client()
     body = client.get("/api/analytics/MSFT").json()
     # Technical runs on bars: at least one indicator is computable.
     flags = {m["quality_flag"] for m in body["technical"].values()}
     assert flags & {"ok", "degraded"}
     assert body["technical"]["sma_20"]["formula"]
-    # No statement feed in M3: statement families report unavailable (honest).
+    # No statement feed: statement families report unavailable (honest).
     assert body["fundamentals"]["gross_margin"]["quality_flag"] == "unavailable"
     assert body["quality"]["piotroski"]["quality_flag"] == "unavailable"
     assert body["valuation"]["wacc"]["quality_flag"] == "unavailable"

@@ -101,6 +101,33 @@ Ranked by reliability × coverage × free-tier fit for THIS app.
   triangle (EURUSD 1.08 / USDCNY 7.25). Right tool for daily-bar FX;
   wrong tool for intraday FX.
 
+## Financial statements (free feed for fundamentals/quality/valuation)
+
+Price vendors only ship OHLCV, so `GET /api/analytics/{symbol}` used to
+serve `fundamentals/quality/valuation` as honest "unavailable"
+(`EMPTY_STATEMENTS`). Two keyless legs now feed those sections
+(`backend/market_data/statements/`, routed by `resolver.get_statements`):
+
+| Leg | Covers | Key? | Source of truth |
+|---|---|---|---|
+| **SEC EDGAR XBRL** (`data.sec.gov/api/xbrl/companyfacts`) | US (XNYS/XNAS, incl. 20-F/40-F foreign filers) | no (mandatory `User-Agent` contact via `STATEMENTS_CONTACT`, 10 req/s fair use) | The filed 10-K/20-F/40-F itself; updated <1 min after acceptance |
+| **yfinance annuals** (income/balance/cash-flow) | Global incl. SSE + Euronext; US fallback | no | Yahoo compilations (thinner outside the US — gaps stay "unavailable") |
+
+Chain: US → SEC EDGAR, yfinance on SEC failure · SSE/Euronext →
+yfinance only (EDGAR is never asked — no CIK coverage there). Annual
+10-K/20-F/40-F facts only (350–380-day flows); restatements resolve to
+latest-filed-wins; every metric anchors on revenue's fiscal ends so
+margins never mix periods. Derived in the resolver (shared by both legs):
+working capital, current ratio, asset turnover, gross margin (+ priors),
+total debt, FCF (`base_fcf`), effective tax rate, market cap from the
+quote. 24h cache (statements move quarterly).
+
+Honest limits: WACC stays "unavailable" (needs market-implied
+cost-of-equity/debt, which filings cannot supply); non-US coverage is
+only as deep as Yahoo's statements; no point-in-time restatement
+archive beyond latest-filed-wins (see `docs/DATA_QUALITY.md` retention
+row for filings snapshots).
+
 ## Evaluated but NOT wired (too thin for the live chain)
 
 | Source | Free tier (2026-09) | Verdict |
@@ -120,6 +147,8 @@ Ranked by reliability × coverage × free-tier fit for THIS app.
 | TwelveData Basic | yes | 0 (US partial) | 8/min + 800/day | US |
 | Stooq | no | 15 min | undisclosed daily quota (200-body!) | US, Euronext |
 | Frankfurter/ECB | no | daily fix | none (abuse throttle only) | FX |
+| SEC EDGAR XBRL | no (+`User-Agent`) | filings (<1 min) | 10 req/s fair use | US statements |
+| yfinance annuals | no | annual | unpublished per-IP | statements (all markets) |
 
 Local `RateLimiter` buckets mirror the free tiers (Finnhub 1 rps/burst 5;
 TwelveData 8/60 rps/burst 8; Stooq 2 rps/burst 4; Alpaca 3 rps/burst 6);
