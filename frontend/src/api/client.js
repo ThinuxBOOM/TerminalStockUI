@@ -1513,13 +1513,42 @@ function normalizeChart(raw, symbol, timeframe = "1d") {
   } catch {
     quote = null;
   }
+  const forming = Boolean(r.forming);
+  // Legacy-backend safety net: no /chart stitching there, so align the
+  // terminal print with the header quote client-side when the sessions
+  // match (close/high/low only — never appends: the open is unknowable
+  // from the normalized quote shape).
+  let candles = candlesOut.candles;
+  let stitched = Boolean(r.stitched);
+  let stitchedReason = typeof r.stitched_reason === "string" ? r.stitched_reason : null;
+  if (!stitched && quote && typeof quote.price === "number" && Number.isFinite(quote.price) && candles.length > 0) {
+    try {
+      const qDay = String(quote.provenance?.as_of ?? "").slice(0, 10);
+      const last = candles[candles.length - 1];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(qDay) && last && last.time === qDay) {
+        const aligned = candles.slice();
+        aligned[aligned.length - 1] = {
+          ...last,
+          close: quote.price,
+          high: Math.max(last.high, quote.price),
+          low: Math.min(last.low, quote.price)
+        };
+        candles = aligned;
+        stitched = true;
+        stitchedReason = null;
+      }
+    } catch {
+      // Alignment is display-only; never break the chart on it.
+    }
+  }
   return {
     symbol: candlesOut.symbol,
     timeframe: candlesOut.timeframe,
     quote,
-    candles: candlesOut.candles,
-    stitched: Boolean(r.stitched),
-    stitched_reason: typeof r.stitched_reason === "string" ? r.stitched_reason : null,
+    candles,
+    stitched,
+    stitched_reason: stitchedReason,
+    forming,
     provenance: candlesOut.provenance
   };
 }

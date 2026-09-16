@@ -115,11 +115,13 @@ def chart(
 ):
     """GET /api/market_data/chart?symbol=AAPL&timeframe=1d&limit=90.
 
-    One backend handling returns the live quote AND the bars series with
-    the quote overlaid onto the terminal 1d bar, so the header price and
-    the chart's last print are the same number from the same call (no
-    quote-vs-bars time skew). Quote failure degrades to ``quote=null`` +
-    ``stitched=false`` (bars still served); bars failure is 502 as today.
+    One backend handling returns the live quote AND the bars series synced
+    with it, so the header price and the chart's last print are the same
+    number from the same call (no quote-vs-bars time skew). Same-date
+    sessions update the terminal bar in place; newer sessions append an
+    honest forming bar (``forming=true``); quote failure degrades to
+    ``quote=null`` + ``stitched=false`` (bars still served); bars failure
+    is 502 as today.
     """
     symbol = validate_symbol(symbol)
     timeframe = validate_timeframe(timeframe)

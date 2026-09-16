@@ -330,6 +330,42 @@ describe("normalizeAnalytics with ?indicators (overlay series passthrough)", () 
     expect(out.candles[out.candles.length - 1].close).toBe(out.quote.price);
     expect(out.stitched).toBe(true);
   });
+  it("normalizeChart aligns the terminal print client-side on legacy backends", async () => {
+    const { normalizeChart } = await import("./client");
+    // Old backend: stitched=false but same-session quote present — the last
+    // candle close is pulled to the header price (never appends: no open).
+    const out = normalizeChart(
+      {
+        symbol: "AAPL",
+        quote: { symbol: "AAPL", price: 333.28, currency: "USD", provenance: prov() },
+        bars: [
+          { ts: "2026-09-15", open: 330, high: 331, low: 329, close: 330.5 },
+          { ts: "2026-01-15", open: 331, high: 332, low: 330, close: 331.5 },
+        ],
+        stitched: false,
+        stitched_reason: "legacy-backend",
+        provenance: prov(),
+      },
+      "AAPL"
+    );
+    expect(out.stitched).toBe(true);
+    expect(out.candles[out.candles.length - 1].close).toBe(out.quote.price);
+    // Newer-session quote: left alone client-side (no open to build a
+    // forming bar with — the backend appends it when deployed).
+    const newer = normalizeChart(
+      {
+        symbol: "AAPL",
+        quote: { symbol: "AAPL", price: 340, currency: "USD",
+                 provenance: prov({ as_of: "2026-09-17T13:30:00.000Z" }) },
+        bars: [{ ts: "2026-09-15", open: 330, high: 331, low: 329, close: 330.5 }],
+        stitched: false,
+        provenance: prov(),
+      },
+      "AAPL"
+    );
+    expect(newer.stitched).toBe(false);
+    expect(newer.candles).toHaveLength(1);
+  });
   it("normalizeChart degrades honestly on quote problems (bars still render)", async () => {
     const { normalizeChart } = await import("./client");
     const missing = normalizeChart(

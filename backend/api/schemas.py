@@ -84,6 +84,7 @@ class ChartResponse(BaseModel):
     bars: list[BarOut] = Field(default_factory=list)
     stitched: bool = False
     stitched_reason: str | None = None
+    forming: bool = False
     provenance: Provenance
 
 

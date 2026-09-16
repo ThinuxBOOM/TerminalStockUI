@@ -829,56 +829,152 @@ class MarketDataService:
         )
 
     @staticmethod
+    @staticmethod
+    def _append_forming_bar(
+        rows: list[dict], quote: dict, price: float, quote_day: str,
+        as_of_raw: object, mic: str | None,
+    ) -> tuple[list[dict], bool, str | None, bool]:
+        """Append the quote's session as a forming daily bar (pure helper).
+
+        Every field comes from the quote itself — session open/high/low,
+        live close, session volume — so nothing is fabricated. Guards (any
+        trip declines with a reason, never a partial bar): finite session
+        open required; the quote day must be a trading session when the
+        calendar can answer (weekend/holiday stamps never grow candles);
+        unknown MICs proceed (nothing disproven). Returns
+        ``(rows, stitched, reason, forming)``. Never raises.
+        """
+        try:
+            session_open = float(quote.get("open"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return rows, False, "forming-open-unknown", False
+        try:
+            import math as _math
+
+            if not _math.isfinite(session_open) or session_open <= 0:
+                return rows, False, "forming-open-unknown", False
+        except Exception:
+            return rows, False, "forming-open-unknown", False
+        try:
+            mic_up = (mic or "").strip().upper()
+        except Exception:
+            mic_up = ""
+        if mic_up:
+            try:
+                from datetime import date as _date
+
+                from backend.instruments.calendars import _lib_is_session
+
+                day = _date.fromisoformat(quote_day)
+                if _lib_is_session(day, mic_up) is False:
+                    return rows, False, "quote-off-session", False
+            except Exception:
+                pass
+        try:
+            import math as _math2
+
+            high = session_open
+            low = session_open
+            try:
+                qh = quote.get("high")
+                if qh is not None and not isinstance(qh, bool):
+                    qh_f = float(qh)  # type: ignore[arg-type]
+                    if _math2.isfinite(qh_f) and qh_f > 0:
+                        high = max(high, qh_f)
+            except (TypeError, ValueError):
+                pass
+            try:
+                ql = quote.get("low")
+                if ql is not None and not isinstance(ql, bool):
+                    ql_f = float(ql)  # type: ignore[arg-type]
+                    if _math2.isfinite(ql_f) and ql_f > 0:
+                        low = min(low, ql_f)
+                high = max(high, price)
+                low = min(low, price)
+            except (TypeError, ValueError):
+                high = max(high, price)
+                low = min(low, price)
+            volume = None
+            try:
+                qvol = quote.get("volume")
+                if qvol is not None and not isinstance(qvol, bool):
+                    qvol_f = float(qvol)  # type: ignore[arg-type]
+                    if _math2.isfinite(qvol_f) and qvol_f >= 0:
+                        volume = int(qvol_f)
+            except (TypeError, ValueError):
+                volume = None
+            try:
+                ts = str(as_of_raw) if as_of_raw is not None else quote_day
+            except Exception:
+                ts = quote_day
+            rows.append({
+                "ts": ts,
+                "open": session_open,
+                "high": high,
+                "low": low,
+                "close": price,
+                "volume": volume,
+                "missing_fields": [],
+            })
+        except Exception:
+            try:
+                rows.pop()
+            except Exception:
+                pass
+            return rows, False, "stitch-failed", False
+        return rows, True, None, True
+
     def _stitch_quote_into_bars(
-        bars: list[dict], quote: dict | None
-    ) -> tuple[list[dict], bool, str | None]:
+        self, bars: list[dict], quote: dict | None, mic: str | None = None
+    ) -> tuple[list[dict], bool, str | None, bool]:
         """Overlay the live quote onto a COPY of 1d bars (pure helper).
 
-        When the quote's session date equals the last bar's date, the last
-        bar's close/high/low (and volume when the quote carries a finite
-        one) are set from the quote so the chart's terminal print is the
-        live price — same number, same call. Never appends a forming bar
-        (its open is unknowable without fabrication) and never mutates the
-        input rows (the bars payload may be a shared cache object; DB rows
-        are untouched — forecasting keeps clean daily history).
-        Returns ``(bars_copy, stitched, reason)``; ``reason`` is None when
-        stitched. Never raises.
+        Same-date sessions update the terminal bar's close/high/low (and
+        volume when the quote carries a finite one). A newer-session quote
+        appends an honest forming bar (every field from the quote; weekend/
+        holiday stamps and missing session opens decline). Never mutates
+        the input rows (the bars payload may be a shared cache object; DB
+        rows are untouched — forecasting keeps clean daily history).
+        Returns ``(bars_copy, stitched, reason, forming)``; ``reason`` is
+        None when stitched. Never raises.
         """
         try:
             rows = [dict(b) if isinstance(b, dict) else b for b in (bars or [])]
         except Exception:
-            return bars, False, "bars-unusable"
+            return bars, False, "bars-unusable", False
         if not rows:
-            return rows, False, "no-bars"
+            return rows, False, "no-bars", False
         if not isinstance(quote, dict):
-            return rows, False, "quote-missing"
+            return rows, False, "quote-missing", False
         try:
             price = float(quote.get("price"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
-            return rows, False, "quote-priceless"
+            return rows, False, "quote-priceless", False
         try:
             import math as _math
 
             if not _math.isfinite(price) or price <= 0:
-                return rows, False, "quote-priceless"
+                return rows, False, "quote-priceless", False
         except Exception:
-            return rows, False, "quote-priceless"
+            return rows, False, "quote-priceless", False
         try:
             as_of_raw = ((quote.get("provenance") or {}).get("as_of")
                          if isinstance(quote.get("provenance"), dict) else None)
             as_of_raw = as_of_raw if as_of_raw is not None else quote.get("as_of")
             quote_day = str(as_of_raw)[:10]
             if len(quote_day) != 10:
-                return rows, False, "quote-undated"
+                return rows, False, "quote-undated", False
             last = rows[-1]
             last_day = str((last or {}).get("ts") or "")[:10]
             if len(last_day) != 10:
-                return rows, False, "bars-undated"
+                return rows, False, "bars-undated", False
         except Exception:
-            return rows, False, "quote-undated"
+            return rows, False, "quote-undated", False
         if quote_day != last_day:
-            return rows, False, (
-                "quote-newer-session" if quote_day > last_day else "quote-stale"
+            if quote_day < last_day:
+                return rows, False, "quote-stale", False
+            return self._append_forming_bar(
+                rows, quote, price, quote_day, as_of_raw, mic
             )
         try:
             last["close"] = price
@@ -903,8 +999,8 @@ class MarketDataService:
             except (TypeError, ValueError):
                 pass
         except Exception:
-            return rows, False, "stitch-failed"
-        return rows, True, None
+            return rows, False, "stitch-failed", False
+        return rows, True, None, False
 
     def get_chart(
         self, symbol: str, timeframe: str = "1d", limit: int = 30
@@ -913,14 +1009,16 @@ class MarketDataService:
 
         Fetches the bars series (existing DB-first + refresh path, raises
         502 when unservable exactly like :meth:`get_bars`) and the live
-        quote (same provider chain) in ONE backend handling, then overlays
-        the quote onto the terminal 1d bar (same-date sessions only) so the
-        header price and the chart's last print are the same number from
-        the same call. Quote failure degrades to ``quote=None`` +
-        ``stitched=False`` (bars still served); bars failure raises.
-        Non-1d timeframes skip stitching (no intraday forming bar). The
-        stitched rows are response copies — stored bars and the forecast
-        engine (which reads :meth:`get_bars`, never this) are untouched.
+        quote (same provider chain) in ONE backend handling, then syncs
+        the terminal 1d print with the quote — same-date sessions update
+        the last bar in place, newer sessions append an honest forming bar
+        (every field from the quote) — so the header price and the chart's
+        last print are the same number from the same call. Quote failure
+        degrades to ``quote=None`` + ``stitched=False`` (bars still
+        served); bars failure raises. Non-1d timeframes skip stitching.
+        The stitched rows are response copies — stored bars and the
+        forecast engine (which reads :meth:`get_bars`, never this) are
+        untouched.
         """
         try:
             symbol_text = str(symbol or "").strip()
@@ -928,15 +1026,22 @@ class MarketDataService:
             symbol_text = ""
         bars_payload = self.get_bars(symbol_text, timeframe, limit)
         bars = bars_payload.get("bars", []) if isinstance(bars_payload, dict) else []
+        try:
+            instrument, _, _ = self.registry.resolve(symbol_text)
+            mic = getattr(instrument, "exchange_mic", None) if instrument else None
+        except Exception:
+            mic = None
         quote: dict | None = None
         if (timeframe or "1d") == "1d":
             try:
                 quote = self.get_quote(symbol_text, None)
             except Exception:
                 quote = None
-        stitched, reason = False, "quote-missing"
+        stitched, reason, forming = False, "quote-missing", False
         if quote is not None and (timeframe or "1d") == "1d":
-            bars, stitched, reason = self._stitch_quote_into_bars(bars, quote)
+            bars, stitched, reason, forming = self._stitch_quote_into_bars(
+                bars, quote, mic
+            )
         elif (timeframe or "1d") != "1d":
             reason = "non-1d-timeframe"
         out = dict(bars_payload) if isinstance(bars_payload, dict) else {}
@@ -944,6 +1049,7 @@ class MarketDataService:
         out["quote"] = quote
         out["stitched"] = bool(stitched)
         out["stitched_reason"] = reason
+        out["forming"] = bool(forming)
         return out
 
     def _bars_payload_is_fresh(self, payload: dict | None, symbol: str, timeframe: str) -> bool:

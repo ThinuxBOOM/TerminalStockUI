@@ -111,14 +111,45 @@ def test_chart_quote_inside_range_only_moves_close():
     assert out["bars"][-1]["low"] == pytest.approx(330.0)
 
 
-def test_chart_quote_newer_session_never_appends():
+def test_chart_quote_newer_session_appends_forming_bar():
+    svc = _service(quote=_quote(as_of="2026-09-17T13:30:00+00:00"))
+    out = svc.get_chart("AAPL", "1d", 30)
+    assert out["stitched"] is True
+    assert out["stitched_reason"] is None
+    assert out["forming"] is True
+    assert len(out["bars"]) == 3
+    forming = out["bars"][-1]
+    # Every forming field comes from the quote itself — nothing fabricated.
+    assert forming["open"] == pytest.approx(331.0)
+    assert forming["close"] == pytest.approx(out["quote"]["price"])
+    assert forming["high"] == pytest.approx(333.28)
+    assert forming["low"] == pytest.approx(330.5)
+    assert forming["volume"] == 500
+    assert str(forming["ts"])[:10] == "2026-09-17"
+    # History intact behind it.
+    assert out["bars"][-2]["close"] == pytest.approx(331.50)
+
+
+def test_chart_forming_bar_declines_without_session_open():
+    quote = _quote(as_of="2026-09-17T13:30:00+00:00")
+    quote["open"] = None
+    svc = _service(quote=quote)
+    out = svc.get_chart("AAPL", "1d", 30)
+    assert out["stitched"] is False
+    assert out["stitched_reason"] == "forming-open-unknown"
+    assert out["forming"] is False
+    assert len(out["bars"]) == 2
+
+
+def test_chart_forming_bar_blocked_off_session(monkeypatch):
+    import backend.instruments.calendars as calendars_module
+
+    monkeypatch.setattr(calendars_module, "_lib_is_session", lambda day, mic: False)
     svc = _service(quote=_quote(as_of="2026-09-17T13:30:00+00:00"))
     out = svc.get_chart("AAPL", "1d", 30)
     assert out["stitched"] is False
-    assert out["stitched_reason"] == "quote-newer-session"
-    assert len(out["bars"]) == 2  # no forming bar fabricated
-    assert out["bars"][-1]["close"] == pytest.approx(331.50)
-    assert out["quote"]["price"] == pytest.approx(333.28)
+    assert out["stitched_reason"] == "quote-off-session"
+    assert len(out["bars"]) == 2
 
 
 def test_chart_stale_quote_leaves_bars_alone():
@@ -176,6 +207,20 @@ def test_chart_endpoint_shape_and_sync():
         assert body["quote"]["price"] == pytest.approx(333.28)
         assert body["bars"][-1]["close"] == pytest.approx(body["quote"]["price"])
         assert PROVENANCE_KEYS <= set(body["provenance"])
+    finally:
+        _teardown()
+
+
+def test_chart_endpoint_forming_bar_sync():
+    try:
+        svc = _service(quote=_quote(as_of="2026-09-17T13:30:00+00:00"))
+        resp = _client(svc).get("/api/market_data/chart",
+                                params={"symbol": "AAPL", "limit": 30})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["stitched"] is True
+        assert body["forming"] is True
+        assert body["bars"][-1]["close"] == pytest.approx(body["quote"]["price"])
     finally:
         _teardown()
 
