@@ -504,6 +504,10 @@ const AnalyticsSchema = z.object({
   quality: z.record(z.unknown()).optional().default({}),
   valuation: z.record(z.unknown()).optional().default({}),
   note: z.string().optional(),
+  // Statements feed provenance (backend `statements` block): live feed sets
+  // `source` (sec-edgar / yfinance-statements), outage leaves it null.
+  // The UI colors the analytics note green/amber off this (never the text).
+  statements: z.record(z.unknown()).nullable().optional().default(null),
   provenance: ProvenanceSchema
 }).passthrough();
 function normalizeAnalytics(raw, symbol, requestedIndicators) {
@@ -511,6 +515,7 @@ function normalizeAnalytics(raw, symbol, requestedIndicators) {
   const nested = r.data ?? r.analytics ?? {};
   const pick = (key) => r[key] ?? nested[key] ?? {};
   const noteRaw = (typeof r.note === "string" ? r.note : void 0) ?? (typeof nested.note === "string" ? nested.note : void 0);
+  const statementsRaw = r.statements ?? nested.statements ?? null;
   const candidate = {
     symbol: r.symbol ?? nested.symbol ?? symbol,
     technical: pick("technical"),
@@ -518,6 +523,7 @@ function normalizeAnalytics(raw, symbol, requestedIndicators) {
     quality: pick("quality"),
     valuation: pick("valuation"),
     ...noteRaw ? { note: noteRaw } : {},
+    statements: statementsRaw && typeof statementsRaw === "object" ? statementsRaw : null,
     provenance: normalizeProvenance({ ...nested, ...r }, "analytics-api")
   };
   const parsed = AnalyticsSchema.parse(candidate);

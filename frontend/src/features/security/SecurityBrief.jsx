@@ -399,7 +399,16 @@ function AnalyticsSnapshot({ analytics, loading, failed }) {
   return (
     <div className="term-panel min-w-0 p-4" aria-labelledby="brief-analytics">
       <h3 id="brief-analytics" className="term-label">Analytics snapshot · deterministic</h3>
-      {analytics?.note && <p className="mt-1 text-[11px] text-term-amber" role="note">{analytics.note}</p>}
+      {analytics?.note && (
+        <p
+          className={analytics?.statements?.source
+            ? "mt-1 text-[11px] text-term-green"
+            : "mt-1 text-[11px] text-term-amber"}
+          role="note"
+        >
+          {analytics.note}
+        </p>
+      )}
       {loading && <div className="mt-2"><Skeleton label="loading analytics…" lines={4} /></div>}
       {failed && <p className="mt-1 text-xs text-term-amber" role="alert">⚠ analytics endpoint unreachable — snapshot unavailable, rest of the page unaffected.</p>}
       {!loading && !failed && !analytics && <p className="mt-1 text-xs text-term-muted" role="status">No analytics payload yet.</p>}

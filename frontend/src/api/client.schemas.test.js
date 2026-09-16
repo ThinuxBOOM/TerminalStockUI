@@ -314,4 +314,36 @@ describe("normalizeAnalytics with ?indicators (overlay series passthrough)", () 
     expect(out.indicators).toEqual({});
     expect(out.requestedIndicators).toEqual(["MACD"]);
   });
+  it("preserves the statements block so the note renders green when live, amber when not", async () => {
+    const { normalizeAnalytics } = await import("./client");
+    const live = normalizeAnalytics(
+      {
+        symbol: "AAPL",
+        technical: {},
+        note: "Statements: sec-edgar (FY2025, FY2024…)…",
+        statements: { source: "sec-edgar", fiscal_ends: ["2025-09-27", "2024-09-28"] },
+        provenance: prov(),
+      },
+      "AAPL"
+    );
+    expect(live.statements).toMatchObject({ source: "sec-edgar" });
+    // Green/amber branches off statements.source (never the note text).
+    expect(Boolean(live.statements?.source)).toBe(true);
+    const down = normalizeAnalytics(
+      {
+        symbol: "AAPL",
+        technical: {},
+        note: "Statement feed not wired…",
+        statements: { source: null, reason: "network down" },
+        provenance: prov(),
+      },
+      "AAPL"
+    );
+    expect(Boolean(down.statements?.source)).toBe(false);
+    const legacy = normalizeAnalytics(
+      { symbol: "AAPL", technical: {}, provenance: prov() },
+      "AAPL"
+    );
+    expect(legacy.statements).toBeNull();
+  });
 });

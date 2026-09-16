@@ -395,7 +395,16 @@ function ForecastDetails({ symbol }) {
 
       <section className="term-panel p-4">
         <p className="term-label">Deterministic analytics snapshot</p>
-        {analytics?.note && <p className="mt-1 text-[11px] text-term-amber" role="note">{analytics.note}</p>}
+        {analytics?.note && (
+          <p
+            className={analytics?.statements?.source
+              ? "mt-1 text-[11px] text-term-green"
+              : "mt-1 text-[11px] text-term-amber"}
+            role="note"
+          >
+            {analytics.note}
+          </p>
+        )}
         {analyticsQ.isLoading && <p className="mt-1 text-xs text-term-muted">loading analytics…</p>}
         {analyticsQ.isError && <p className="mt-1 text-xs text-term-amber">⚠ analytics endpoint unreachable — snapshot unavailable, forecast above unaffected.</p>}
         {analytics && (
