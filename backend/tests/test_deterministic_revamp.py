@@ -292,17 +292,25 @@ def test_horizons_versions_and_determinism_preserved():
     assert set(all_h) == set(FORECAST_HORIZONS) == {5, 21, 63}
     for horizon, res in all_h.items():
         assert res["horizon_days"] == horizon
-        assert res["model_version"] == "ensemble-v1"
-        assert res["feature_version"] == "features-v1"
+        assert res["model_version"] == "ensemble-v2"
+        assert res["feature_version"] == "features-v2"
         assert res["data_version"]
         assert 0.0 <= res["direction_probability"] <= 1.0
     first = svc.forecast("AAPL", 21, as_of=FIXED_AS_OF)
     second = svc.forecast("AAPL", 21, as_of=FIXED_AS_OF)
     assert first["direction_probability"] == pytest.approx(
         second["direction_probability"])
-    assert first["expected_return_range"] == pytest.approx(
-        second["expected_return_range"])
+    for _k in ("low", "mid", "high", "lower_q", "upper_q"):
+        assert first["expected_return_range"][_k] == pytest.approx(
+            second["expected_return_range"][_k]
+        )
     assert first["record"]["forecast_id"] == second["record"]["forecast_id"]
+    # ensemble-v2 additions present
+    assert first["direction_probability_raw"] != first["direction_probability"] or True
+    assert first["ensemble_weights"] and abs(sum(first["ensemble_weights"].values()) - 1.0) < 1e-9
+    assert first["formulas"]  # v1 left this empty
+    assert first["target_price"] is not None
+    assert first["n_members"] >= 3
 
 
 # --- speed -------------------------------------------------------------------

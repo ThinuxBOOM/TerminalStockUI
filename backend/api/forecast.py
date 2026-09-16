@@ -120,6 +120,11 @@ def forecast_drivers(
     narrative is invented. Cap 4 items per side; empty side renders as
     "unavailable" in the UI (honest, never zero-filled).
 
+    ensemble-v2: member entries now include weights
+    (``"<name> implies up (p=0.62, w=0.25)"``); spread/disagreement and
+    calibration notes live in limitations (not drivers) to preserve the
+    4-per-side contract.
+
     When ``member_accuracy`` (``{member: {"hit_rate": float|None, ...}}``)
     is provided and non-empty, each side is ordered by trailing hit_rate
     descending (member entries use their member's rate; non-member and
@@ -130,15 +135,21 @@ def forecast_drivers(
     risks: list[str] = []
     horizon = result.get("horizon_days", "?")
     components = result.get("components") or {}
+    weights = result.get("ensemble_weights") or {}
     for name in sorted(components):
         try:
             value = float(components[name])
         except (TypeError, ValueError):
             continue
+        try:
+            w = weights.get(name)
+            w_txt = f", w={float(w):.2f}" if isinstance(w, (int, float)) and not isinstance(w, bool) else ""
+        except Exception:
+            w_txt = ""
         if value > 0.5:
-            why.append(f"{name} implies up (p={value:.2f})")
+            why.append(f"{name} implies up (p={value:.2f}{w_txt})")
         elif value < 0.5:
-            risks.append(f"{name} implies down (p={value:.2f})")
+            risks.append(f"{name} implies down (p={value:.2f}{w_txt})")
     band = result.get("expected_return_range") or {}
     mid = band.get("mid")
     if isinstance(mid, bool):
@@ -341,18 +352,29 @@ def forecast_limitations(result: dict) -> list[str]:
         "Walk-forward validation only; no look-ahead.",
         "Missing data renders unavailable, never silently imputed.",
         "Disabling AI leaves forecasting intact.",
-        "Direction probabilities are uncalibrated ensemble means (see ECE); "
-        "confidence labels reflect ensemble agreement downgraded by "
+        "Direction probabilities are shrinkage-calibrated weighted means "
+        "(shrinkage 0.8 toward 0.5, clipped to [0.05, 0.95]; raw mean in "
+        "direction_probability_raw) — not isotonic-calibrated; see ECE. "
+        "Fixed reliability weights (ML 0.25 each, drift/momentum 0.20 each, "
+        "trend 0.10), renormalized over members that ran; not per-symbol "
+        "adaptive (V2.1 hook). "
+        "Confidence labels reflect ensemble agreement downgraded by "
         "data-quality and trailing-risk signals (vol regime, drawdown, "
         "staleness), not calibrated skill. High agreement near 0.5 caps at "
         "moderate; AI disagreement downgrades the blend label.",
+        "ensemble-v2 members: historical-drift + momentum + logistic-v3 "
+        "(v2 features) + gradient-boost-v1 (v2 features) + trend-persistence; "
+        "venue blends add sse/eux drift 50/50 then recalibrate.",
     ]
     band = result.get("expected_return_range") or {}
     if band.get("n_windows") is not None:
         try:
             n = int(band['n_windows'])
+            ne = band.get("n_effective")
+            ne_txt = f" (~{float(ne):.1f} independent blocks)" if isinstance(ne, (int, float)) else ""
             items.append(
-                f"Return range estimated from {n} historical windows."
+                f"Return range estimated from {n} historical windows{ne_txt} "
+                f"({band.get('coverage') or '80% empirical'})."
             )
             if n < 10:
                 items.append(
@@ -364,6 +386,22 @@ def forecast_limitations(result: dict) -> list[str]:
                 )
         except (TypeError, ValueError):
             pass
+    try:
+        spread = result.get("ensemble_spread")
+        if isinstance(spread, (int, float)) and not isinstance(spread, bool):
+            if float(spread) > 0.15:
+                items.append(
+                    f"Member disagreement high (spread {float(spread):.2f}): "
+                    "treat direction as uncertain even if confidence is moderate."
+                )
+    except Exception:
+        pass
+    try:
+        reasons = result.get("confidence_reasons") or []
+        if isinstance(reasons, list) and reasons:
+            items.append("Confidence penalties: " + "; ".join(str(r) for r in reasons[:4]))
+    except Exception:
+        pass
     return items
 
 

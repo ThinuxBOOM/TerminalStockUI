@@ -32,6 +32,7 @@ import pandas as pd
 
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.features.features import (
+    EXTENDED_FEATURE_VERSION,
     FEATURE_VERSION,
     build_extended_features,
     build_feature_bundle,
@@ -53,11 +54,20 @@ from backend.forecasting.models.historical_drift import HistoricalDriftBaseline
 from backend.forecasting.models.historical_drift import (
     MODEL_VERSION as HISTORICAL_DRIFT_VERSION,
 )
+from backend.forecasting.models.gradient_boost import GradientBoostDirectionModel
+from backend.forecasting.models.gradient_boost import (
+    MODEL_VERSION as GRADIENT_BOOST_VERSION,
+)
+from backend.forecasting.models.historical_drift import FORMULA_DIRECTION as DRIFT_FORMULA
+from backend.forecasting.models.logistic import FORMULA as LOGISTIC_FORMULA
 from backend.forecasting.models.logistic import LogisticDirectionModel
 from backend.forecasting.models.logistic import MODEL_VERSION as LOGISTIC_VERSION
+from backend.forecasting.models.momentum import FORMULA as MOMENTUM_FORMULA
 from backend.forecasting.models.momentum import MomentumBaseline
 from backend.forecasting.models.momentum import MODEL_VERSION as MOMENTUM_VERSION
+from backend.forecasting.models.gradient_boost import FORMULA as GB_FORMULA
 from backend.forecasting.models.quantile_bands import (
+    FORMULA_BANDS,
     drawdown_probability,
     return_quantiles,
     volatility_regime,
@@ -70,11 +80,30 @@ from backend.forecasting.models.euronext_drift import (
     MODEL_VERSION as EUX_DRIFT_VERSION,
     EuxDriftBaseline,
 )
-from backend.forecasting.registry import ENSEMBLE_VERSION
+from backend.forecasting.registry import ENSEMBLE_VERSION, TREND_PERSISTENCE_VERSION
 from backend.market_data.service import MarketDataService
 
 DISCLOSURE = "Not investment advice"
 BAR_LIMIT = 250
+#: ensemble-v2 fixed reliability weights (sum 1.0; renormalized over the
+#: members that actually ran). ML members get 0.25 each (nonlinear + linear
+#: capture different structure), drift/momentum 0.20 each (base-rate priors),
+#: trend-persistence 0.10 (heuristic quarterly tilt, lowest weight).
+#: Fixed (not per-symbol adaptive) for determinism; per-symbol adaptive
+#: weighting is the V2.1 hook (plug in trailing Brier inverse here).
+ENSEMBLE_WEIGHTS = {
+    "historical-drift": 0.20,
+    "momentum": 0.20,
+    "logistic-direction": 0.25,
+    "gradient-boost-direction": 0.25,
+    "trend-persistence": 0.10,
+}
+#: Shrinkage toward 0.5 applied to the weighted mean (damps overconfidence;
+#: raw ML/drift means are typically overconfident on 250-bar fits).
+#: p_cal = 0.5 + (p_raw - 0.5) * SHRINKAGE, then clipped to [FLOOR, CAP].
+CALIBRATION_SHRINKAGE = 0.8
+PROB_FLOOR = 0.05
+PROB_CAP = 0.95
 #: Member-agreement spread (max(p) - min(p)) for full 3-member "high"
 #: confidence. Values unchanged; named so the band lives in one place.
 CONFIDENCE_HIGH_MAX_SPREAD = 0.08
@@ -85,8 +114,8 @@ DRAWDOWN_PENALTY_THRESHOLD = 0.25
 #: Volatility regimes that cost one confidence notch (strongest bucket first).
 VOLATILITY_PENALTY_REGIMES = frozenset({"high", "elevated", "extreme"})
 #: Members needed for "high" confidence (thin ensembles cap at moderate).
-FULL_ENSEMBLE_MIN_MODELS = 3
-TREND_PERSISTENCE_VERSION = "trend-persistence-v1"
+#: ensemble-v2 has 5 members; require >= 4 for high (one ML miss tolerated).
+FULL_ENSEMBLE_MIN_MODELS = 4
 #: Minimum distance of the ensemble mean from 0.5 for "high" confidence.
 #: Agreement near coin-flip (e.g. members {0.51,0.53,0.55}) must not read
 #: as high-confidence even when spread is tight.
@@ -103,10 +132,84 @@ MEMBER_VERSIONS = {
     "historical-drift": HISTORICAL_DRIFT_VERSION,
     "momentum": MOMENTUM_VERSION,
     "logistic-direction": LOGISTIC_VERSION,
+    "gradient-boost-direction": GRADIENT_BOOST_VERSION,
     "trend-persistence": TREND_PERSISTENCE_VERSION,
     "sse-drift": SSE_DRIFT_VERSION,
     "eux-drift": EUX_DRIFT_VERSION,
 }
+#: member key -> human formula (fills the wire `formulas` dict; v1 left it
+#: empty {} which broke the evidence contract).
+MEMBER_FORMULAS = {
+    "historical-drift": DRIFT_FORMULA,
+    "momentum": MOMENTUM_FORMULA,
+    "logistic-direction": LOGISTIC_FORMULA,
+    "gradient-boost-direction": GB_FORMULA,
+    "trend-persistence": (
+        "z = (mom_63/vol_63)*2 + trail_dd_63*2 + ((rsi_14-50)/50)*0.5; "
+        "P = sigmoid(clip(z, -6, 6)) (63d trend + drawdown + RSI persistence)"
+    ),
+}
+
+
+def _weighted_mean(probas: dict[str, float | None]) -> tuple[float, dict[str, float], float, float]:
+    """Fixed-weight mean over available members (deterministic).
+
+    Returns (mean_raw, weights_used, spread, std). Missing/None/NaN members
+    are skipped and remaining weights renormalized proportionally. Empty
+    input -> (0.5, {}, 0.0, 0.0) defensive fallback (callers always seed
+    >= 2 members, so this is unreachable in practice).
+    """
+    clean: dict[str, float] = {}
+    for name, value in (probas or {}).items():
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            clean[name] = min(max(number, 0.0), 1.0)
+    if not clean:
+        return 0.5, {}, 0.0, 0.0
+    total_w = sum(float(ENSEMBLE_WEIGHTS.get(n, 0.0)) for n in clean)
+    if not total_w > 0:
+        # Unknown member keys only: fall back to equal weight (never crash).
+        equal = 1.0 / len(clean)
+        weights = {n: equal for n in clean}
+    else:
+        weights = {n: float(ENSEMBLE_WEIGHTS.get(n, 0.0)) / total_w for n in clean}
+    mean = sum(clean[n] * weights[n] for n in clean)
+    values = list(clean.values())
+    spread = float(max(values) - min(values)) if len(values) > 1 else 0.0
+    if len(values) > 1:
+        avg = sum(values) / len(values)
+        std = math.sqrt(sum((v - avg) ** 2 for v in values) / len(values))
+    else:
+        std = 0.0
+    return float(mean), weights, spread, float(std)
+
+
+def _calibrate_prob(p_raw: float) -> float:
+    """Shrinkage calibration: pull raw mean toward 0.5, clip extremes."""
+    try:
+        raw = float(p_raw)
+    except (TypeError, ValueError):
+        return 0.5
+    if not math.isfinite(raw):
+        return 0.5
+    raw = min(max(raw, 0.0), 1.0)
+    cal = 0.5 + (raw - 0.5) * CALIBRATION_SHRINKAGE
+    return min(max(cal, PROB_FLOOR), PROB_CAP)
+
+
+def _confidence_score(spread: float, penalties: int) -> float:
+    """Numeric confidence in [0, 1]: 1 - spread/0.25 minus 0.15 per penalty."""
+    try:
+        base = 1.0 - min(max(float(spread), 0.0) / 0.25, 1.0)
+    except (TypeError, ValueError):
+        base = 0.0
+    score = base - 0.15 * max(int(penalties), 0)
+    return min(max(score, 0.0), 1.0)
 #: Bound on the in-memory record mirror (prevents unbounded growth on
 #: long-lived processes; oldest rows are dropped, newest preserved).
 MAX_RECORDS = 500
@@ -631,12 +734,17 @@ class ForecastService:
             if isinstance(cached, dict) and cached.get("horizon_days") == horizon:
                 return cached
         closes = ohlcv["close"]
-        # Single-validate feature bundle: v1 frame for the logistic fit and
-        # the v2 frame for the trend-persistence member share one validation
-        # + RSI pass (identical values to separate builds, ~2x less work).
+        # Single-validate feature bundle: v1 frame (kept for compat) + v2
+        # extended frame for the ML members share one validation + RSI pass.
+        # ensemble-v2 fits logistic-v3 + gradient-boost-v1 on the EXTENDED
+        # frame (14 cols); drift/momentum stay on closes/log-returns.
         features, ext_features = build_feature_bundle(ohlcv)
 
-        # -- direction ensemble (drift + momentum + logistic) ------------
+        # -- direction ensemble v2 (weighted + shrinkage-calibrated) -----
+        # Members: drift + momentum (priors) + logistic-v3 + gradient-boost-v1
+        # (ML, v2 features) + trend-persistence (heuristic). Fixed weights in
+        # ENSEMBLE_WEIGHTS, renormalized over members that actually ran;
+        # raw weighted mean -> shrinkage calibration -> clipped primary.
         lret = log_returns(closes).dropna()
         drift_p = float(
             HistoricalDriftBaseline()
@@ -654,33 +762,41 @@ class ForecastService:
             "historical-drift": drift_p,
             "momentum": momentum_p,
         }
-        formulas: dict[str, str] = {}
         try:
-            logreg = LogisticDirectionModel(horizons=[horizon]).fit(features, closes)
+            logreg = LogisticDirectionModel(horizons=[horizon]).fit(ext_features, closes)
             logistic_p = float(
                 logreg.predict_direction_proba(
-                    features.iloc[[-1]], as_of=stamp, data_version=data_version
+                    ext_features.iloc[[-1]], as_of=stamp, data_version=data_version
                 )[horizon].value
             )
             probas["logistic-direction"] = logistic_p
         except (ValueError, ImportError):
-            pass  # single-class / too-few-rows / sklearn missing: drift+momentum
-        # 4th member: trend-persistence from past market data (63d trend +
-        # drawdown + RSI persistence). Additive; failure skips cleanly so
-        # thin ensembles keep their existing behavior. Reuses the v2 frame
-        # from the bundle above (no rebuild; identical values).
+            pass  # single-class / too-few-rows / sklearn missing: skip member
+        try:
+            gb_model = GradientBoostDirectionModel(horizons=[horizon]).fit(ext_features, closes)
+            gb_p = float(
+                gb_model.predict_direction_proba(
+                    ext_features.iloc[[-1]], as_of=stamp, data_version=data_version
+                )[horizon].value
+            )
+            probas["gradient-boost-direction"] = gb_p
+        except (ValueError, ImportError):
+            pass  # same degrade path as logistic
+        # 5th member: trend-persistence from past market data (63d trend +
+        # drawdown + RSI persistence). Reuses the v2 frame from the bundle
+        # above (no rebuild; identical values).
         try:
             trend_p = _trend_persistence_signal(ohlcv, _ext=ext_features)
             if trend_p is not None and 0.0 <= float(trend_p) <= 1.0:
                 probas["trend-persistence"] = float(trend_p)
         except Exception:
             pass
-        members = sorted(probas)
-        if probas:
-            us_direction = float(sum(probas.values()) / len(probas))
-            us_spread = float(max(probas.values()) - min(probas.values()))
-        else:  # defensive: fits below always seed >= 2 members; never empty
-            us_direction, us_spread = 0.5, 0.0
+        us_raw, us_weights, us_spread, _us_std = _weighted_mean(probas)
+        us_direction_raw = float(us_raw)
+        us_direction = float(_calibrate_prob(us_raw))
+        formulas: dict[str, str] = {
+            name: MEMBER_FORMULAS[name] for name in probas if name in MEMBER_FORMULAS
+        }
 
         # -- return range / regime / drawdown ----------------------------
         band = return_quantiles(
@@ -690,6 +806,14 @@ class ForecastService:
         dd_res = drawdown_probability(
             closes, horizon, as_of=stamp, data_version=data_version
         )
+        try:
+            _n_eff = float(band.get("n_effective", float(band.get("n_windows", 0)) / max(horizon, 1)))
+        except Exception:
+            _n_eff = None
+        try:
+            _width = float(band["high"]) - float(band["low"])
+        except Exception:
+            _width = None
         us_range = {
             "low": float(band["low"]),
             "mid": float(band["median"]),
@@ -697,14 +821,26 @@ class ForecastService:
             "lower_q": float(band["lower_q"]),
             "upper_q": float(band["upper_q"]),
             "n_windows": int(band["n_windows"]),
+            "n_effective": _n_eff,
+            "width": _width,
+            "coverage": f"80% empirical (q{float(band['lower_q']):.2g}/q{float(band['upper_q']):.2g})",
         }
         regime = str(regime_res.value["regime"])
+        try:
+            regime_detail = dict(regime_res.value)
+        except Exception:
+            regime_detail = {"regime": regime}
+        try:
+            dd_detail = dict(dd_res.value)
+        except Exception:
+            dd_detail = {}
         dd_prob = float(dd_res.value["probability"])
 
         if sse:
             # -- SSE path: blend US ensemble 50/50 with SSE drift ---------
             # sse-drift sees the same trailing log-returns (winsorized
             # internally to the +/-10% limit band) with wider tails.
+            # Blend on RAW means then recalibrate (consistent with US path).
             sse_model = SseDriftBaseline().fit(lret)
             sse_p = float(
                 sse_model.direction_probability(
@@ -712,20 +848,35 @@ class ForecastService:
                 ).value
             )
             probas["sse-drift"] = sse_p
-            direction = float((us_direction + sse_p) / 2.0)
+            formulas["sse-drift"] = (
+                "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized SSE drift"
+            )
+            direction_raw = float((us_direction_raw + sse_p) / 2.0)
+            direction = float(_calibrate_prob(direction_raw))
             spread = float(max(probas.values()) - min(probas.values())) if probas else 0.0
+            try:
+                _sse_std = float(pd.Series(list(probas.values())).std(ddof=1))
+                if not math.isfinite(_sse_std):
+                    _sse_std = 0.0
+            except Exception:
+                _sse_std = 0.0
             # Union of ranges: conservative envelope of the US empirical
             # band and the wider SSE drift band; mid is the mean of mids.
             sse_band = sse_model.expected_return_range(
                 horizon, as_of=stamp, data_version=data_version
             ).value
+            _er_low = float(min(us_range["low"], sse_band["low"]))
+            _er_high = float(max(us_range["high"], sse_band["high"]))
             expected_range = {
-                "low": float(min(us_range["low"], sse_band["low"])),
+                "low": _er_low,
                 "mid": float((us_range["mid"] + float(sse_band["mid"])) / 2.0),
-                "high": float(max(us_range["high"], sse_band["high"])),
+                "high": _er_high,
                 "lower_q": float(us_range["lower_q"]),
                 "upper_q": float(us_range["upper_q"]),
                 "n_windows": int(us_range["n_windows"]),
+                "n_effective": us_range.get("n_effective"),
+                "width": float(_er_high - _er_low),
+                "coverage": str(us_range.get("coverage") or "80% empirical"),
             }
             try:
                 sse_features = build_sse_features(ohlcv)
@@ -747,13 +898,14 @@ class ForecastService:
             )
             model_version = SSE_BLEND_VERSION
             feature_version = SSE_FEATURE_VERSION
+            weights_used = {**{k: v * 0.5 for k, v in us_weights.items()}, "sse-drift": 0.5}
+            ensemble_std = float(_sse_std)
         elif eux:
             # -- Euronext path: blend US ensemble 50/50 with eux drift --
             # eux-drift sees the same trailing log-returns (winsorized
             # internally to the +/-15% robustness cap; Euronext has no
-            # hard daily limits) with a z=1.15 band. No limit-proximity
-            # penalty applies (no limits); Euronext features are built to
-            # stamp the eux feature version.
+            # hard daily limits) with a z=1.15 band. Blend on RAW then
+            # recalibrate, mirroring the SSE path.
             eux_model = EuxDriftBaseline().fit(lret)
             eux_p = float(
                 eux_model.direction_probability(
@@ -761,20 +913,35 @@ class ForecastService:
                 ).value
             )
             probas["eux-drift"] = eux_p
-            direction = float((us_direction + eux_p) / 2.0)
+            formulas["eux-drift"] = (
+                "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized Euronext drift"
+            )
+            direction_raw = float((us_direction_raw + eux_p) / 2.0)
+            direction = float(_calibrate_prob(direction_raw))
             spread = float(max(probas.values()) - min(probas.values())) if probas else 0.0
+            try:
+                _eux_std = float(pd.Series(list(probas.values())).std(ddof=1))
+                if not math.isfinite(_eux_std):
+                    _eux_std = 0.0
+            except Exception:
+                _eux_std = 0.0
             # Union of ranges: conservative envelope of the US empirical
             # band and the eux drift band; mid is the mean of mids.
             eux_band = eux_model.expected_return_range(
                 horizon, as_of=stamp, data_version=data_version
             ).value
+            _er_low = float(min(us_range["low"], eux_band["low"]))
+            _er_high = float(max(us_range["high"], eux_band["high"]))
             expected_range = {
-                "low": float(min(us_range["low"], eux_band["low"])),
+                "low": _er_low,
                 "mid": float((us_range["mid"] + float(eux_band["mid"])) / 2.0),
-                "high": float(max(us_range["high"], eux_band["high"])),
+                "high": _er_high,
                 "lower_q": float(us_range["lower_q"]),
                 "upper_q": float(us_range["upper_q"]),
                 "n_windows": int(us_range["n_windows"]),
+                "n_effective": us_range.get("n_effective"),
+                "width": float(_er_high - _er_low),
+                "coverage": str(us_range.get("coverage") or "80% empirical"),
             }
             # NOTE: the EUX feature frame is version-stamped via
             # EUX_FEATURE_VERSION above; its values are not consumed by the
@@ -789,9 +956,14 @@ class ForecastService:
             )
             model_version = EUX_BLEND_VERSION
             feature_version = EUX_FEATURE_VERSION
+            weights_used = {**{k: v * 0.5 for k, v in us_weights.items()}, "eux-drift": 0.5}
+            ensemble_std = float(_eux_std)
         else:
+            direction_raw = float(us_direction_raw)
             direction = us_direction
             spread = us_spread
+            ensemble_std = float(_us_std)
+            weights_used = dict(us_weights)
             expected_range = us_range
             confidence = _confidence(
                 spread,
@@ -802,17 +974,39 @@ class ForecastService:
                 direction_prob=direction,
             )
             model_version = ENSEMBLE_VERSION
-            feature_version = FEATURE_VERSION
+            feature_version = EXTENDED_FEATURE_VERSION
         # Thin-liquidity honesty: non-trading stretches cost one notch (the
         # reason is already disclosed in provenance missing_fields above).
+        confidence_reasons: list[str] = []
+        # Base penalties already inside _confidence: regime, drawdown, grade,
+        # sharpness. Record them for the wire `confidence_reasons`.
+        try:
+            if str(regime).lower() in VOLATILITY_PENALTY_REGIMES:
+                confidence_reasons.append(f"volatility regime {regime} penalty (-1 notch)")
+        except Exception:
+            pass
+        try:
+            if isinstance(dd_prob, (int, float)) and not isinstance(dd_prob, bool):
+                if math.isfinite(float(dd_prob)) and float(dd_prob) >= DRAWDOWN_PENALTY_THRESHOLD:
+                    confidence_reasons.append(
+                        f"drawdown {float(dd_prob):.0%} >= {DRAWDOWN_PENALTY_THRESHOLD:.0%} penalty"
+                    )
+                elif isinstance(dd_prob, float) and math.isnan(float(dd_prob)):
+                    confidence_reasons.append("drawdown unknown penalty (conservative)")
+        except Exception:
+            pass
         if thin_note:
             try:
                 confidence = _penalize_confidence(confidence)
+                confidence_reasons.append(f"thin liquidity: {thin_note}")
             except Exception:
                 pass
         # Honesty cap: stub/stale (fallback or grade C) never serves "high".
         try:
+            _before_stub = confidence
             confidence = _cap_stub_confidence(confidence, provenance)
+            if confidence != _before_stub:
+                confidence_reasons.append("stub/fallback grade cap (high->moderate)")
         except Exception:
             pass
 
@@ -834,7 +1028,26 @@ class ForecastService:
         except Exception:
             _stale = False
         if _fallback or _stale or _crash:
+            if confidence != "low":
+                confidence_reasons.append(
+                    "fallback/stale/corporate-action cap (confidence=low)"
+                )
             confidence = "low"
+        try:
+            if spread > CONFIDENCE_MODERATE_MAX_SPREAD:
+                confidence_reasons.append(
+                    f"member disagreement high (spread {spread:.2f})"
+                )
+        except Exception:
+            pass
+        try:
+            _n_penalties = len(confidence_reasons)
+        except Exception:
+            _n_penalties = 0
+        try:
+            confidence_score = _confidence_score(spread, _n_penalties)
+        except Exception:
+            confidence_score = 0.0
 
         # -- JSON safety: non-finite floats are invalid JSON (NaN/inf) ----
         # Finite inputs pass through bit-identical; only pathological model
@@ -844,15 +1057,44 @@ class ForecastService:
         if _clean_direction is None:
             raise ValueError("non-finite direction probability")
         direction = _clean_direction
+        try:
+            direction_raw = float(_finite_or_none(direction_raw))  # type: ignore[name-defined]
+        except Exception:
+            direction_raw = float(direction)
+        if direction_raw is None:  # type: ignore[unreachable]
+            direction_raw = float(direction)
         dd_prob = _finite_or_none(dd_prob)
         for _bound in ("low", "mid", "high"):
             expected_range[_bound] = _finite_or_none(expected_range.get(_bound))
+        try:
+            expected_range["width"] = _finite_or_none(expected_range.get("width"))
+        except Exception:
+            pass
+        try:
+            _ne = expected_range.get("n_effective")
+            expected_range["n_effective"] = float(_ne) if _ne is not None else None
+            if expected_range["n_effective"] is not None and not math.isfinite(
+                float(expected_range["n_effective"])
+            ):
+                expected_range["n_effective"] = None
+        except Exception:
+            expected_range["n_effective"] = None
         for _name, _value in list(probas.items()):
             _clean_member = _finite_or_none(_value)
             # JSON safety: non-finite members sanitize to None (never NaN/inf).
             # Reachable only on pathological model output; direction already
             # validated finite above, so this never changes valid ensembles.
             probas[_name] = _clean_member
+        try:
+            weights_used = {k: float(v) for k, v in weights_used.items()}  # type: ignore[name-defined]
+        except Exception:
+            weights_used = {}  # type: ignore[no-redef]
+        try:
+            ensemble_std = float(ensemble_std)  # type: ignore[name-defined]
+            if not math.isfinite(ensemble_std):
+                ensemble_std = 0.0
+        except Exception:
+            ensemble_std = 0.0
         # Evidence = members that actually ran (a failed/skipped fit is never
         # listed: its version would otherwise render as contributing evidence).
         model_members = [
@@ -897,6 +1139,28 @@ class ForecastService:
         if len(self.records) > MAX_RECORDS:
             del self.records[: len(self.records) - MAX_RECORDS]
 
+        # Target-price range: last close scaled by the return band (helps the
+        # UI render price levels without refetching quotes). Deterministic.
+        try:
+            _last_close = float(ohlcv["close"].iloc[-1])
+        except Exception:
+            _last_close = None
+        try:
+            if _last_close is not None and math.isfinite(_last_close) and _last_close > 0:
+                target_price = {
+                    "last_close": float(_last_close),
+                    "low": float(_last_close * (1.0 + float(expected_range["low"])))
+                    if expected_range["low"] is not None else None,
+                    "mid": float(_last_close * (1.0 + float(expected_range["mid"])))
+                    if expected_range.get("mid") is not None else None,
+                    "high": float(_last_close * (1.0 + float(expected_range["high"])))
+                    if expected_range["high"] is not None else None,
+                }
+            else:
+                target_price = None
+        except Exception:
+            target_price = None
+
         # NOTE (future per-user calibration hook): per-user probability
         # shaping belongs here as a pure function of (payload, user_tier) —
         # owned by another agent (auth/tiers). Never branch global
@@ -905,10 +1169,20 @@ class ForecastService:
             "symbol": symbol.strip().upper(),
             "horizon_days": horizon,
             "direction_probability": direction,
+            "direction_probability_raw": float(direction_raw),
             "expected_return_range": expected_range,
             "volatility_regime": regime,
+            "volatility_detail": regime_detail,
             "drawdown_probability": dd_prob,
+            "drawdown_detail": dd_detail,
             "confidence": confidence,
+            "confidence_score": float(confidence_score),
+            "confidence_reasons": list(confidence_reasons),
+            "ensemble_weights": dict(weights_used),
+            "ensemble_spread": float(spread),
+            "ensemble_std": float(ensemble_std),
+            "n_members": int(len([v for v in probas.values() if v is not None])),
+            "target_price": target_price,
             "model_version": model_version,
             "model_members": model_members,
             "components": dict(probas),
@@ -931,11 +1205,12 @@ class ForecastService:
     def forecast_all(self, symbol: str, as_of: str | None = None) -> dict[int, dict]:
         """All horizons with ONE bars load + ONE feature build.
 
-        Shared: bars, OHLCV frame, v1 features, log-returns, quantile bands
+        Shared: bars, OHLCV frame, v1+v2 features, log-returns, quantile bands
         (single multi-horizon call), volatility regime (horizon-independent),
-        trend-persistence signal and the multi-horizon logistic fit. Per
-        horizon only the cheap drift/momentum scalars, venue-drift blend,
-        drawdown probability and record assembly remain.
+        trend-persistence signal and the multi-horizon ML fits (logistic-v3 +
+        gradient-boost-v1 on the extended frame). Per horizon only the cheap
+        drift/momentum scalars, venue-drift blend, drawdown probability and
+        record assembly remain. ensemble-v2 weighted + shrinkage-calibrated.
         """
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
@@ -1006,8 +1281,12 @@ class ForecastService:
         try:
             regime_res = volatility_regime(closes, as_of=stamp, data_version=data_version)
             regime = str(regime_res.value["regime"])
+            try:
+                regime_detail_all = dict(regime_res.value)
+            except Exception:
+                regime_detail_all = {"regime": regime}
         except Exception:
-            regime_res, regime = None, "normal"
+            regime_res, regime, regime_detail_all = None, "normal", {"regime": "normal"}
         try:
             trend_p = _trend_persistence_signal(ohlcv, _ext=ext_features)
             if trend_p is not None and not 0.0 <= float(trend_p) <= 1.0:
@@ -1017,9 +1296,15 @@ class ForecastService:
         try:
             logreg_all = LogisticDirectionModel(
                 horizons=list(FORECAST_HORIZONS)
-            ).fit(features, closes)
+            ).fit(ext_features, closes)
         except (ValueError, ImportError):
             logreg_all = None
+        try:
+            gb_all = GradientBoostDirectionModel(
+                horizons=list(FORECAST_HORIZONS)
+            ).fit(ext_features, closes)
+        except (ValueError, ImportError):
+            gb_all = None
         try:
             drift_model = HistoricalDriftBaseline().fit(lret)
         except ValueError:
@@ -1028,10 +1313,22 @@ class ForecastService:
             momentum_model = MomentumBaseline().fit(closes)
         except ValueError:
             momentum_model = None
+        # Venue drift fits are horizon-independent (same trailing log-returns):
+        # fit once, predict per horizon. Identical values to per-horizon fits;
+        # a bad lret raises here exactly as the first loop iteration would.
+        sse_model_all = SseDriftBaseline().fit(lret) if sse else None
+        eux_model_all = EuxDriftBaseline().fit(lret) if eux else None
+        try:
+            _last_close_all = float(ohlcv["close"].iloc[-1])
+            if not math.isfinite(_last_close_all) or _last_close_all <= 0:
+                _last_close_all = None
+        except Exception:
+            _last_close_all = None
         out: dict[int, dict] = {}
         for horizon in FORECAST_HORIZONS:
             horizon = int(horizon)
             probas: dict[str, float] = {}
+            formulas_loop: dict[str, str] = {}
             if drift_model is not None:
                 try:
                     probas["historical-drift"] = float(
@@ -1054,7 +1351,17 @@ class ForecastService:
                 try:
                     probas["logistic-direction"] = float(
                         logreg_all.predict_direction_proba(
-                            features.iloc[[-1]], as_of=stamp,
+                            ext_features.iloc[[-1]], as_of=stamp,
+                            data_version=data_version,
+                        )[horizon].value
+                    )
+                except (ValueError, IndexError, KeyError):
+                    pass
+            if gb_all is not None:
+                try:
+                    probas["gradient-boost-direction"] = float(
+                        gb_all.predict_direction_proba(
+                            ext_features.iloc[[-1]], as_of=stamp,
                             data_version=data_version,
                         )[horizon].value
                     )
@@ -1062,13 +1369,23 @@ class ForecastService:
                     pass
             if trend_p is not None:
                 probas["trend-persistence"] = float(trend_p)
-            if probas:
-                us_direction = float(sum(probas.values()) / len(probas))
-            else:
-                us_direction = 0.5
+            for _m in list(probas):
+                if _m in MEMBER_FORMULAS:
+                    formulas_loop[_m] = MEMBER_FORMULAS[_m]
+            us_raw_loop, us_w_loop, us_spread_loop, us_std_loop = _weighted_mean(probas)
+            us_direction_raw_loop = float(us_raw_loop)
+            us_direction_loop = float(_calibrate_prob(us_raw_loop))
             band_obj = bands_all.get(horizon) if isinstance(bands_all, dict) else None
             try:
                 band = band_obj.value if band_obj is not None else None
+                try:
+                    _ne = float(band.get("n_effective", float(band.get("n_windows", 0)) / max(horizon, 1)))
+                except Exception:
+                    _ne = None
+                try:
+                    _w = float(band["high"]) - float(band["low"])
+                except Exception:
+                    _w = None
                 us_range = {
                     "low": float(band["low"]),
                     "mid": float(band["median"]),
@@ -1076,6 +1393,9 @@ class ForecastService:
                     "lower_q": float(band["lower_q"]),
                     "upper_q": float(band["upper_q"]),
                     "n_windows": int(band["n_windows"]),
+                    "n_effective": _ne,
+                    "width": _w,
+                    "coverage": f"80% empirical (q{float(band['lower_q']):.2g}/q{float(band['upper_q']):.2g})",
                 }
             except Exception:
                 # Fallback: single-horizon band (mirrors forecast()).
@@ -1083,6 +1403,10 @@ class ForecastService:
                     closes, horizons=[horizon], as_of=stamp,
                     data_version=data_version,
                 )[horizon].value
+                try:
+                    _ne2 = float(single.get("n_effective", float(single.get("n_windows", 0)) / max(horizon, 1)))
+                except Exception:
+                    _ne2 = None
                 us_range = {
                     "low": float(single["low"]),
                     "mid": float(single["median"]),
@@ -1090,6 +1414,9 @@ class ForecastService:
                     "lower_q": float(single["lower_q"]),
                     "upper_q": float(single["upper_q"]),
                     "n_windows": int(single["n_windows"]),
+                    "n_effective": _ne2,
+                    "width": float(single["high"]) - float(single["low"]),
+                    "coverage": "80% empirical",
                 }
             try:
                 dd_prob = float(
@@ -1099,25 +1426,39 @@ class ForecastService:
                 )
             except Exception:
                 dd_prob = float("nan")
+            try:
+                dd_detail_loop = dict(
+                    drawdown_probability(
+                        closes, horizon, as_of=stamp, data_version=data_version
+                    ).value
+                )
+            except Exception:
+                dd_detail_loop = {}
             if sse:
-                sse_model = SseDriftBaseline().fit(lret)
                 sse_p = float(
-                    sse_model.direction_probability(
+                    sse_model_all.direction_probability(
                         horizon, as_of=stamp, data_version=data_version
                     ).value
                 )
                 probas["sse-drift"] = sse_p
-                direction = float((us_direction + sse_p) / 2.0)
-                sse_band = sse_model.expected_return_range(
+                formulas_loop["sse-drift"] = "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized SSE drift"
+                direction_raw_loop = float((us_direction_raw_loop + sse_p) / 2.0)
+                direction = float(_calibrate_prob(direction_raw_loop))
+                sse_band = sse_model_all.expected_return_range(
                     horizon, as_of=stamp, data_version=data_version
                 ).value
+                _er_low = float(min(us_range["low"], sse_band["low"]))
+                _er_high = float(max(us_range["high"], sse_band["high"]))
                 expected_range = {
-                    "low": float(min(us_range["low"], sse_band["low"])),
+                    "low": _er_low,
                     "mid": float((us_range["mid"] + float(sse_band["mid"])) / 2.0),
-                    "high": float(max(us_range["high"], sse_band["high"])),
+                    "high": _er_high,
                     "lower_q": float(us_range["lower_q"]),
                     "upper_q": float(us_range["upper_q"]),
                     "n_windows": int(us_range["n_windows"]),
+                    "n_effective": us_range.get("n_effective"),
+                    "width": float(_er_high - _er_low),
+                    "coverage": str(us_range.get("coverage") or "80% empirical"),
                 }
                 # Limit proximity is horizon-independent (same trailing bars):
                 # hoisted above the loop (identical values, one build).
@@ -1130,25 +1471,39 @@ class ForecastService:
                 )
                 confidence = _penalize_confidence(base_conf) if proximity_fired else base_conf
                 model_version, feature_version = SSE_BLEND_VERSION, SSE_FEATURE_VERSION
+                weights_loop = {**{k: v * 0.5 for k, v in us_w_loop.items()}, "sse-drift": 0.5}
+                try:
+                    std_loop = float(pd.Series(list(probas.values())).std(ddof=1))
+                    if not math.isfinite(std_loop):
+                        std_loop = 0.0
+                except Exception:
+                    std_loop = 0.0
+                spread_loop = float(max(probas.values()) - min(probas.values())) if probas else 0.0
             elif eux:
-                eux_model = EuxDriftBaseline().fit(lret)
                 eux_p = float(
-                    eux_model.direction_probability(
+                    eux_model_all.direction_probability(
                         horizon, as_of=stamp, data_version=data_version
                     ).value
                 )
                 probas["eux-drift"] = eux_p
-                direction = float((us_direction + eux_p) / 2.0)
-                eux_band = eux_model.expected_return_range(
+                formulas_loop["eux-drift"] = "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized Euronext drift"
+                direction_raw_loop = float((us_direction_raw_loop + eux_p) / 2.0)
+                direction = float(_calibrate_prob(direction_raw_loop))
+                eux_band = eux_model_all.expected_return_range(
                     horizon, as_of=stamp, data_version=data_version
                 ).value
+                _er_low = float(min(us_range["low"], eux_band["low"]))
+                _er_high = float(max(us_range["high"], eux_band["high"]))
                 expected_range = {
-                    "low": float(min(us_range["low"], eux_band["low"])),
+                    "low": _er_low,
                     "mid": float((us_range["mid"] + float(eux_band["mid"])) / 2.0),
-                    "high": float(max(us_range["high"], eux_band["high"])),
+                    "high": _er_high,
                     "lower_q": float(us_range["lower_q"]),
                     "upper_q": float(us_range["upper_q"]),
                     "n_windows": int(us_range["n_windows"]),
+                    "n_effective": us_range.get("n_effective"),
+                    "width": float(_er_high - _er_low),
+                    "coverage": str(us_range.get("coverage") or "80% empirical"),
                 }
                 confidence = _confidence(
                     float(max(probas.values()) - min(probas.values())) if probas else 0.0,
@@ -1157,16 +1512,42 @@ class ForecastService:
                     direction_prob=direction,
                 )
                 model_version, feature_version = EUX_BLEND_VERSION, EUX_FEATURE_VERSION
+                weights_loop = {**{k: v * 0.5 for k, v in us_w_loop.items()}, "eux-drift": 0.5}
+                try:
+                    std_loop = float(pd.Series(list(probas.values())).std(ddof=1))
+                    if not math.isfinite(std_loop):
+                        std_loop = 0.0
+                except Exception:
+                    std_loop = 0.0
+                spread_loop = float(max(probas.values()) - min(probas.values())) if probas else 0.0
             else:
-                direction = us_direction
+                direction_raw_loop = float(us_direction_raw_loop)
+                direction = float(us_direction_loop)
                 expected_range = us_range
                 confidence = _confidence(
-                    float(max(probas.values()) - min(probas.values())) if probas else 0.0,
+                    float(us_spread_loop),
                     len(probas), str(provenance.get("quality_grade") or "U"),
                     regime, dd_prob,
                     direction_prob=direction,
                 )
-                model_version, feature_version = ENSEMBLE_VERSION, FEATURE_VERSION
+                model_version, feature_version = ENSEMBLE_VERSION, EXTENDED_FEATURE_VERSION
+                weights_loop = dict(us_w_loop)
+                std_loop = float(us_std_loop)
+                spread_loop = float(us_spread_loop)
+            confidence_reasons_loop: list[str] = []
+            try:
+                if str(regime).lower() in VOLATILITY_PENALTY_REGIMES:
+                    confidence_reasons_loop.append(f"volatility regime {regime} penalty (-1 notch)")
+            except Exception:
+                pass
+            try:
+                if isinstance(dd_prob, (int, float)) and not isinstance(dd_prob, bool):
+                    if math.isfinite(float(dd_prob)) and float(dd_prob) >= DRAWDOWN_PENALTY_THRESHOLD:
+                        confidence_reasons_loop.append(
+                            f"drawdown {float(dd_prob):.0%} >= {DRAWDOWN_PENALTY_THRESHOLD:.0%} penalty"
+                        )
+            except Exception:
+                pass
             try:
                 confidence = _cap_stub_confidence(confidence, provenance)
             except Exception:
@@ -1175,22 +1556,50 @@ class ForecastService:
             if thin_note:
                 try:
                     confidence = _penalize_confidence(confidence)
+                    confidence_reasons_loop.append(f"thin liquidity: {thin_note}")
                 except Exception:
                     pass
             # Staleness + fallback + crash honesty (mirrors forecast()):
             # stub/fallback bars, >7d-old data, or a crash/jump signature cap
             # confidence at low (hoisted: provenance/stamp are loop-fixed).
             if _fallback_all or _stale_all or _crash:
+                if confidence != "low":
+                    confidence_reasons_loop.append("fallback/stale/corporate-action cap (confidence=low)")
                 confidence = "low"
+            try:
+                if spread_loop > CONFIDENCE_MODERATE_MAX_SPREAD:
+                    confidence_reasons_loop.append(
+                        f"member disagreement high (spread {spread_loop:.2f})"
+                    )
+            except Exception:
+                pass
+            try:
+                confidence_score_loop = _confidence_score(spread_loop, len(confidence_reasons_loop))
+            except Exception:
+                confidence_score_loop = 0.0
             clean_direction = _finite_or_none(direction)
             if clean_direction is None:
                 raise ValueError("non-finite direction probability")
             direction = clean_direction
+            try:
+                direction_raw_loop = float(direction_raw_loop)
+                if not math.isfinite(direction_raw_loop):
+                    direction_raw_loop = float(direction)
+            except Exception:
+                direction_raw_loop = float(direction)
             dd_prob = _finite_or_none(dd_prob)
             for bound in ("low", "mid", "high"):
                 expected_range[bound] = _finite_or_none(expected_range.get(bound))
+            try:
+                expected_range["width"] = _finite_or_none(expected_range.get("width"))
+            except Exception:
+                pass
             for name, value in list(probas.items()):
                 probas[name] = _finite_or_none(value)
+            try:
+                weights_loop = {k: float(v) for k, v in weights_loop.items()}
+            except Exception:
+                weights_loop = {}
             model_members = [
                 MEMBER_VERSIONS[name]
                 for name in sorted(probas)
@@ -1198,6 +1607,21 @@ class ForecastService:
             ]
             instrument_id = bars.get("instrument_id") or f"stub-{sym_upper}"
             target_date = _cached_target_date(stamp, horizon, mic)
+            try:
+                if _last_close_all is not None:
+                    target_price_loop = {
+                        "last_close": float(_last_close_all),
+                        "low": float(_last_close_all * (1.0 + float(expected_range["low"])))
+                        if expected_range["low"] is not None else None,
+                        "mid": float(_last_close_all * (1.0 + float(expected_range.get("mid", 0) or 0)))
+                        if expected_range.get("mid") is not None else None,
+                        "high": float(_last_close_all * (1.0 + float(expected_range["high"])))
+                        if expected_range["high"] is not None else None,
+                    }
+                else:
+                    target_price_loop = None
+            except Exception:
+                target_price_loop = None
             record = {
                 "forecast_id": _deterministic_id(symbol, horizon, stamp, data_version),
                 "instrument_id": instrument_id,
@@ -1225,14 +1649,24 @@ class ForecastService:
                 "symbol": sym_upper,
                 "horizon_days": horizon,
                 "direction_probability": direction,
+                "direction_probability_raw": float(direction_raw_loop),
                 "expected_return_range": expected_range,
                 "volatility_regime": regime,
+                "volatility_detail": dict(regime_detail_all),
                 "drawdown_probability": dd_prob,
+                "drawdown_detail": dict(dd_detail_loop),
                 "confidence": confidence,
+                "confidence_score": float(confidence_score_loop),
+                "confidence_reasons": list(confidence_reasons_loop),
+                "ensemble_weights": dict(weights_loop),
+                "ensemble_spread": float(spread_loop),
+                "ensemble_std": float(std_loop),
+                "n_members": int(len([v for v in probas.values() if v is not None])),
+                "target_price": target_price_loop,
                 "model_version": model_version,
                 "model_members": model_members,
                 "components": dict(probas),
-                "formulas": {},
+                "formulas": dict(formulas_loop),
                 "feature_version": feature_version,
                 "data_version": data_version,
                 "as_of": stamp,
@@ -1274,8 +1708,18 @@ def reset_forecast_service() -> None:  # test hook
 __all__ = [
     "DISCLOSURE",
     "TREND_PERSISTENCE_VERSION",
+    "ENSEMBLE_WEIGHTS",
+    "CALIBRATION_SHRINKAGE",
+    "PROB_FLOOR",
+    "PROB_CAP",
+    "MEMBER_VERSIONS",
+    "MEMBER_FORMULAS",
     "ForecastService",
     "clear_forecast_cache",
     "get_forecast_service",
     "reset_forecast_service",
+    "_weighted_mean",
+    "_calibrate_prob",
+    "_confidence_score",
+    "_trend_persistence_signal",
 ]

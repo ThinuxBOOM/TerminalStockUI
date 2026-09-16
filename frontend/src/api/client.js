@@ -365,6 +365,21 @@ const ForecastSchema = z.object({
   direction: z.string().optional().default(""),
   regime: z.string().nullable().optional().default(null),
   drawdown: z.number().nullable().optional().default(null),
+  // ensemble-v2 additions (all optional for backward compat with v1 payloads)
+  direction_probability_raw: z.number().min(0).max(1).nullable().optional().default(null),
+  ensemble_weights: z.record(z.number()).optional(),
+  ensemble_spread: z.number().nullable().optional().default(null),
+  ensemble_std: z.number().nullable().optional().default(null),
+  n_members: z.number().nullable().optional().default(null),
+  confidence_score: z.number().nullable().optional().default(null),
+  confidence_reasons: z.array(z.string()).optional().default([]),
+  target_price: z.object({
+    last_close: z.number(), low: z.number().nullable(), mid: z.number().nullable(), high: z.number().nullable(),
+  }).passthrough().nullable().optional().default(null),
+  volatility_detail: z.record(z.unknown()).optional(),
+  drawdown_detail: z.record(z.unknown()).optional(),
+  components: z.record(z.number().nullable()).optional(),
+  formulas: z.record(z.string()).optional(),
   inputs: z.record(z.unknown()).optional(),
   versions: z.record(z.unknown()).optional(),
   calibration: z.array(ReliabilityRowSchema).optional().default([]),
@@ -405,7 +420,7 @@ function normalizeForecast(raw, symbol, horizon) {
   const blendedRaw = clamp01OrNull(r.blended_probability ?? r.blendedProbability ?? null);
   const blended = blendedRaw ?? blendProbs(quant, aiProb, aiWeight);
   const regimeRaw = r.regime ?? r.vol_regime ?? r.volatility_regime ?? null;
-  const drawdownRaw = r.drawdown ?? r.max_drawdown ?? r.expected_drawdown ?? null;
+  const drawdownRaw = r.drawdown ?? r.drawdown_probability ?? r.max_drawdown ?? r.expected_drawdown ?? null;
   const candidate = {
     symbol: r.symbol ?? r.ticker ?? symbol,
     horizon_days: num(r.horizon_days ?? r.horizon ?? horizon, horizon),
@@ -435,6 +450,19 @@ function normalizeForecast(raw, symbol, horizon) {
       high: Number(intervalsRaw.high)
     } : null,
     limitations: strArray(r.limitations),
+    // ensemble-v2 diagnostics (passthrough; null when backend is v1)
+    direction_probability_raw: clamp01OrNull(r.direction_probability_raw ?? r.direction_raw ?? null),
+    ensemble_weights: r.ensemble_weights && typeof r.ensemble_weights === "object" ? r.ensemble_weights : void 0,
+    ensemble_spread: numOrNullStrict(r.ensemble_spread ?? r.spread ?? null),
+    ensemble_std: numOrNullStrict(r.ensemble_std ?? null),
+    n_members: r.n_members ?? r.n_models ?? null,
+    confidence_score: numOrNullStrict(r.confidence_score ?? null),
+    confidence_reasons: strArray(r.confidence_reasons ?? r.confidenceReasons ?? []),
+    target_price: r.target_price ?? r.targetPrice ?? null,
+    volatility_detail: r.volatility_detail ?? r.volatilityDetail ?? void 0,
+    drawdown_detail: r.drawdown_detail ?? r.drawdownDetail ?? void 0,
+    components: r.components ?? void 0,
+    formulas: r.formulas ?? void 0,
     // Disclosure rendered verbatim by the UI — never rewritten client-side.
     disclosure: r.disclosure,
     provenance: normalizeProvenance(r, "forecast-api")

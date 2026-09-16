@@ -121,9 +121,9 @@ def test_high_volatility_regime_penalizes_confidence():
     """quantile_bands emits high (not elevated): it must still cost a notch."""
     from backend.forecasting.service import _confidence
 
-    assert _confidence(0.0, 3, "B", regime="high") == "moderate"
-    assert _confidence(0.0, 3, "B", regime="normal") == "high"
-    assert _confidence(0.0, 3, "B") == "high"  # no regime -> no-op
+    assert _confidence(0.0, 5, "B", regime="high") == "moderate"
+    assert _confidence(0.0, 5, "B", regime="normal") == "high"
+    assert _confidence(0.0, 5, "B") == "high"  # no regime -> no-op
 
 
 def test_member_accuracy_never_reaches_wire():

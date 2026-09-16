@@ -31,7 +31,13 @@ PROVENANCE_KEYS = {
 }
 
 RELIABILITY_KEYS = {"bin_low", "bin_high", "count", "mean_predicted", "fraction_positive"}
-US_MEMBERS = {"historical-drift", "momentum", "logistic-direction"}
+US_MEMBERS = {
+    "historical-drift",
+    "momentum",
+    "logistic-direction",
+    "gradient-boost-direction",
+    "trend-persistence",
+}
 
 
 class FakeMarket:
@@ -110,8 +116,8 @@ def test_snapshot_math_on_fixture_bars():
     assert first["symbol"] == "AAPL"
     assert first["exchange_mic"] == "XNAS"
     assert first["horizon_days"] == 21
-    assert first["model_version"] == "ensemble-v1"
-    assert first["feature_version"]
+    assert first["model_version"] == "ensemble-v2"
+    assert first["feature_version"] == "features-v2"
     assert first["data_version"]
     assert first["n_windows"] > 0
     assert 0.0 <= first["brier"] <= 1.0
@@ -191,7 +197,7 @@ def test_upsert_idempotency_on_sqlite(isolated_db):
         assert got is not None
         assert got.n_windows == snap["n_windows"]
         assert list(got.reliability) == snap["reliability"]
-        assert get_latest_snapshot(db, "NOPE", 21, "ensemble-v1") is None
+        assert get_latest_snapshot(db, "NOPE", 21, "ensemble-v2") is None
     finally:
         db.close()
         _teardown()

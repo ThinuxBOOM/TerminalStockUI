@@ -160,11 +160,26 @@ function ForecastDetails({ symbol }) {
             {formatPct1(f.probability)} <ProvenanceBadge p={f.provenance} />
           </p>
           <dl className="mt-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
-            <div>Confidence: <b>{f.confidence}</b> <ProvenanceBadge p={f.provenance} /></div>
+            <div>Confidence: <b>{f.confidence}</b>{typeof f.confidence_score === "number" && Number.isFinite(f.confidence_score) ? <span className="text-term-muted"> ({f.confidence_score.toFixed(2)})</span> : null} <ProvenanceBadge p={f.provenance} /></div>
             <div>Data quality: <b className="text-term-cyan">{f.quality_grade}</b> <ProvenanceBadge p={f.provenance} /></div>
             <div>Provider: <b>{f.provider}</b></div>
             <div>Horizon: <b>{f.horizon_days}d</b></div>
+            {typeof f.direction_probability_raw === "number" && Number.isFinite(f.direction_probability_raw) ? (
+              <div>Raw prob: <b>{formatPct1(f.direction_probability_raw)}</b> <span className="text-term-muted">(calibrated {formatPct1(f.probability)})</span></div>
+            ) : null}
+            {typeof f.ensemble_spread === "number" && Number.isFinite(f.ensemble_spread) ? (
+              <div>Spread: <b>{f.ensemble_spread.toFixed(2)}</b>{typeof f.n_members === "number" ? <span className="text-term-muted"> · {f.n_members} members</span> : null}</div>
+            ) : null}
+            {f.target_price && typeof f.target_price.last_close === "number" ? (
+              <div>Target: <b>{f.target_price.low?.toFixed?.(2)} / {f.target_price.mid?.toFixed?.(2)} / {f.target_price.high?.toFixed?.(2)}</b> <span className="text-term-muted">(last {f.target_price.last_close.toFixed(2)})</span></div>
+            ) : null}
+            {f.ensemble_weights && typeof f.ensemble_weights === "object" ? (
+              <div className="col-span-2 md:col-span-4">Weights: <span className="text-term-muted">{Object.entries(f.ensemble_weights).map(([k, v]) => `${k}=${Number(v).toFixed(2)}`).join(" · ")}</span></div>
+            ) : null}
           </dl>
+          {(f.confidence_reasons ?? []).length > 0 ? (
+            <p className="mt-1 text-[11px] text-term-muted">Confidence penalties: {(f.confidence_reasons ?? []).join("; ")}</p>
+          ) : null}
           <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
             <div className="rounded border border-term-border p-2">
               <p className="font-bold text-term-green">Why (bullish drivers)</p>

@@ -143,7 +143,7 @@ def test_gradient_boost_stub_probabilities_valid_and_deterministic():
         p2 = second.predict_direction_proba(latest)[horizon]
         assert p1.value == pytest.approx(p2.value)
         assert 0.0 <= p1.value <= 1.0
-        assert "stub" in p1.model_version
+        assert p1.model_version == "gradient-boost-direction-v1"
 
 
 def test_classifiers_need_two_classes_and_enough_data():
@@ -255,22 +255,27 @@ def test_walk_forward_models_fit_only_on_past():
 # --- Phase 2c: regime-aware confidence -------------------------------------
 
 def test_confidence_band_edges_spread_size_quality():
-    """Base spread/size/quality matrix (no regime/dd penalties)."""
+    """Base spread/size/quality matrix (no regime/dd penalties).
+
+    ensemble-v2: 5 members, high requires >= 4 (one ML miss tolerated).
+    """
     from backend.forecasting.service import _confidence
 
-    assert _confidence(0.05, 3, "B") == "high"  # full agreement, 3 members
-    assert _confidence(0.08, 3, "B") == "high"  # edge inclusive
-    assert _confidence(0.10, 3, "B") == "moderate"
-    assert _confidence(0.15, 3, "B") == "moderate"  # edge inclusive
-    assert _confidence(0.16, 3, "B") == "low"
-    assert _confidence(0.20, 3, "B") == "low"
+    assert _confidence(0.05, 5, "B") == "high"  # full agreement, 5 members
+    assert _confidence(0.05, 4, "B") == "high"  # 4 members still high
+    assert _confidence(0.08, 5, "B") == "high"  # edge inclusive
+    assert _confidence(0.05, 3, "B") == "moderate"  # 3 members caps at moderate (v2)
+    assert _confidence(0.10, 5, "B") == "moderate"
+    assert _confidence(0.15, 5, "B") == "moderate"  # edge inclusive
+    assert _confidence(0.16, 5, "B") == "low"
+    assert _confidence(0.20, 5, "B") == "low"
     assert _confidence(0.05, 2, "B") == "moderate"  # thin ensemble caps high
     assert _confidence(0.05, 1, "B") == "low"
     assert _confidence(0.05, 0, "B") == "low"
-    assert _confidence(0.05, 3, "D") == "low"  # poor quality caps at low
-    assert _confidence(0.05, 3, "F") == "low"
-    assert _confidence(0.05, 3, "f") == "low"  # case-insensitive grade
-    assert _confidence(0.10, 3, "A") == "moderate"  # good grade untouched
+    assert _confidence(0.05, 5, "D") == "low"  # poor quality caps at low
+    assert _confidence(0.05, 5, "F") == "low"
+    assert _confidence(0.05, 5, "f") == "low"  # case-insensitive grade
+    assert _confidence(0.10, 5, "A") == "moderate"  # good grade untouched
 
 
 def test_confidence_regime_penalty():
@@ -278,34 +283,34 @@ def test_confidence_regime_penalty():
     from backend.forecasting.service import _confidence
 
     # high-spread-agreement + elevated -> moderate (spec example).
-    assert _confidence(0.05, 3, "B", regime="elevated") == "moderate"
+    assert _confidence(0.05, 5, "B", regime="elevated") == "moderate"
     # high + extreme -> moderate (extreme caps at most moderate from high).
-    assert _confidence(0.05, 3, "B", regime="extreme") == "moderate"
+    assert _confidence(0.05, 5, "B", regime="extreme") == "moderate"
     # moderate + extreme -> low.
-    assert _confidence(0.10, 3, "B", regime="extreme") == "low"
-    assert _confidence(0.10, 3, "B", regime="elevated") == "low"
+    assert _confidence(0.10, 5, "B", regime="extreme") == "low"
+    assert _confidence(0.10, 5, "B", regime="elevated") == "low"
     # low stays low (floor).
-    assert _confidence(0.20, 3, "B", regime="extreme") == "low"
-    assert _confidence(0.20, 3, "B", regime="elevated") == "low"
+    assert _confidence(0.20, 5, "B", regime="extreme") == "low"
+    assert _confidence(0.20, 5, "B", regime="elevated") == "low"
     # No-ops: None / low / normal leave the base level untouched.
-    assert _confidence(0.05, 3, "B", regime=None) == "high"
-    assert _confidence(0.05, 3, "B", regime="low") == "high"
-    assert _confidence(0.05, 3, "B", regime="normal") == "high"
-    assert _confidence(0.10, 3, "B", regime="normal") == "moderate"
+    assert _confidence(0.05, 5, "B", regime=None) == "high"
+    assert _confidence(0.05, 5, "B", regime="low") == "high"
+    assert _confidence(0.05, 5, "B", regime="normal") == "high"
+    assert _confidence(0.10, 5, "B", regime="normal") == "moderate"
 
 
 def test_confidence_drawdown_penalty():
     """drawdown_probability >= 0.25 penalizes one notch."""
     from backend.forecasting.service import _confidence
 
-    assert _confidence(0.05, 3, "B", drawdown_prob=0.30) == "moderate"
-    assert _confidence(0.05, 3, "B", drawdown_prob=0.25) == "moderate"  # edge
-    assert _confidence(0.10, 3, "B", drawdown_prob=0.25) == "low"
-    assert _confidence(0.20, 3, "B", drawdown_prob=0.90) == "low"  # floor
+    assert _confidence(0.05, 5, "B", drawdown_prob=0.30) == "moderate"
+    assert _confidence(0.05, 5, "B", drawdown_prob=0.25) == "moderate"  # edge
+    assert _confidence(0.10, 5, "B", drawdown_prob=0.25) == "low"
+    assert _confidence(0.20, 5, "B", drawdown_prob=0.90) == "low"  # floor
     # Below threshold / missing are no-ops.
-    assert _confidence(0.05, 3, "B", drawdown_prob=0.24) == "high"
-    assert _confidence(0.05, 3, "B", drawdown_prob=0.10) == "high"
-    assert _confidence(0.05, 3, "B", drawdown_prob=None) == "high"
+    assert _confidence(0.05, 5, "B", drawdown_prob=0.24) == "high"
+    assert _confidence(0.05, 5, "B", drawdown_prob=0.10) == "high"
+    assert _confidence(0.05, 5, "B", drawdown_prob=None) == "high"
 
 
 def test_confidence_stacked_penalties_and_floor():
@@ -314,34 +319,34 @@ def test_confidence_stacked_penalties_and_floor():
 
     # high -> moderate (regime) -> low (drawdown).
     assert (
-        _confidence(0.05, 3, "B", regime="extreme", drawdown_prob=0.30)
+        _confidence(0.05, 5, "B", regime="extreme", drawdown_prob=0.30)
         == "low"
     )
     assert (
-        _confidence(0.05, 3, "B", regime="elevated", drawdown_prob=0.25)
+        _confidence(0.05, 5, "B", regime="elevated", drawdown_prob=0.25)
         == "low"
     )
     # moderate + both penalties still floors at low.
     assert (
-        _confidence(0.10, 3, "B", regime="extreme", drawdown_prob=0.50)
+        _confidence(0.10, 5, "B", regime="extreme", drawdown_prob=0.50)
         == "low"
     )
     # low + everything stays low.
     assert (
-        _confidence(0.50, 3, "B", regime="extreme", drawdown_prob=0.99)
+        _confidence(0.50, 5, "B", regime="extreme", drawdown_prob=0.99)
         == "low"
     )
     # Penalties apply AFTER quality caps: D-grade base is low, stays low.
     assert (
-        _confidence(0.05, 3, "D", regime="extreme", drawdown_prob=0.30)
+        _confidence(0.05, 5, "D", regime="extreme", drawdown_prob=0.30)
         == "low"
     )
     # Single-penalty equivalence with _penalize_confidence.
-    assert _confidence(0.05, 3, "B", regime="extreme") == _penalize_confidence(
-        _confidence(0.05, 3, "B")
+    assert _confidence(0.05, 5, "B", regime="extreme") == _penalize_confidence(
+        _confidence(0.05, 5, "B")
     )
-    assert _confidence(0.10, 3, "B", drawdown_prob=0.30) == _penalize_confidence(
-        _confidence(0.10, 3, "B")
+    assert _confidence(0.10, 5, "B", drawdown_prob=0.30) == _penalize_confidence(
+        _confidence(0.10, 5, "B")
     )
 
 
@@ -349,7 +354,7 @@ def test_confidence_backward_compatible_and_deterministic():
     """Old 3-arg calls still work; penalties are deterministic."""
     from backend.forecasting.service import _confidence
 
-    assert _confidence(0.05, 3, "B") == "high"  # legacy signature no-op
-    first = _confidence(0.05, 3, "B", regime="extreme", drawdown_prob=0.30)
-    second = _confidence(0.05, 3, "B", regime="extreme", drawdown_prob=0.30)
+    assert _confidence(0.05, 5, "B") == "high"  # legacy signature no-op
+    first = _confidence(0.05, 5, "B", regime="extreme", drawdown_prob=0.30)
+    second = _confidence(0.05, 5, "B", regime="extreme", drawdown_prob=0.30)
     assert first == second == "low"

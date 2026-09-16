@@ -197,9 +197,11 @@ def test_eux_routing_helpers():
 
 
 def test_eux_routing_versions_and_direction_blend():
+    from backend.forecasting.service import _calibrate_prob, _weighted_mean
+
     svc = ForecastService(market_service=_FakeMarket(make_eux_bars()))
     res = svc.forecast("MC.PA", 21, as_of=FIXED_AS_OF)
-    assert res["model_version"] == EUX_BLEND_VERSION == "ensemble-v1+eux-drift-v1"
+    assert res["model_version"] == EUX_BLEND_VERSION == "ensemble-v2+eux-drift-v1"
     assert res["feature_version"] == EUX_FEATURE_VERSION == "eux-features-v1"
     assert "eux" in res["data_version"]
     assert "sse" not in res["data_version"]
@@ -209,11 +211,15 @@ def test_eux_routing_versions_and_direction_blend():
     assert set(res["components"]) >= {"historical-drift", "momentum", "eux-drift"}
     assert "sse-drift" not in res["components"]
     assert EUX_DRIFT_VERSION in res["model_members"]
-    # 50/50 blend: direction == mean(US members, eux-drift) via midpoint.
-    us_keys = [k for k in res["components"] if k != "eux-drift"]
-    us_mean = sum(res["components"][k] for k in us_keys) / len(us_keys)
+    # ensemble-v2: weighted US mean (raw) blended 50/50 with eux-drift on RAW,
+    # then shrinkage-calibrated.
+    us_window = {k: v for k, v in res["components"].items() if k != "eux-drift"}
+    us_raw = _weighted_mean(us_window)[0]
     assert res["direction_probability"] == pytest.approx(
-        (us_mean + res["components"]["eux-drift"]) / 2.0
+        _calibrate_prob((us_raw + res["components"]["eux-drift"]) / 2.0)
+    )
+    assert res["direction_probability_raw"] == pytest.approx(
+        (us_raw + res["components"]["eux-drift"]) / 2.0
     )
     rng = res["expected_return_range"]
     assert rng["low"] <= rng["mid"] <= rng["high"]
@@ -266,7 +272,10 @@ def test_eux_horizons_only_and_deterministic():
     first = svc.forecast("MC.PA", 21, as_of=FIXED_AS_OF)
     second = svc.forecast("MC.PA", 21, as_of=FIXED_AS_OF)
     assert first["direction_probability"] == pytest.approx(second["direction_probability"])
-    assert first["expected_return_range"] == pytest.approx(second["expected_return_range"])
+    for _k in ("low", "mid", "high", "lower_q", "upper_q"):
+        assert first["expected_return_range"][_k] == pytest.approx(
+            second["expected_return_range"][_k]
+        )
     assert first["model_version"] == second["model_version"]
     with pytest.raises(ValueError):
         svc.forecast("MC.PA", 7, as_of=FIXED_AS_OF)
@@ -277,8 +286,8 @@ def test_us_and_sse_paths_unaffected():
     us = ForecastService(
         market_service=_FakeMarket(make_ohlcv(), instrument_id="XNAS-AAPL")
     ).forecast("AAPL", 21, as_of=FIXED_AS_OF)
-    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v1"
-    assert us["feature_version"] == FEATURE_VERSION
+    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v2"
+    assert us["feature_version"] == "features-v2"
     assert "sse" not in us["data_version"]
     assert "eux" not in us["data_version"]
     assert "sse-drift" not in us["components"]
@@ -287,7 +296,7 @@ def test_us_and_sse_paths_unaffected():
     sse = ForecastService(
         market_service=_FakeMarket(make_ohlcv(), instrument_id="XSHG-600519.SS")
     ).forecast("600519.SS", 21, as_of=FIXED_AS_OF)
-    assert sse["model_version"] == SSE_BLEND_VERSION == "ensemble-v1+sse-drift-v1"
+    assert sse["model_version"] == SSE_BLEND_VERSION == "ensemble-v2+sse-drift-v1"
     assert sse["feature_version"] == SSE_FEATURE_VERSION == "sse-features-v1"
     assert "sse" in sse["data_version"]
     assert "eux" not in sse["data_version"]
@@ -299,7 +308,8 @@ def test_us_and_sse_paths_unaffected():
 
 def test_registry_exposes_all_three_models():
     models = {(m["name"], m["version"]) for m in list_models()}
-    assert ("ensemble", "ensemble-v1") in models
+    assert ("ensemble", "ensemble-v2") in models
+    assert ("ensemble", "ensemble-v1") in models  # legacy retained
     assert ("sse-drift", "sse-drift-v1") in models
     assert ("eux-drift", "eux-drift-v1") in models
     by_key = {(m["name"], m["version"]): m for m in list_models()}

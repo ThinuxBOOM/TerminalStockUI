@@ -1,11 +1,15 @@
-"""Baseline 3: regularized logistic-regression direction model (Milestone 3).
+"""Baseline 3: regularized logistic-regression direction model (v3, ensemble-v2).
 
-One L2-regularized LogisticRegression per horizon (5/21/63d) on the v1
-feature frame. Fixed hyperparameters (C=1.0) and random_state=0 make fits
-bit-deterministic for identical inputs. Labels are forward direction
-indicators built point-in-time (row t uses only closes <= t+h for the
-label, features use only data <= t); training must still go through the
-walk-forward splitter + no-leakage guard.
+One L2-regularized LogisticRegression per horizon (5/21/63d) on the v2
+extended feature frame (v1 7 cols + v2 7 cols: mom_63/vol_63/trail_dd_63/
+range_ma_21/volume_z63/ret_skew_21/rsi_lag5). Fixed hyperparameters (C=1.0)
+and random_state=0 make fits bit-deterministic for identical inputs. Labels
+are forward direction indicators built point-in-time (row t uses only
+closes <= t+h for the label, features use only data <= t); training must
+still go through the walk-forward splitter + no-leakage guard.
+
+v2 -> v3 change: training frame only (v1 -> v2 extended); formula,
+standardization and hyperparameters unchanged.
 """
 
 from __future__ import annotations
@@ -31,17 +35,17 @@ def _require_sklearn() -> None:
 
 from ..common import FORECAST_HORIZONS, TARGET_DIRECTION, ForecastResult
 from ..features.features import (
+    EXTENDED_FEATURE_VERSION,
     FEATURE_COLUMNS,
-    FEATURE_VERSION,
     direction_label,
 )
 
 MODEL_NAME = "logistic-direction"
-MODEL_VERSION = "logistic-direction-v2"
+MODEL_VERSION = "logistic-direction-v3"
 FORMULA = (
     "P(up_h) = sigmoid(w_h . z + b_h) where z = (x - mean_h)/scale_h "
     "(train-only standardization); L2 LogisticRegression(C=1.0, "
-    "random_state=0) per horizon on v1 features"
+    "random_state=0) per horizon on v2 extended features"
 )
 MIN_SAMPLES = 20
 
@@ -135,7 +139,7 @@ class LogisticDirectionModel:
             proba = float(clf.predict_proba(row)[0, 1])
             out[horizon] = ForecastResult(
                 TARGET_DIRECTION, horizon, min(max(proba, 0.0), 1.0),
-                FORMULA, MODEL_NAME, MODEL_VERSION, FEATURE_VERSION,
+                FORMULA, MODEL_NAME, MODEL_VERSION, EXTENDED_FEATURE_VERSION,
                 data_version, as_of,
             )
         return out

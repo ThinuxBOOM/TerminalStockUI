@@ -178,9 +178,11 @@ def test_sse_drift_winsorizes_and_wider_bands():
 # --- routing / versions / blend --------------------------------------------
 
 def test_sse_routing_versions_and_direction_blend():
+    from backend.forecasting.service import _calibrate_prob, _weighted_mean
+
     svc = ForecastService(market_service=_FakeMarket(make_sse_limit_up()))
     res = svc.forecast("600519.SS", 21, as_of=FIXED_AS_OF)
-    assert res["model_version"] == SSE_BLEND_VERSION == "ensemble-v1+sse-drift-v1"
+    assert res["model_version"] == SSE_BLEND_VERSION == "ensemble-v2+sse-drift-v1"
     assert res["feature_version"] == SSE_FEATURE_VERSION == "sse-features-v1"
     assert "sse" in res["data_version"]
     assert res["record"]["model_version"] == SSE_BLEND_VERSION
@@ -188,10 +190,16 @@ def test_sse_routing_versions_and_direction_blend():
     assert "sse" in res["record"]["data_version"]
     assert set(res["components"]) >= {"historical-drift", "momentum", "sse-drift"}
     assert SSE_DRIFT_VERSION in res["model_members"]
-    # 50/50 blend: direction == mean(US members, sse-drift) via midpoint.
-    us_keys = [k for k in res["components"] if k != "sse-drift"]
-    us_mean = sum(res["components"][k] for k in us_keys) / len(us_keys)
-    assert res["direction_probability"] == pytest.approx((us_mean + res["components"]["sse-drift"]) / 2.0)
+    # ensemble-v2: weighted US mean (raw) blended 50/50 with sse-drift on RAW,
+    # then shrinkage-calibrated.
+    us_window = {k: v for k, v in res["components"].items() if k != "sse-drift"}
+    us_raw = _weighted_mean(us_window)[0]
+    assert res["direction_probability"] == pytest.approx(
+        _calibrate_prob((us_raw + res["components"]["sse-drift"]) / 2.0)
+    )
+    assert res["direction_probability_raw"] == pytest.approx(
+        (us_raw + res["components"]["sse-drift"]) / 2.0
+    )
     rng = res["expected_return_range"]
     assert rng["low"] <= rng["mid"] <= rng["high"]
     # Union envelope covers the US-only empirical band.
@@ -214,8 +222,8 @@ def test_sse_routing_via_mic_without_suffix_and_us_preserved():
     us = ForecastService(
         market_service=_FakeMarket(make_ohlcv(), instrument_id="XNAS-AAPL")
     ).forecast("AAPL", 21, as_of=FIXED_AS_OF)
-    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v1"
-    assert us["feature_version"] == FEATURE_VERSION
+    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v2"
+    assert us["feature_version"] == "features-v2"
     assert "sse" not in us["data_version"]
     assert "sse-drift" not in us["components"]
 
@@ -255,7 +263,10 @@ def test_sse_horizons_only_and_deterministic():
     first = svc.forecast("600519.SS", 21, as_of=FIXED_AS_OF)
     second = svc.forecast("600519.SS", 21, as_of=FIXED_AS_OF)
     assert first["direction_probability"] == pytest.approx(second["direction_probability"])
-    assert first["expected_return_range"] == pytest.approx(second["expected_return_range"])
+    for _k in ("low", "mid", "high", "lower_q", "upper_q"):
+        assert first["expected_return_range"][_k] == pytest.approx(
+            second["expected_return_range"][_k]
+        )
     assert first["model_version"] == second["model_version"]
     with pytest.raises(ValueError):
         svc.forecast("600519.SS", 7, as_of=FIXED_AS_OF)
@@ -263,7 +274,8 @@ def test_sse_horizons_only_and_deterministic():
 
 def test_registry_exposes_both_models():
     models = {(m["name"], m["version"]) for m in list_models()}
-    assert ("ensemble", "ensemble-v1") in models
+    assert ("ensemble", "ensemble-v2") in models
+    assert ("ensemble", "ensemble-v1") in models  # legacy retained
     assert ("sse-drift", "sse-drift-v1") in models
     by_key = {(m["name"], m["version"]): m for m in list_models()}
     assert by_key[("sse-drift", "sse-drift-v1")]["feature_version"] == "sse-features-v1"

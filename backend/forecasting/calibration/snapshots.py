@@ -1,4 +1,4 @@
-"""Walk-forward calibration snapshots (Phase 2b).
+"""Walk-forward calibration snapshots (ensemble-v2).
 
 Deterministic, no network. :func:`build_snapshot` replays the
 :class:`~backend.forecasting.service.ForecastService` ensemble over trailing
@@ -18,14 +18,22 @@ Walk-forward shape (bounded + fast):
     ``universe x 3 horizons`` build well under 60s locally.
   * Members: the same ensemble members as
     :class:`~backend.forecasting.service.ForecastService` (``historical-
-    drift`` + ``momentum`` + ``logistic-direction``, plus ``sse-drift`` /
+    drift`` + ``momentum`` + ``logistic-direction`` +
+    ``gradient-boost-direction`` + ``trend-persistence``, plus ``sse-drift`` /
     ``eux-drift`` on the routed venues), refit per fold on the train prefix
     only. Member dicts are keyed by model NAME (the same keys as
     ``ForecastService.forecast`` ``components``).
   * Labels: forward direction over ``horizon`` (``close[t+h] > close[t]``);
     tail origins with an unobservable horizon are skipped, never imputed.
-  * Ensemble weighting mirrors the service: mean of the available US
-    members, blended 50/50 with the venue drift when routed.
+  * Ensemble weighting mirrors the service: fixed-weight mean of the
+    available US members + shrinkage calibration, blended 50/50 on RAW with
+    the venue drift (then recalibrated) when routed.
+  * Speed: folds whose whole test block sits past the label-observable
+    prefix (trailing ``horizon`` bars) are skipped before any fit — those
+    folds score nothing today, so skipping only removes wasted fits.
+    Remaining folds stay serial: the GB/logistic fits are CPython
+    GIL-bound, so threads add overhead without speedup (measured), while
+    processes are off the table for serverless deploys.
 
 ``build_snapshot`` is pure compute (the ``db`` kwarg is accepted for the
 contracted signature and otherwise unused); persistence lives in
@@ -52,7 +60,8 @@ from backend.forecasting.calibration.metrics import (
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.features.euronext import EUX_FEATURE_VERSION
 from backend.forecasting.features.features import (
-    FEATURE_VERSION,
+    EXTENDED_FEATURE_VERSION,
+    build_feature_bundle,
     build_features,
     direction_label,
     log_returns,
@@ -62,6 +71,7 @@ from backend.forecasting.models.euronext_drift import (
     MODEL_VERSION as EUX_DRIFT_VERSION,
     EuxDriftBaseline,
 )
+from backend.forecasting.models.gradient_boost import GradientBoostDirectionModel
 from backend.forecasting.models.historical_drift import HistoricalDriftBaseline
 from backend.forecasting.models.logistic import LogisticDirectionModel
 from backend.forecasting.models.momentum import MomentumBaseline
@@ -73,9 +83,12 @@ from backend.forecasting.registry import ENSEMBLE_VERSION
 from backend.forecasting.service import (
     EUX_BLEND_VERSION,
     SSE_BLEND_VERSION,
+    _calibrate_prob,
     _data_version,
     _is_euronext,
     _is_sse,
+    _trend_persistence_signal,
+    _weighted_mean,
 )
 
 #: Trailing bars per snapshot (matches ForecastService.BAR_LIMIT; the market
@@ -99,7 +112,16 @@ MIN_SCORED_WINDOWS = 10
 #: Amber threshold: n below this carries wide uncertainty.
 SMALL_SAMPLE_WINDOWS = 30
 
-BASE_MEMBERS: tuple[str, ...] = ("historical-drift", "momentum", "logistic-direction")
+#: ensemble-v2 US members (mirrors ForecastService: 5 members incl. the
+#: promoted gradient-boost + trend-persistence heuristic). Snapshots replay
+#: the LIVE ensemble so Brier/ECE match what the API serves.
+BASE_MEMBERS: tuple[str, ...] = (
+    "historical-drift",
+    "momentum",
+    "logistic-direction",
+    "gradient-boost-direction",
+    "trend-persistence",
+)
 
 
 def canonical_symbol(symbol: str, market_service: Any | None = None) -> str:
@@ -162,7 +184,7 @@ def _versions(symbol: str, bars: dict) -> tuple[str, str, str, tuple[str, ...], 
         return (EUX_BLEND_VERSION, EUX_FEATURE_VERSION,
                 f"{base_data_version}-eux",
                 (*BASE_MEMBERS, "eux-drift"), "eux-drift")
-    return (ENSEMBLE_VERSION, FEATURE_VERSION, base_data_version,
+    return (ENSEMBLE_VERSION, EXTENDED_FEATURE_VERSION, base_data_version,
             (*BASE_MEMBERS,), None)
 
 
@@ -212,6 +234,159 @@ def _market_service(market_service: Any | None = None) -> Any:
     from backend.market_data.service import MarketDataService
 
     return MarketDataService()
+
+
+def _score_snapshot_fold(
+    train_idx: Any,
+    test_idx: Any,
+    features: Any,
+    closes_feat: Any,
+    labels_full: Any,
+    frame: Any,
+    horizon: int,
+    extra: str | None,
+) -> list[tuple[int, float, dict[str, float], float]]:
+    """Score one walk-forward fold; returns [(pos, label, window, ensemble)].
+
+    Pure function of its slice arguments (shared frames are read-only; every
+    fit uses fixed seeds). Skipped folds (all members missing / tail
+    unobservable) return []. Called in fold order by :func:`build_snapshot`,
+    so merged output matches the legacy inline loop exactly.
+    """
+    assert_no_leakage(train_idx, test_idx, horizon)
+    train_close = closes_feat.iloc[train_idx]
+    train_feat = features.iloc[train_idx]
+    # One log-return pass per fold (shared by drift + venue drift fits).
+    train_lret = log_returns(train_close).dropna()
+    try:
+        drift_p: float | None = float(
+            HistoricalDriftBaseline()
+            .fit(train_lret)
+            .direction_probability(horizon).value)
+    except (ValueError, TypeError):
+        drift_p = None
+    try:
+        mom_p: float | None = float(
+            MomentumBaseline().fit(train_close)
+            .direction_probability(horizon).value)
+    except (ValueError, TypeError):
+        mom_p = None
+    try:
+        logreg = LogisticDirectionModel(horizons=[horizon]).fit(
+            train_feat, train_close)
+    except (ValueError, ImportError, TypeError):
+        logreg = None
+    try:
+        gb_fold = GradientBoostDirectionModel(horizons=[horizon]).fit(
+            train_feat, train_close)
+    except (ValueError, ImportError, TypeError):
+        gb_fold = None
+    # Trend-persistence from the TRAIN prefix only (leakage-safe: uses
+    # the ext slice, never full-history rows beyond the fold origin).
+    try:
+        trend_fold = _trend_persistence_signal(frame, _ext=train_feat)
+        if trend_fold is not None and not 0.0 <= float(trend_fold) <= 1.0:
+            trend_fold = None
+    except Exception:
+        trend_fold = None
+    extra_p: float | None = None
+    if extra == "sse-drift":
+        try:
+            extra_p = float(
+                SseDriftBaseline()
+                .fit(train_lret)
+                .direction_probability(horizon).value)
+        except (ValueError, TypeError):
+            extra_p = None
+    elif extra == "eux-drift":
+        try:
+            extra_p = float(
+                EuxDriftBaseline()
+                .fit(train_lret)
+                .direction_probability(horizon).value)
+        except (ValueError, TypeError):
+            extra_p = None
+    if drift_p is None and mom_p is None and logreg is None and gb_fold is None and trend_fold is None and extra_p is None:
+        return []
+    # Batched ML predicts for the fold's test block (test_size=1 in
+    # the snapshot stride, but batch keeps the path O(1) predict calls).
+    logreg_probs: dict[int, float] = {}
+    if logreg is not None:
+        try:
+            batch = logreg.predict_proba_batch(features.iloc[test_idx])
+            arr = batch.get(horizon)
+            if arr is not None:
+                for pos, proba in zip(
+                    (int(p) for p in test_idx), (float(v) for v in arr)
+                ):
+                    logreg_probs[pos] = proba
+        except (ValueError, IndexError, KeyError, TypeError):
+            logreg_probs = {}
+    gb_probs: dict[int, float] = {}
+    if gb_fold is not None:
+        try:
+            batch = gb_fold.predict_proba_batch(features.iloc[test_idx])
+            arr = batch.get(horizon)
+            if arr is not None:
+                for pos, proba in zip(
+                    (int(p) for p in test_idx), (float(v) for v in arr)
+                ):
+                    gb_probs[pos] = proba
+        except (ValueError, IndexError, KeyError, TypeError):
+            gb_probs = {}
+    scored: list[tuple[int, float, dict[str, float], float]] = []
+    for pos in (int(p) for p in test_idx):
+        try:
+            label = labels_full.iloc[pos]
+        except (IndexError, KeyError):
+            continue
+        if pd.isna(label):
+            continue  # horizon unobservable at the tail: skip, never impute
+        label_f = float(label)
+        window: dict[str, float] = {}
+        if drift_p is not None:
+            window["historical-drift"] = float(drift_p)
+        if mom_p is not None:
+            window["momentum"] = float(mom_p)
+        if pos in logreg_probs:
+            window["logistic-direction"] = float(logreg_probs[pos])
+        elif logreg is not None:
+            try:
+                window["logistic-direction"] = float(
+                    logreg.predict_direction_proba(
+                        features.iloc[[pos]])[horizon].value)
+            except (ValueError, IndexError, KeyError, TypeError):
+                pass
+        if pos in gb_probs:
+            window["gradient-boost-direction"] = float(gb_probs[pos])
+        elif gb_fold is not None:
+            try:
+                window["gradient-boost-direction"] = float(
+                    gb_fold.predict_direction_proba(
+                        features.iloc[[pos]])[horizon].value)
+            except (ValueError, IndexError, KeyError, TypeError):
+                pass
+        if trend_fold is not None:
+            window["trend-persistence"] = float(trend_fold)
+        # ensemble-v2 scoring: fixed-weight mean over US members, then
+        # shrinkage calibration; venue blend 50/50 on RAW then recalibrate
+        # (mirrors ForecastService.forecast).
+        us_window = {k: v for k, v in window.items() if k in BASE_MEMBERS}
+        if extra is not None and extra_p is not None:
+            window[extra] = float(extra_p)
+            if not us_window:
+                # Venue drift alone still scores (US members all missing).
+                ensemble = float(_calibrate_prob(float(extra_p)))
+            else:
+                us_raw_fold = _weighted_mean(us_window)[0]
+                ensemble = float(_calibrate_prob((float(us_raw_fold) + float(extra_p)) / 2.0))
+        else:
+            if not us_window:
+                continue
+            us_raw_fold = _weighted_mean(us_window)[0]
+            ensemble = float(_calibrate_prob(us_raw_fold))
+        scored.append((pos, label_f, window, ensemble))
+    return scored
 
 
 def build_snapshot(
@@ -272,7 +447,10 @@ def build_snapshot(
             },
             index=pd.to_datetime([t for _, _, _, _, _, t in recs]),
         )
-        features = build_features(frame)
+        # ensemble-v2: ML members train on the EXTENDED frame (v2, 14 cols).
+        # v1 frame kept only for the warmup-compat comment; scoring uses ext.
+        _, ext_features = build_feature_bundle(frame)
+        features = ext_features
     except (ValueError, TypeError, KeyError):
         return zero()
     if len(features) < MIN_BARS:
@@ -292,99 +470,21 @@ def build_snapshot(
     y_prob: list[float] = []
     member_probs: dict[str, list[float]] = {m: [] for m in expected_members}
     member_labels: dict[str, list[float]] = {m: [] for m in expected_members}
-
+    n_feature_rows = len(features)
     for train_idx, test_idx in folds:
-        assert_no_leakage(train_idx, test_idx, horizon)
-        train_close = closes_feat.iloc[train_idx]
-        train_feat = features.iloc[train_idx]
-        # One log-return pass per fold (shared by drift + venue drift fits).
-        train_lret = log_returns(train_close).dropna()
+        # Tail pre-skip: labels are NaN on exactly the last ``horizon``
+        # positions, so a fold whose whole test block sits there scores
+        # nothing — skip before any fit (identical output, minus wasted
+        # fits; h=63 on short histories skips every fold).
         try:
-            drift_p: float | None = float(
-                HistoricalDriftBaseline()
-                .fit(train_lret)
-                .direction_probability(horizon).value)
-        except (ValueError, TypeError):
-            drift_p = None
-        try:
-            mom_p: float | None = float(
-                MomentumBaseline().fit(train_close)
-                .direction_probability(horizon).value)
-        except (ValueError, TypeError):
-            mom_p = None
-        try:
-            logreg = LogisticDirectionModel(horizons=[horizon]).fit(
-                train_feat, train_close)
-        except (ValueError, ImportError, TypeError):
-            logreg = None
-        extra_p: float | None = None
-        if extra == "sse-drift":
-            try:
-                extra_p = float(
-                    SseDriftBaseline()
-                    .fit(train_lret)
-                    .direction_probability(horizon).value)
-            except (ValueError, TypeError):
-                extra_p = None
-        elif extra == "eux-drift":
-            try:
-                extra_p = float(
-                    EuxDriftBaseline()
-                    .fit(train_lret)
-                    .direction_probability(horizon).value)
-            except (ValueError, TypeError):
-                extra_p = None
-        if drift_p is None and mom_p is None and logreg is None and extra_p is None:
-            continue
-        # Batched logistic predict for the fold's test block (test_size=1 in
-        # the snapshot stride, but batch keeps the path O(1) predict calls).
-        logreg_probs: dict[int, float] = {}
-        if logreg is not None:
-            try:
-                batch = logreg.predict_proba_batch(features.iloc[test_idx])
-                arr = batch.get(horizon)
-                if arr is not None:
-                    for pos, proba in zip(
-                        (int(p) for p in test_idx), (float(v) for v in arr)
-                    ):
-                        logreg_probs[pos] = proba
-            except (ValueError, IndexError, KeyError, TypeError):
-                logreg_probs = {}
-        for pos in (int(p) for p in test_idx):
-            try:
-                label = labels_full.iloc[pos]
-            except (IndexError, KeyError):
+            if int(min(test_idx)) + int(horizon) >= n_feature_rows:
                 continue
-            if pd.isna(label):
-                continue  # horizon unobservable at the tail: skip, never impute
-            label_f = float(label)
-            window: dict[str, float] = {}
-            if drift_p is not None:
-                window["historical-drift"] = float(drift_p)
-            if mom_p is not None:
-                window["momentum"] = float(mom_p)
-            if pos in logreg_probs:
-                window["logistic-direction"] = float(logreg_probs[pos])
-            elif logreg is not None:
-                try:
-                    window["logistic-direction"] = float(
-                        logreg.predict_direction_proba(
-                            features.iloc[[pos]])[horizon].value)
-                except (ValueError, IndexError, KeyError, TypeError):
-                    pass
-            us_parts = [window[m] for m in BASE_MEMBERS if m in window]
-            if extra is not None and extra_p is not None:
-                window[extra] = float(extra_p)
-                if not us_parts:
-                    # Venue drift alone still scores (US members all missing).
-                    ensemble = float(extra_p)
-                else:
-                    ensemble = float(
-                        (sum(us_parts) / len(us_parts) + float(extra_p)) / 2.0)
-            else:
-                if not us_parts:
-                    continue
-                ensemble = float(sum(us_parts) / len(us_parts))
+        except (TypeError, ValueError):
+            pass
+        for pos, label_f, window, ensemble in _score_snapshot_fold(
+            train_idx, test_idx, features, closes_feat,
+            labels_full, frame, horizon, extra,
+        ):
             y_true.append(label_f)
             y_prob.append(ensemble)
             for name, proba in window.items():

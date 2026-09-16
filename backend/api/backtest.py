@@ -1,15 +1,20 @@
 """Walk-forward backtest API: POST /api/backtest/run + GET /api/backtest/{symbol}.
 
-Each run fits drift/momentum/logistic baselines on train folds only
-(point-in-time labels, WalkForwardSplitter + assert_no_leakage guard) and
-scores the mean-ensemble with Brier/ECE + a reliability table. No AI, no
-network (deterministic stub bars). Runs are kept in an in-memory history;
-GET returns lightweight summaries without the full reliability tables.
+Each run fits the ensemble-v2 members (drift/momentum/logistic-v3/
+gradient-boost-v1/trend-persistence) on train folds only (point-in-time
+labels, WalkForwardSplitter + assert_no_leakage guard) and scores the
+weighted + shrinkage-calibrated ensemble with Brier/ECE + a reliability
+table. No AI, no network (deterministic stub bars). Runs are kept in an
+in-memory history; GET returns lightweight summaries without the full
+reliability tables. Folds stay serial: the GB/logistic fits are CPython
+GIL-bound, so threads add overhead without speedup (measured on the twin
+snapshot path), while processes are off the table for serverless deploys.
 """
 
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,15 +30,22 @@ from backend.forecasting.calibration import (
 )
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.features.features import (
-    FEATURE_VERSION,
+    EXTENDED_FEATURE_VERSION,
+    build_feature_bundle,
     build_features,
     direction_label,
     log_returns,
 )
+from backend.forecasting.models.gradient_boost import GradientBoostDirectionModel
 from backend.forecasting.models.historical_drift import HistoricalDriftBaseline
 from backend.forecasting.models.logistic import LogisticDirectionModel
 from backend.forecasting.models.momentum import MomentumBaseline
 from backend.forecasting.registry import ENSEMBLE_VERSION
+from backend.forecasting.service import (
+    _calibrate_prob,
+    _trend_persistence_signal,
+    _weighted_mean,
+)
 from backend.market_data.service import MarketDataService
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
@@ -114,6 +126,137 @@ def _reliability_records(table: pd.DataFrame) -> list[dict]:
     return out
 
 
+def _score_backtest_fold(
+    train_idx: Any,
+    test_idx: Any,
+    features: pd.DataFrame,
+    closes_feat: pd.Series,
+    labels_full: pd.Series,
+    frame: pd.DataFrame | None,
+    horizon: int,
+    gap: int,
+) -> tuple[list[tuple[int, float, float]], bool]:
+    """Score one backtest fold; returns ([(pos, label, proba)], fold_used). Rows
+    are in pos order.
+
+    Pure function of its slice arguments (shared frames read-only, fixed-seed
+    fits), so folds may run in any order/thread. Skipped positions (tail
+    unobservable / all members missing) are omitted, never imputed. The merge
+    by :func:`_evaluate_horizon` in fold order, making output identical to
+    the legacy inline loop. Returns (rows, fold_used) where fold_used
+    mirrors the legacy ``n_folds_used`` increment (any member fitted, even
+    if every position later skips as unobservable).
+    """
+    assert_no_leakage(train_idx, test_idx, gap)
+    train_feat = features.iloc[train_idx]
+    train_close = closes_feat.iloc[train_idx]
+    try:
+        drift_p = float(
+            HistoricalDriftBaseline()
+            .fit(log_returns(train_close).dropna())
+            .direction_probability(int(horizon))
+            .value
+        )
+    except ValueError:
+        drift_p = None  # type: ignore[assignment]
+    try:
+        mom_p = float(
+            MomentumBaseline()
+            .fit(train_close)
+            .direction_probability(int(horizon))
+            .value
+        )
+    except ValueError:
+        mom_p = None  # type: ignore[assignment]
+    try:
+        logreg = LogisticDirectionModel(horizons=[int(horizon)]).fit(
+            train_feat, train_close
+        )
+    except (ValueError, ImportError):
+        logreg = None
+    try:
+        gb_fold = GradientBoostDirectionModel(horizons=[int(horizon)]).fit(
+            train_feat, train_close
+        )
+    except (ValueError, ImportError):
+        gb_fold = None
+    try:
+        trend_fold = _trend_persistence_signal(
+            frame if frame is not None else train_feat, _ext=train_feat
+        )
+        if trend_fold is not None and not 0.0 <= float(trend_fold) <= 1.0:
+            trend_fold = None
+    except Exception:
+        trend_fold = None
+    if drift_p is None and mom_p is None and logreg is None and gb_fold is None and trend_fold is None:
+        return [], False
+    # Batched ML predicts: one predict_proba per fold (not per row).
+    logreg_probs: dict[int, float] = {}
+    if logreg is not None:
+        try:
+            batch = logreg.predict_proba_batch(features.iloc[test_idx])
+            arr = batch.get(int(horizon))
+            if arr is not None:
+                for pos, proba in zip(
+                    (int(p) for p in test_idx), (float(v) for v in arr)
+                ):
+                    logreg_probs[pos] = proba
+        except (ValueError, IndexError, KeyError):
+            logreg_probs = {}
+    gb_probs: dict[int, float] = {}
+    if gb_fold is not None:
+        try:
+            batch = gb_fold.predict_proba_batch(features.iloc[test_idx])
+            arr = batch.get(int(horizon))
+            if arr is not None:
+                for pos, proba in zip(
+                    (int(p) for p in test_idx), (float(v) for v in arr)
+                ):
+                    gb_probs[pos] = proba
+        except (ValueError, IndexError, KeyError):
+            gb_probs = {}
+    scored: list[tuple[int, float, float]] = []
+    for pos in test_idx:
+        pos = int(pos)
+        label = labels_full.iloc[pos]
+        if pd.isna(label):
+            continue  # horizon unobservable at the tail: skip, never impute
+        window: dict[str, float] = {}
+        if drift_p is not None:
+            window["historical-drift"] = float(drift_p)
+        if mom_p is not None:
+            window["momentum"] = float(mom_p)
+        if pos in logreg_probs:
+            window["logistic-direction"] = float(logreg_probs[pos])
+        elif logreg is not None:
+            try:
+                window["logistic-direction"] = float(
+                    logreg.predict_direction_proba(
+                        features.iloc[[int(pos)]]
+                    )[int(horizon)].value
+                )
+            except (ValueError, IndexError):
+                pass
+        if pos in gb_probs:
+            window["gradient-boost-direction"] = float(gb_probs[pos])
+        elif gb_fold is not None:
+            try:
+                window["gradient-boost-direction"] = float(
+                    gb_fold.predict_direction_proba(
+                        features.iloc[[int(pos)]]
+                    )[int(horizon)].value
+                )
+            except (ValueError, IndexError):
+                pass
+        if trend_fold is not None:
+            window["trend-persistence"] = float(trend_fold)
+        if not window:
+            continue
+        raw = _weighted_mean(window)[0]
+        scored.append((pos, float(label), float(_calibrate_prob(raw))))
+    return scored, True
+
+
 def _evaluate_horizon(
     features: pd.DataFrame,
     closes_feat: pd.Series,
@@ -122,6 +265,7 @@ def _evaluate_horizon(
     test_size: int,
     gap: int,
     n_bins: int,
+    frame: pd.DataFrame | None = None,
 ) -> dict:
     labels_full = direction_label(closes_feat, int(horizon))
     # Expanding origin: train blocks are always contiguous history prefixes
@@ -139,76 +283,15 @@ def _evaluate_horizon(
     y_prob: list[float] = []
     n_folds_used = 0
     for train_idx, test_idx in folds:
-        assert_no_leakage(train_idx, test_idx, gap)
-        train_feat = features.iloc[train_idx]
-        train_close = closes_feat.iloc[train_idx]
-        try:
-            drift_p = float(
-                HistoricalDriftBaseline()
-                .fit(log_returns(train_close).dropna())
-                .direction_probability(int(horizon))
-                .value
-            )
-        except ValueError:
-            drift_p = None  # type: ignore[assignment]
-        try:
-            mom_p = float(
-                MomentumBaseline()
-                .fit(train_close)
-                .direction_probability(int(horizon))
-                .value
-            )
-        except ValueError:
-            mom_p = None  # type: ignore[assignment]
-        try:
-            logreg = LogisticDirectionModel(horizons=[int(horizon)]).fit(
-                train_feat, train_close
-            )
-        except ValueError:
-            logreg = None
-        if drift_p is None and mom_p is None and logreg is None:
-            continue
-        n_folds_used += 1
-        # Batched logistic predict: one predict_proba per fold (not per row).
-        logreg_probs: dict[int, float] = {}
-        if logreg is not None:
-            try:
-                batch = logreg.predict_proba_batch(features.iloc[test_idx])
-                arr = batch.get(int(horizon))
-                if arr is not None:
-                    for pos, proba in zip(
-                        (int(p) for p in test_idx), (float(v) for v in arr)
-                    ):
-                        logreg_probs[pos] = proba
-            except (ValueError, IndexError, KeyError):
-                logreg_probs = {}
-        for pos in test_idx:
-            pos = int(pos)
-            label = labels_full.iloc[pos]
-            if pd.isna(label):
-                continue  # horizon unobservable at the tail: skip, never impute
-            parts: list[float] = []
-            if drift_p is not None:
-                parts.append(float(drift_p))
-            if mom_p is not None:
-                parts.append(float(mom_p))
-            if pos in logreg_probs:
-                parts.append(float(logreg_probs[pos]))
-            elif logreg is not None:
-                try:
-                    parts.append(
-                        float(
-                            logreg.predict_direction_proba(
-                                features.iloc[[int(pos)]]
-                            )[int(horizon)].value
-                        )
-                    )
-                except (ValueError, IndexError):
-                    pass
-            if not parts:
-                continue
-            y_true.append(float(label))
-            y_prob.append(float(sum(parts) / len(parts)))
+        scored, fold_used = _score_backtest_fold(
+            train_idx, test_idx, features, closes_feat,
+            labels_full, frame, int(horizon), gap,
+        )
+        if fold_used:
+            n_folds_used += 1
+        for pos, label_f, proba in scored:
+            y_true.append(float(label_f))
+            y_prob.append(float(proba))
     if not y_true:
         raise HTTPException(
             status_code=422,
@@ -284,7 +367,8 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"backtest frame failed: {exc}") from exc
     try:
-        features = build_features(frame)
+        # ensemble-v2: ML members train on the extended frame (v2).
+        _, features = build_feature_bundle(frame)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -299,7 +383,8 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
     for h in horizons:
         try:
             results[str(h)] = _evaluate_horizon(
-                features, closes_feat, h, req.train_size, req.test_size, req.gap, req.n_bins
+                features, closes_feat, h, req.train_size, req.test_size, req.gap, req.n_bins,
+                frame=frame,
             )
         except HTTPException:
             raise
@@ -325,7 +410,7 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
         },
         "results": results,
         "model_version": ENSEMBLE_VERSION,
-        "feature_version": FEATURE_VERSION,
+        "feature_version": EXTENDED_FEATURE_VERSION,
         "data_version": data_version,
         "as_of": stamp,
         "provenance": provenance,
