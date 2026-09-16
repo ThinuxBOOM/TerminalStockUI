@@ -1,0 +1,39 @@
+# OneMarket Analyzer — forecast scoring schedule (GitHub Actions)
+#
+# Why Actions and not a Vercel cron: Hobby plans cap cron slots (both are
+# taken: /api/cron/ingest 05:30, /api/cron/calibrate 06:30 UTC). Scoring
+# matures forecasts point-in-time into forecast_accuracy (Brier/ECE), so it
+# runs once daily after calibrate.
+# Setup (once): same APP_URL + CRON_SECRET secrets as snapshots.yml.
+# The endpoint is idempotent (batch never 500s) — overlapping runs are safe.
+
+name: Score forecasts
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  score:
+    name: score matured forecasts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger scoring
+        run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
+          code=$(curl -s --max-time 55 -o /tmp/score.json -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/cron/score")
+          echo "HTTP status: $code"
+          cat /tmp/score.json
+          echo ""
+          test "$code" = "200"
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

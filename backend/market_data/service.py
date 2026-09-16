@@ -261,7 +261,7 @@ class MarketDataService:
         if upper_mic in ("XSHG", "XPAR", "XAMS", "XBRU"):
             return False
         upper = (provider_symbol or "").strip().upper()
-        for suffix in (".SS", ".PA", ".AS", ".BR"):
+        for suffix in (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".BO", ".L"):
             if upper.endswith(suffix):
                 return False
         return True
@@ -704,8 +704,8 @@ class MarketDataService:
                     return db_out
             # Stale (not thin): fall through to the live refresh below —
             # days-old bars are never served.
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("bars db path miss for %s: %s", str(symbol)[:16], type(exc).__name__)
         try:
             if self._fetch_and_store_bars(symbol, timeframe):
                 db_out = self._get_bars_from_db(symbol, timeframe, limit)
@@ -716,11 +716,70 @@ class MarketDataService:
                         except Exception:
                             pass
                     return db_out
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("bars live path miss for %s: %s", str(symbol)[:16], type(exc).__name__)
         # Fail-closed: DB thin/empty/stale and live fetch missed — raise
         # instead of fabricating deterministic stub bars or serving
-        # days-old history. Routers map this to 502.
+        # days-old history. Genuinely-short histories (e.g. recent IPOs
+        # with k < min(limit,100) rows total) raise ValueError so routers
+        # map to 422 insufficient-history; full-but-stale or empty DBs raise
+        # ProviderError (502, never serve days-old rows). Total row count
+        # distinguishes the two: stale AAPL still holds 100+ old rows.
+        try:
+            needed = min(int(limit), 100)
+        except (TypeError, ValueError):
+            needed = 100
+        try:
+            from backend.db.session import get_session_factory as _gsf
+
+            from backend.db.models import Instrument as _DBI
+            from backend.db.models import PriceBar as _PB
+
+            try:
+                symbol_text = str(symbol or "").strip()
+            except Exception:
+                symbol_text = ""
+            total = 0
+            try:
+                instrument, _, _ = self.registry.resolve(symbol_text)
+                if instrument is None:
+                    try:
+                        instrument = _provisional_instrument(symbol_text)
+                    except Exception:
+                        instrument = None
+                if instrument is not None:
+                    _S = _gsf()()
+                    try:
+                        total = (
+                            _S.query(_PB)
+                            .join(
+                                _DBI,
+                                _PB.instrument_id == _DBI.instrument_id,
+                            )
+                            .filter(
+                                _DBI.exchange_mic == instrument.exchange_mic,
+                                _DBI.exchange_symbol
+                                == instrument.exchange_symbol,
+                                _PB.timeframe == (timeframe or "1d"),
+                            )
+                            .count()
+                        )
+                    finally:
+                        try:
+                            _S.close()
+                        except Exception:
+                            pass
+            except Exception:
+                total = 0
+            if total > 0 and total < needed:
+                raise ValueError(
+                    f"insufficient history for {symbol!r}: "
+                    f"only {int(total)} of {limit} bars available"
+                )
+        except ValueError:
+            raise
+        except Exception:
+            pass
         from .providers.base import ProviderError as _PE
 
         raise _PE(
@@ -1056,7 +1115,16 @@ class MarketDataService:
             except Exception:
                 return True
             if instrument is None:
-                return True
+                # Non-seed valid tickers (GOOGL/SPY/...) resolve via the
+                # provisional path so the calendar gate applies instead of
+                # serving stale rows as fresh. Unusable text keeps legacy
+                # True (never 502 on a calendar miss).
+                try:
+                    instrument = _provisional_instrument(symbol_text)
+                except Exception:
+                    instrument = None
+                if instrument is None:
+                    return True
             try:
                 mic = str(instrument.exchange_mic or "").strip().upper()
             except Exception:
@@ -1446,13 +1514,20 @@ class MarketDataService:
             symbol_text = str(symbol or "").strip()
         except Exception:
             return None
-        instrument, _, _ = self.registry.resolve(symbol_text)
+        try:
+            instrument, _, _ = self.registry.resolve(symbol_text)
+        except Exception:
+            return None
         try:
             n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
-        Session = get_session_factory()  # lazy per call; cached engine
-        db = Session()
+        try:
+            Session = get_session_factory()  # lazy per call; cached engine
+            db = Session()
+        except Exception:
+            logger.debug("bars db unavailable for %s", symbol_text[:16])
+            return None
         try:
             query = (
                 db.query(PriceBar, DBInstrument)
@@ -1479,9 +1554,9 @@ class MarketDataService:
                 response_symbol = symbol_text.upper()
                 response_inst_id = None
             pairs = query.order_by(PriceBar.ts.desc()).limit(n).all()
-            if len(pairs) < min(n, 100):
-                return None
             if not pairs:
+                return None
+            if len(pairs) < min(n, 100):
                 return None
             first_inst = pairs[0][1]
             if instrument is None and first_inst is not None:
@@ -1498,6 +1573,9 @@ class MarketDataService:
                 response_inst_id=response_inst_id,
                 timeframe=timeframe,
             )
+        except Exception:
+            logger.debug("bars db query miss for %s", symbol_text[:16] if 'symbol_text' in dir() else "?")
+            return None
         finally:
             try:
                 db.close()

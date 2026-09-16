@@ -71,7 +71,10 @@ markets:
   # true + set a verified proxy list. Existing 6 MICs are untouched.
   - mic: XCOL
     name: Colombo Stock Exchange
-    provider_suffix: .BO
+    # NEVER .BO (.BO = Bombay BSE — enabling with it would mislabel INR as
+    # LKR). Vendor suffix unverified: keep "" + disabled until a CSE feed is
+    # confirmed (see docs/API_CONTRACT.md M9 proposal).
+    provider_suffix: ""
     timezone: Asia/Colombo
     currency: LKR
     country: LK

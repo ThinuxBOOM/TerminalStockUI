@@ -54,7 +54,7 @@ BASE_URL = "https://finnhub.io/api/v1"
 
 #: Yahoo suffixes Finnhub-free cannot serve (US-only on the free tier;
 #: international is EOD-only and stays on yfinance/stooq).
-_NON_US_SUFFIXES: tuple[str, ...] = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE")
+_NON_US_SUFFIXES: tuple[str, ...] = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".BO", ".L")
 
 #: Deterministic offline reference quotes (outage fallback / forced-stub
 #: mode / missing-keys mode only; always served with fallback_used=True).
@@ -177,7 +177,7 @@ class FinnhubProvider:
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: float = 12.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
         # Free tier: 60 calls/minute -> ~1 rps, small burst.

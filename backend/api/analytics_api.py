@@ -235,6 +235,14 @@ def get_analytics(
     sym = (symbol or "").strip().upper()
     if not sym:
         raise _HTTPException(status_code=422, detail="symbol must be a non-empty string")
+    try:
+        from backend.security.validation import validate_symbol as _vsym
+
+        sym = _vsym(sym, field="symbol")
+    except _HTTPException:
+        raise
+    except Exception as exc:
+        raise _HTTPException(status_code=422, detail=str(exc)) from exc
     # Overlay request parsing (Backend Agent 5 contract): comma-separated,
     # validated; unknown -> 422 with the exact detail string. Blank/omitted
     # means no overlay work (backward compat: no `indicators` key).
@@ -259,23 +267,59 @@ def get_analytics(
             raise
         except Exception:
             pass
+        if isinstance(exc, (ValueError, KeyError, TypeError)):
+            raise _HTTPException(status_code=422, detail=str(exc)) from exc
         raise _HTTPException(status_code=502, detail=f"analytics bars failed: {exc}") from exc
     rows = bars.get("bars", []) if isinstance(bars, dict) else []
     if not rows:
         raise _HTTPException(status_code=422, detail=f"insufficient history for {sym!r}: 0 bars")
+    # Drop malformed rows (missing/non-finite OHLC) before framing: vendor
+    # gaps with a valid close used to KeyError -> 502. Count drops in
+    # provenance.missing_fields instead of dying.
+    try:
+        clean_rows: list[dict] = []
+        dropped = 0
+        for r in rows:
+            try:
+                if not isinstance(r, dict):
+                    dropped += 1
+                    continue
+                import math as _math
+                c = float(r.get("close"))  # type: ignore[arg-type]
+                if not _math.isfinite(c):
+                    dropped += 1
+                    continue
+                clean_rows.append(r)
+            except (TypeError, ValueError):
+                dropped += 1
+                continue
+        rows = clean_rows
+        if dropped:
+            try:
+                provenance_pre = bars.get("provenance", {}) if isinstance(bars, dict) else {}
+                mf = list((provenance_pre or {}).get("missing_fields", []) or [])
+                mf.append(f"dropped_incomplete_rows:{dropped}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not rows:
+        raise _HTTPException(status_code=422, detail=f"insufficient history for {sym!r}: 0 usable bars")
     try:
         frame = pd.DataFrame(
             {
-                "open": [r["open"] for r in rows],
-                "high": [r["high"] for r in rows],
-                "low": [r["low"] for r in rows],
-                "close": [r["close"] for r in rows],
-                "volume": [float(r["volume"] or 0) for r in rows],
+                "open": [r.get("open") for r in rows],
+                "high": [r.get("high") for r in rows],
+                "low": [r.get("low") for r in rows],
+                "close": [r.get("close") for r in rows],
+                "volume": [float(r.get("volume") or 0) for r in rows],
             },
-            index=pd.to_datetime([r["ts"] for r in rows]),
+            index=pd.to_datetime([r.get("ts") for r in rows]),
         )
     except _HTTPException:
         raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _HTTPException(status_code=422, detail=f"analytics frame failed: {exc}") from exc
     except Exception as exc:
         raise _HTTPException(status_code=502, detail=f"analytics frame failed: {exc}") from exc
     if frame.empty or len(frame) < 2:

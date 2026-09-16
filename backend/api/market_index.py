@@ -51,9 +51,9 @@ BENCHMARKS: dict[str, dict] = {
     "XSHG": {"venue": "SSE", "label": "SSE Composite", "index_symbol": "000001.SS",
              "proxies": [], "currency": "CNY", "timezone": "Asia/Shanghai", "enabled": True},
     "XPAR": {"venue": "Euronext Paris", "label": "CAC 40", "index_symbol": "^FCHI",
-             "proxies": ["CAC.PA", "EWQ"], "currency": "EUR", "timezone": "Europe/Paris", "enabled": True},
+             "proxies": ["EWQ", "CAC.PA"], "currency": "EUR", "timezone": "Europe/Paris", "enabled": True},
     "XAMS": {"venue": "Euronext Amsterdam", "label": "AEX", "index_symbol": "^AEX",
-             "proxies": ["IAEX.AS", "EWN"], "currency": "EUR", "timezone": "Europe/Amsterdam", "enabled": True},
+             "proxies": ["EWN", "IAEX.AS"], "currency": "EUR", "timezone": "Europe/Amsterdam", "enabled": True},
     "XBRU": {"venue": "Euronext Brussels", "label": "BEL 20", "index_symbol": "^BFX",
              "proxies": ["EWK"], "currency": "EUR", "timezone": "Europe/Brussels", "enabled": True},
     "XCOL": {"venue": "Colombo (CSE)", "label": "CSE All-Share Price Index (ASPI)",
@@ -107,6 +107,50 @@ def _closes_from_bars(bars: list[dict]) -> list[dict]:
     return [{"t": t, "close": c} for t, c in sorted(by_time.items())]
 
 
+def _resample_points(points: list[dict], timeframe: str) -> list[dict]:
+    """Downsample daily [{t, close}] to 1wk (Fri) / 1mo (month-end).
+
+    Only 1d bars are ever fetched/stored (storing resampled bars under a
+    1wk/1mo timeframe would be dishonest); weekly/monthly views resample
+    in memory. Never raises — falls back to daily on bad input.
+    """
+    try:
+        tf = (timeframe or "1d").strip().lower()
+    except Exception:
+        return points
+    if tf not in ("1wk", "1mo") or not points:
+        return points
+    try:
+        from datetime import date as _date
+    except Exception:
+        return points
+    try:
+        if tf == "1wk":
+            out: list[dict] = []
+            # Group by ISO (year, week); keep last (Friday) close per week.
+            buckets: dict[tuple[int, int], dict] = {}
+            for p in points:
+                try:
+                    d = _date.fromisoformat(str(p.get("t"))[:10])
+                    key = d.isocalendar()[:2]
+                    buckets[key] = p
+                except Exception:
+                    continue
+            out = [buckets[k] for k in sorted(buckets)]
+            return out or points
+        # 1mo: keep last close per calendar month.
+        buckets_m: dict[str, dict] = {}
+        for p in points:
+            try:
+                buckets_m[str(p.get("t"))[:7]] = p
+            except Exception:
+                continue
+        out_m = [buckets_m[k] for k in sorted(buckets_m)]
+        return out_m or points
+    except Exception:
+        return points
+
+
 @router.get("/{mic}/index")
 def market_index(
     mic: str,
@@ -147,6 +191,15 @@ def market_index(
     except Exception:
         _ick = None
     limit = TIMEFRAME_LIMITS[tf]
+    # Only 1d is ever fetched/stored — 1wk/1mo resample in memory from a
+    # deeper 1d window (52w needs ~365 dailies, 36mo needs ~750). Without
+    # this every 1wk/1mo view was DB-only thin -> 502 with no live cover.
+    fetch_tf = "1d"
+    fetch_limit = limit
+    if tf == "1wk":
+        fetch_limit = max(limit * 7, 120)
+    elif tf == "1mo":
+        fetch_limit = max(limit * 21, 250)
     candidates = [{"symbol": cfg["index_symbol"], "is_proxy": False}] + [
         {"symbol": p, "is_proxy": True} for p in (cfg.get("proxies") or [])
     ]
@@ -161,12 +214,13 @@ def market_index(
             last_error = sanitize_error(exc)
             continue
         try:
-            payload = svc.get_bars(sym, tf, limit)
+            payload = svc.get_bars(sym, fetch_tf, fetch_limit)
         except Exception as exc:
             last_error = sanitize_error(exc, prefix="bars failed")
             continue
         bars = payload.get("bars", []) if isinstance(payload, dict) else []
         points = _closes_from_bars(bars if isinstance(bars, list) else [])
+        points = _resample_points(points, tf)
         if not points:
             saw_empty = True
             continue

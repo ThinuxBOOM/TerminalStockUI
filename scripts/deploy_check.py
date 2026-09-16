@@ -207,6 +207,22 @@ def check_vercel_json(root: Path, rep: Report) -> None:
                     + " (vercel.json must declare "
                     + ", ".join(EXPECTED_VERCEL_CRON_PATHS) + ")")
             detail.append("crons: " + ", ".join(sorted(paths)))
+        # maxDuration: Hobby caps at 10s (Pro 60s). maxDuration 60 requires a
+        # Pro project — otherwise ingest is killed mid-batch. Never FAIL here
+        # (plan lives in the dashboard, not the file); surface as detail so
+        # PASS is not false confidence.
+        try:
+            funcs = data.get("functions", {})
+            md = funcs.get("api/index.py", {}).get("maxDuration") if isinstance(funcs, dict) else None
+            if md is not None:
+                detail.append(f"maxDuration: {md}s (Hobby caps 10s — needs Pro or split jobs; see docs)")
+        except Exception:
+            pass
+        # CRON auth: backend/api/cron.py accepts Vercel-cron origin
+        # (x-vercel-cron / vercel-cron UA) plus Bearer; production without
+        # CRON_SECRET stays 401. Checked in backend tests, noted here so a
+        # green vercel.json check does not imply auth is configured.
+        detail.append("cron auth: Bearer + x-vercel-cron origin (CRON_SECRET required in prod)")
         if problems:
             rep.add("FAIL", "vercel.json rewrites/crons match backend",
                     detail + ["mismatch: " + p for p in problems])
@@ -219,18 +235,43 @@ def check_vercel_json(root: Path, rep: Report) -> None:
 
 
 def check_alerts_workflow(root: Path, rep: Report) -> None:
-    """GitHub Actions must cover /api/cron/evaluate (not a Vercel cron)."""
-    text = read_text(root, ".github/workflows/alerts.yml")
-    if text is None:
-        rep.add("FAIL", "alerts workflow covers /api/cron/evaluate",
-                ["missing .github/workflows/alerts.yml"])
+    """GitHub Actions must cover evaluate/snapshot/retention/score/health.
+
+    Vercel Hobby caps cron slots at two (ingest+calibrate in vercel.json);
+    everything else runs via Actions. Each workflow must bound its curl with
+    --max-time 55 so a hung serverless invocation never holds the runner.
+    """
+    expected = {
+        "alerts.yml": "/api/cron/evaluate",
+        "snapshots.yml": "/api/cron/snapshot",
+        "retention.yml": "/api/cron/retention",
+        "score.yml": "/api/cron/score",
+        "health.yml": "/api/cron/health",
+    }
+    missing: list[str] = []
+    no_bound: list[str] = []
+    detail: list[str] = []
+    for fname, path in expected.items():
+        text = read_text(root, f".github/workflows/{fname}")
+        if text is None:
+            missing.append(f"{fname} (missing)")
+            continue
+        if path not in text or "schedule" not in text:
+            missing.append(f"{fname} must schedule {path}")
+            continue
+        detail.append(f"{fname} schedules {path}")
+        if "--max-time" not in text:
+            no_bound.append(fname)
+    if missing:
+        rep.add("FAIL", "actions workflows cover cron fan-out",
+                detail + ["mismatch: " + m for m in missing])
         return
-    if "/api/cron/evaluate" in text and "schedule" in text:
-        rep.add("PASS", "alerts workflow covers /api/cron/evaluate",
-                ["GitHub Actions schedules evaluate (Vercel Hobby cap: 2 crons)"])
-    else:
-        rep.add("FAIL", "alerts workflow covers /api/cron/evaluate",
-                ["alerts.yml must schedule /api/cron/evaluate"])
+    if no_bound:
+        rep.add("FAIL", "actions workflows bound curl with --max-time 55",
+                detail + [f"{f} lacks --max-time (hung 60s+ run holds the runner)" for f in no_bound])
+        return
+    rep.add("PASS", "actions workflows cover cron fan-out",
+            detail + ["all curls bounded with --max-time 55"])
 
 
 def check_api_entry(root: Path, rep: Report) -> None:

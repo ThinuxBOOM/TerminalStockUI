@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { FORECAST_HORIZONS, auditForecastsUrl, runBacktest } from "../api/client";
+import { FORECAST_HORIZONS, auditForecastsUrl, extractBackendDetail, runBacktest } from "../api/client";
 import { getBacktestHistory, getRecentBacktests, saveRecentBacktest } from "../api/backtestHistory";
 import useWatchlist from "../hooks/useWatchlist";
 import ProvenanceBadge from "../components/ProvenanceBadge";
@@ -32,17 +32,17 @@ function BacktestLabPage() {
       saveRecentBacktest(vars.s, vars.h);
     },
   });
-  const trimmedSymbol = symbol.trim().toUpperCase();
+  const trimmedSymbol = String(symbol ?? "").trim().toUpperCase();
   // History follows a debounced symbol: typing "AAPL" must not fire
   // four sequential history fetches.
   const [historySymbol, setHistorySymbol] = useState(trimmedSymbol);
   useEffect(() => {
-    const t = setTimeout(() => setHistorySymbol(symbol.trim().toUpperCase()), 500);
+    const t = setTimeout(() => setHistorySymbol(String(symbol ?? "").trim().toUpperCase()), 500);
     return () => clearTimeout(t);
   }, [symbol]);
   const historyQ = useQuery({
     queryKey: ["backtest-history", historySymbol],
-    queryFn: () => getBacktestHistory(historySymbol, true),
+    queryFn: ({ signal }) => getBacktestHistory(historySymbol, true, { signal }),
     enabled: historySymbol.length > 0,
     staleTime: 30000,
     retry: false,
@@ -59,7 +59,7 @@ function BacktestLabPage() {
     setHorizons((prev) => (prev.includes(h) ? prev.filter((x) => x !== h) : [...prev, h].sort()));
   }
   function run() {
-    const s = symbol.trim().toUpperCase();
+    const s = String(symbol ?? "").trim().toUpperCase();
     if (!s) {
       setFormError("Enter a symbol (e.g. AAPL, 600519.SS, MC.PA).");
       return;
@@ -72,7 +72,7 @@ function BacktestLabPage() {
     lab.mutate({ s, h: horizons });
   }
   function rerun(entrySymbol, entryHorizons) {
-    const s = entrySymbol.trim().toUpperCase();
+    const s = String(entrySymbol ?? "").trim().toUpperCase();
     if (!s) return;
     const h = entryHorizons.length > 0 ? [...entryHorizons].sort((a, b) => a - b) : horizons;
     if (h.length === 0) {
@@ -127,11 +127,16 @@ function BacktestLabPage() {
       </section>
 
       <div className="mt-4">
-        {lab.isPending && <Loading label={`backtesting ${symbol.trim().toUpperCase()}…`} />}
+        {lab.isPending && (
+          <>
+            <Loading label={`backtesting ${String(symbol ?? "").trim().toUpperCase()}…`} />
+            <p className="mt-1 text-[11px] text-term-muted" role="status">Walk-forward can take ~60s cold — warm cache makes repeats fast.</p>
+          </>
+        )}
         {lab.isError && (
           <ErrorState
             title="Backtest failed"
-            detail={lab.error instanceof Error ? `${lab.error.message} — backend /api/backtest unreachable or rejected.` : "Backend /api/backtest unreachable or rejected."}
+            detail={`${extractBackendDetail(lab.error, "Backend /api/backtest rejected")} — backend /api/backtest unreachable or rejected.`}
             onRetry={run}
           />
         )}
@@ -193,7 +198,7 @@ function BacktestLabPage() {
             <p className="term-label">Persisted history · {trimmedSymbol || "—"} (backend)</p>
             <SourceBadge source="SOURCE: DETERMINISTIC" />
           </div>
-          {historyQ.isLoading && <p className="mt-1 text-xs text-term-muted">loading run history…</p>}
+          {(historyQ.isLoading || historyQ.isFetching) && <p className="mt-1 text-xs text-term-muted">{historyQ.isLoading ? "loading run history…" : "refreshing run history…"}</p>}
           {historyQ.isError && <p className="mt-1 text-xs text-term-amber">⚠ run history unavailable — backend /api/backtest/{trimmedSymbol || "…"} unreachable.</p>}
           {!historyQ.isLoading && !historyQ.isError && historyRows.length === 0 && (
             <p className="mt-1 text-xs text-term-muted">No persisted runs for {trimmedSymbol || "this symbol"} yet — run a backtest above.</p>
@@ -216,7 +221,7 @@ function BacktestLabPage() {
                 </thead>
                 <tbody>
                   {visibleHistory.map((run, i) => {
-                    const keys = Object.keys(run.metrics ?? {});
+                    const keys = Object.keys(run.metrics ?? {}).sort((a, b) => Number(a) - Number(b));
                     const first = keys.length > 0 ? run.metrics[keys[0]] : undefined;
                     const horizonsList = run.horizons ?? [];
                     const scored = keys.length > 0 ? keys[0] : null;
@@ -246,8 +251,10 @@ function BacktestLabPage() {
 
 function LabResults({ r }) {
   const slowFeed = (r.provenance?.delay_minutes ?? 0) > 30;
-  const scoredHorizon = (r.horizons ?? [])[0];
+  const sortedHorizons = [...(r.horizons ?? [])].sort((a, b) => Number(a) - Number(b));
+  const scoredHorizon = sortedHorizons[0];
   const scoredSuffix = scoredHorizon !== undefined ? ` · ${scoredHorizon}d` : "";
+  const extraHorizons = sortedHorizons.length > 1 ? sortedHorizons.slice(1) : [];
   const reliability = useMemo(() => r.reliability ?? [], [r]);
   const failures = useMemo(() => r.failures ?? [], [r]);
   const visibleBins = useMemo(() => reliability.slice(0, MAX_RELIABILITY_ROWS), [reliability]);
@@ -286,10 +293,15 @@ function LabResults({ r }) {
           Backtest via {r.provenance?.source ?? "unknown"}, delay {r.provenance?.delay_minutes ?? "—"}m.
         </p>
       )}
+      {extraHorizons.length > 0 && (
+        <p className="text-[11px] text-term-muted" role="status">
+          Multi-horizon run: headline Brier/ECE below score the {scoredHorizon}d horizon only; re-run per horizon for separate {extraHorizons.map((h) => `${h}d`).join(", ")} scorecards.
+        </p>
+      )}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="term-panel p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="term-label">Brier score · {r.symbol}{scoredSuffix}</p>
+            <p className="term-label">Brier score · {r.symbol}{scoredSuffix} (scored)</p>
             <SourceBadge source="SOURCE: DETERMINISTIC" />
           </div>
           <p className="mt-1 text-2xl font-bold">{r.brier === null || r.brier === undefined ? "—" : r.brier.toFixed(4)}</p>

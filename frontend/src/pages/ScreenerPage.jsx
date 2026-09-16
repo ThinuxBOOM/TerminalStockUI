@@ -8,6 +8,8 @@ import ErrorState from "../components/ErrorState";
 import MarketStateBadge from "../components/MarketStateBadge";
 import ProvenanceBadge from "../components/ProvenanceBadge";
 import Skeleton from "../components/Skeleton";
+// XCOL omitted intentionally until the venue is enabled in config/markets.yaml
+// (disabled probe slot — see markets.js MARKET_LABELS which still lists it).
 const MARKET_OPTIONS = [
   { label: "All", value: "" },
   { label: "NYSE", value: "XNYS" },
@@ -145,7 +147,7 @@ function ScreenerPage() {
       detail: screenerErrorDetail(screen.error),
       onRetry: () => void screen.refetch()
     }
-  ), !screen.isLoading && !screen.isError && data && /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-term-muted", role: "status" }, data.count, " of ", data.filtered_total ?? data.universe_size, " pass \xB7 page ", Math.floor((data.offset ?? offset) / SCREENER_LIMIT) + 1, skippedCount > 0 && ` \xB7 ${skippedCount} skipped (see below)`), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
+  ), !screen.isLoading && !screen.isError && data && /* @__PURE__ */ React.createElement("div", { className: "space-y-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-term-muted", role: "status" }, data.count, " of ", data.filtered_total ?? data.universe_size, " pass \xB7 page ", Math.floor((data.offset ?? offset) / SCREENER_LIMIT) + 1, (data.offset ?? offset) >= 200 ? " \xB7 offset capped at 200 — refine filters" : "", skippedCount > 0 && ` \xB7 ${skippedCount} skipped (see below)`), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-2" }, /* @__PURE__ */ React.createElement(
     "button",
     {
       className: "term-btn-ghost text-xs",
@@ -160,8 +162,9 @@ function ScreenerPage() {
     {
       className: "term-btn-ghost text-xs",
       type: "button",
-      disabled: (data.offset ?? offset) + data.count >= (data.filtered_total ?? data.count) || screen.isFetching,
-      onClick: () => setOffset((o) => o + SCREENER_LIMIT),
+      disabled: (data.offset ?? offset) + data.count >= (data.filtered_total ?? data.count) || screen.isFetching || (data.offset ?? offset) >= 200,
+      onClick: () => setOffset((o) => Math.min(200, o + SCREENER_LIMIT)),
+      title: (data.offset ?? offset) >= 200 ? "Offset capped at 200 by the backend — refine filters to narrow beyond 220 rows." : void 0,
       "aria-label": "Next screener page"
     },
     "NEXT \u2192"

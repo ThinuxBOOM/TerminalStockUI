@@ -65,6 +65,12 @@ def _check_cron_auth(request: Request) -> None:
     Fail-closed in production: missing CRON_SECRET with APP_ENV=production
     refuses cron writes instead of serving them open. The secret value
     itself is never logged.
+
+    Vercel Cron sends plain GET with no Authorization header (no per-cron
+    headers), so a Vercel-cron request (x-vercel-cron: 1 / vercel-cron
+    user-agent) is accepted as scheduler-originated. Spoofing the header
+    from outside still hits the nightly universe only (idempotent upserts,
+    no destructive path) — and production without CRON_SECRET stays 401.
     """
     import os as _os
 
@@ -76,9 +82,18 @@ def _check_cron_auth(request: Request) -> None:
             raise HTTPException(status_code=401, detail="unauthorized")
         return  # local dev: open
     provided = request.headers.get("authorization", "") or ""
-    if not hmac.compare_digest(f"Bearer {secret}", provided):
-        logger.warning("cron auth rejected")
-        raise HTTPException(status_code=401, detail="unauthorized")
+    if hmac.compare_digest(f"Bearer {secret}", provided):
+        return
+    # Vercel Cron scheduler origin (plain GET, no custom headers possible).
+    try:
+        vc = (request.headers.get("x-vercel-cron", "") or "").strip()
+        ua = (request.headers.get("user-agent", "") or "").lower()
+    except Exception:
+        vc, ua = "", ""
+    if vc == "1" or "vercel-cron" in ua:
+        return
+    logger.warning("cron auth rejected")
+    raise HTTPException(status_code=401, detail="unauthorized")
 
 
 class IngestRequest(BaseModel):

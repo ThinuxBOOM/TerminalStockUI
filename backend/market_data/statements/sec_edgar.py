@@ -44,8 +44,18 @@ SEED_CIK: dict[str, int | None] = {
     "AAPL": 320193,
     "MSFT": 789019,
     "NVDA": 1045810,
+    "TSLA": 1318605,
+    "GOOGL": 1652044,
+    "AMZN": 1018724,
+    "META": 1326801,
     "JPM": 19617,
     "AAP": 931244,
+    # ETFs / index proxies have no CIK by design (documented, not missing).
+    "SPY": None,
+    "QQQ": None,
+    "EWQ": None,
+    "EWN": None,
+    "EWK": None,
 }
 
 

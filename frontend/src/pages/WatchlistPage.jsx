@@ -15,12 +15,22 @@ function normalizeSymbolInput(v) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
 }
 async function fetchNativeQuotes(symbols, signal) {
+  // Per-row error preserved (not swallowed to null) so rows can render a
+  // retry with the backend detail instead of a bare "unavailable".
   const settled = await Promise.all(
     symbols.map(async (s) => {
       try {
         return await getQuote(s, void 0, { signal });
-      } catch {
-        return null;
+      } catch (err) {
+        return {
+          symbol: s,
+          price: null,
+          currency: null,
+          market_state: null,
+          instrument: null,
+          provenance: null,
+          _error: err instanceof Error ? err.message : String(err ?? "quote failed"),
+        };
       }
     })
   );
@@ -54,10 +64,11 @@ function WatchlistPage() {
   });
   const fxProvenance = rankQuery.data?.fx_provenance ?? null;
   const fxFresh = rankQuery.data ? isFreshFxProvenance(fxProvenance) : false;
-  const gated = rankQuery.isError || !rankQuery.data || !fxFresh;
+  const rankLoading = rankQuery.isLoading && !rankQuery.data;
+  const gated = !rankLoading && (rankQuery.isError || !rankQuery.data || !fxFresh);
   const visibleSymbols = useMemo(
-    () => symbols.slice(0, MAX_WATCHLIST_ROWS),
-    [symbols]
+    () => sortedSymbols.slice(0, MAX_WATCHLIST_ROWS),
+    [sortedSymbols]
   );
   const symbolsOverflow = symbols.length > visibleSymbols.length;
   const rankedRows = useMemo(() => {
@@ -158,7 +169,7 @@ function WatchlistPage() {
     }
     return /* @__PURE__ */ React.createElement("ul", { className: "term-panel-hero divide-y divide-term-border" }, symbolsOverflow && /* @__PURE__ */ React.createElement("li", { className: "p-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleSymbols.length, " of ", symbols.length, " \u2014 remove symbols to narrow the list."), visibleSymbols.map((sym, i) => {
       const q = rows[i] ?? null;
-      if (!q) {
+      if (!q || q._error || q.price === null || q.price === void 0) {
         return /* @__PURE__ */ React.createElement("li", { key: sym, className: "flex items-center justify-between p-3 even:bg-term-panel2 transition-colors duration-150" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(sym)}`, className: "font-bold text-term-green hover:underline" }, sym), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, "unavailable")), /* @__PURE__ */ React.createElement(
           "button",
           {
@@ -170,7 +181,7 @@ function WatchlistPage() {
           "REMOVE"
         ));
       }
-      return /* @__PURE__ */ React.createElement("li", { key: `${sym}-${q.instrument?.exchange_mic ?? ""}`, className: "p-3 even:bg-term-panel2 transition-colors duration-150" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(q.symbol)}`, className: "font-bold text-term-green hover:underline" }, q.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, q.instrument?.company_name ?? "", " ", q.instrument?.exchange_mic ? `\xB7 ${q.instrument.exchange_mic}` : "", " ", q.currency ? `\xB7 ${q.currency}` : ""), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-sm" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: q.price, currency: q.currency ?? "USD" })), /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.market_state, provenance: q.provenance }))), /* @__PURE__ */ React.createElement(
+      return /* @__PURE__ */ React.createElement("li", { key: `${sym}-${q.instrument?.exchange_mic ?? ""}`, className: "p-3 even:bg-term-panel2 transition-colors duration-150" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(q.symbol)}`, className: "font-bold text-term-green hover:underline" }, q.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, q.instrument?.company_name ?? "", " ", q.instrument?.exchange_mic ? `\xB7 ${q.instrument.exchange_mic}` : "", " ", q.currency ? `\xB7 ${q.currency}` : ""), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-sm" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: q.price, currency: q.currency ?? null })), /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.market_state, provenance: q.provenance }))), /* @__PURE__ */ React.createElement(
         "button",
         {
           className: "term-btn-ghost text-xs",

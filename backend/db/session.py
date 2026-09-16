@@ -34,7 +34,20 @@ _session_factories_by_url: dict[str, object] = {}
 def database_url() -> str:
     raw = os.getenv("DATABASE_URL", "")
     text = (raw or "").strip()
-    return text or "sqlite:///./onemarket.db"
+    if not text:
+        # Fail-closed in production/serverless: an ephemeral SQLite file on
+        # Vercel (read-only fs, per-invocation) would serve an empty DB and
+        # fan out into a live-fetch storm. Require DATABASE_URL when
+        # APP_ENV=production or VERCEL=1; local dev/tests keep the file fallback.
+        try:
+            app_env = os.getenv("APP_ENV", "").strip().lower()
+            vercel = os.getenv("VERCEL", "").strip() == "1"
+        except Exception:
+            app_env, vercel = "", False
+        if app_env == "production" or vercel:
+            raise RuntimeError("DATABASE_URL is required in production (no SQLite fallback on serverless)")
+        return "sqlite:///./onemarket.db"
+    return text
 
 
 def _is_serverless_postgres(url: str) -> bool:

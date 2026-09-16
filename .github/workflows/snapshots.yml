@@ -1,7 +1,7 @@
 # OneMarket Analyzer — market snapshot schedule (GitHub Actions)
 #
 # Why Actions and not another Vercel cron: Hobby plans cap cron slots (both
-# are taken: /api/cron/ingest 01:00, /api/cron/calibrate 02:00 UTC), and
+# are taken: /api/cron/ingest 05:30, /api/cron/calibrate 06:30 UTC), and
 # snapshots want hourly cadence this schedule provides.
 # What it does: GET /api/cron/snapshot captures one compressed 1d snapshot
 # per universe symbol (whatever feed served the bars — Alpaca for US when
@@ -36,7 +36,7 @@ jobs:
           APP_URL="${APP_URL%/}"
           echo "Target host check only (secret never printed):"
           printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
-          code=$(curl -s -o /tmp/snap.json -w "%{http_code}" \
+          code=$(curl -s --max-time 55 -o /tmp/snap.json -w "%{http_code}" \
             -H "Authorization: Bearer $CRON_SECRET" \
             "$APP_URL/api/cron/snapshot")
           echo "HTTP status: $code"

@@ -113,14 +113,17 @@ function isValidCandle(c) {
 // last close always tracks the latest bar. O(n), no synthetic prices.
 function decimateCandles(candles, max) {
   const cap = max || MAX_DISPLAY_CANDLES;
-  if (candles.length <= cap) return candles;
-  const bucketSize = candles.length / cap;
+  const sorted = [...(Array.isArray(candles) ? candles : [])].sort((a, b) =>
+    String(a?.time ?? "") < String(b?.time ?? "") ? -1 : String(a?.time ?? "") > String(b?.time ?? "") ? 1 : 0
+  );
+  if (sorted.length <= cap) return sorted;
+  const bucketSize = sorted.length / cap;
   const out = [];
   for (let b = 0; b < cap; b += 1) {
     const start = Math.floor(b * bucketSize);
-    const end = b === cap - 1 ? candles.length : Math.floor((b + 1) * bucketSize);
+    const end = b === cap - 1 ? sorted.length : Math.floor((b + 1) * bucketSize);
     if (end <= start) continue;
-    const slice = candles.slice(start, end);
+    const slice = sorted.slice(start, end);
     let high = -Infinity;
     let low = Infinity;
     for (const c of slice) {
@@ -436,12 +439,17 @@ function PriceChart({
   }, [indicators, visibleOscKeys, histVisible, hasOscData, showOscPane]);
 
   // Loading with no live bars yet: skeleton frame - never synthetic OHLC
-  // that could be mistaken for market data.
+  // that could be mistaken for market data. Separate empty (no error) from
+  // error so a null-error empty never renders the word "unavailable" as if
+  // it were a failure, and vice versa.
   if (!live && loading && !error) {
     return /* @__PURE__ */ h(Skeleton, { label: `loading live bars for ${symbol}…`, lines: 8, className: "min-h-[300px]" });
   }
-  if (!live && !loading) {
-    return /* @__PURE__ */ h("div", { role: "status" }, /* @__PURE__ */ h("p", { className: "py-8 text-center text-xs text-term-muted" }, "Price history unavailable —", " ", error || "the bars endpoint returned no candles for this symbol.", " No placeholder is shown in place of market data."), /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, "source: GET /api/market_data/bars · symbol ", symbol), provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance })));
+  if (!live && !loading && error) {
+    return /* @__PURE__ */ h("div", { role: "alert" }, /* @__PURE__ */ h("p", { className: "py-8 text-center text-xs text-term-muted" }, "Price history unavailable —", " ", error, " No placeholder is shown in place of market data."), /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, "source: GET /api/market_data/bars · symbol ", symbol), provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance })));
+  }
+  if (!live && !loading && !error) {
+    return /* @__PURE__ */ h("div", { role: "status" }, /* @__PURE__ */ h("p", { className: "py-8 text-center text-xs text-term-muted" }, "No price history returned — the bars endpoint returned no candles for this symbol (empty, not an error)."), /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, "source: GET /api/market_data/bars · symbol ", symbol), provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance })));
   }
 
   const legend = legendEntries.length > 0 ? /* @__PURE__ */ h(
@@ -489,6 +497,7 @@ function PriceChart({
   return /* @__PURE__ */ h(
     "div",
     null,
+    loading && live ? /* @__PURE__ */ h("p", { className: "mb-1 text-[11px] text-term-muted", role: "status" }, "refreshing…") : null,
     indicatorsLoading && !hasPriceOverlayData && priceOverlaysRequested && live ? /* @__PURE__ */ h(Skeleton, { label: `loading overlays for ${symbol}…`, lines: 1 }) : null,
     indicatorStatus,
     /* @__PURE__ */ h("div", { className: "relative" },

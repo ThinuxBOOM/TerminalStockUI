@@ -411,15 +411,46 @@ def _scan_mic(
     # Bounded parallel fan-out (quote + 5-bar fetch per symbol are
     # independent). Sequential per-market scans held the request thread for
     # the full universe; 8 workers cut wall time ~8x with identical rows.
+    # Per-future 12s timeout: one hung Yahoo quote must degrade to skipped,
+    # never hold the Vercel function to its 60s kill (then every symbol 502s).
     workers = max(1, min(8, len(universe) or 1))
     local_skipped: list[dict] = []
     try:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for kind, payload in pool.map(_one, universe):
+        from concurrent.futures import as_completed as _as_completed
+
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        with _TPE(max_workers=workers) as pool:
+            futs = {pool.submit(_one, inst): inst for inst in universe}
+            for fut in _as_completed(futs, timeout=45):
+                inst = futs[fut]
+                try:
+                    kind, payload = fut.result(timeout=12)
+                except Exception as exc:
+                    try:
+                        sk = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
+                    except Exception:
+                        sk = "UNKNOWN"
+                    local_skipped.append({"symbol": sk, "mic": mic, "reason": f"TimeoutError: {type(exc).__name__}"})
+                    continue
                 if kind == "ok" and isinstance(payload, dict):
                     rows.append(payload)
                 elif isinstance(payload, dict):
                     local_skipped.append(payload)
+            # Any futures still pending after the 45s batch budget: cancel
+            # and mark skipped so the request returns instead of hanging.
+            for fut, inst in futs.items():
+                if not fut.done():
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
+                    try:
+                        sk = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
+                    except Exception:
+                        sk = "UNKNOWN"
+                    if not any(s.get("symbol") == sk for s in local_skipped):
+                        local_skipped.append({"symbol": sk, "mic": mic, "reason": "TimeoutError: batch budget"})
     except Exception:
         for inst in universe:
             kind, payload = _one(inst)

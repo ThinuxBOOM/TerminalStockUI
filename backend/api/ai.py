@@ -118,8 +118,13 @@ def _persist_ledger(
                 db.close()
             except Exception:
                 pass
-    except Exception:
-        pass
+    except Exception as exc:
+        # Best-effort ledger must never be silent: DB-down loss is logged so
+        # the audit gap is visible instead of vanishing.
+        try:
+            logger.warning("ai ledger persist missed provider=%s profile=%s: %s", provider, profile, type(exc).__name__)
+        except Exception:
+            pass
 
 
 def get_ai_router() -> AIRouter:

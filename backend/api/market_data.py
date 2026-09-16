@@ -182,18 +182,34 @@ def market_indicators(
         raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="indicators failed")) from exc
     rows = payload.get("bars", []) if isinstance(payload, dict) else []
     provenance = dict(payload.get("provenance", {})) if isinstance(payload, dict) else {}
+    # Drop malformed rows before framing (vendor gaps must degrade, not 502).
+    try:
+        clean: list[dict] = []
+        for r in rows:
+            try:
+                if not isinstance(r, dict):
+                    continue
+                import math as _math
+                if not _math.isfinite(float(r.get("close"))):  # type: ignore[arg-type]
+                    continue
+                clean.append(r)
+            except (TypeError, ValueError):
+                continue
+        rows = clean
+    except Exception:
+        pass
     try:
         import pandas as _pd
 
         frame = _pd.DataFrame(
             {
-                "open": [r["open"] for r in rows],
-                "high": [r["high"] for r in rows],
-                "low": [r["low"] for r in rows],
-                "close": [r["close"] for r in rows],
-                "volume": [float(r["volume"] or 0) for r in rows],
+                "open": [r.get("open") for r in rows],
+                "high": [r.get("high") for r in rows],
+                "low": [r.get("low") for r in rows],
+                "close": [r.get("close") for r in rows],
+                "volume": [float(r.get("volume") or 0) for r in rows],
             },
-            index=_pd.to_datetime([r["ts"] for r in rows]) if rows else [],
+            index=_pd.to_datetime([r.get("ts") for r in rows]) if rows else [],
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"indicators frame failed: {exc}") from exc

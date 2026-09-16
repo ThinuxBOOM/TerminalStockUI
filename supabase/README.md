@@ -9,7 +9,8 @@ This folder owns the Supabase Postgres target. Files:
 | `migrations/0003_alerts.sql` | alert rules + fired-alert events |
 | `migrations/0004_provider_secrets.sql` | encrypted provider keys + monthly budget caps |
 | `migrations/0005_quote_snapshots.sql` | last-fetched live quotes (outage fallback serves real data, not placeholders) |
-| `seed.sql` | minimal smoke-test seeds (XNAS-AAPL, XSHG-600519, XPAR-MC) |
+| `migrations/0006_health_history.sql` | provider health history + market snapshots + forecast accuracy (score/health crons) |
+| `seed.sql` | registry-parity seeds (30 rows: US/SSE/Euronext + SPY/QQQ/EWQ/EWN/EWK/000001.SS/CAC.PA/IAEX.AS; smoke minimum XNAS-AAPL, XSHG-600519, XPAR-MC) |
 
 ## 1. Create the project
 
@@ -23,15 +24,19 @@ This folder owns the Supabase Postgres target. Files:
 ## 2. Run migration + seed
 
 Option A — SQL editor (simplest): Dashboard → SQL editor → paste
-`migrations/0001_onemarket.sql` → Run → then paste `seed.sql` → Run.
+`migrations/0001_onemarket.sql` → Run → then `0002_calibration.sql` →
+`0003_alerts.sql` → `0004_provider_secrets.sql` → `0005_quote_snapshots.sql` →
+`0006_health_history.sql` in order → then paste `seed.sql` → Run.
+(0001 alone leaves calibration/alerts/snapshots/health tables missing —
+`create_all` drift without RLS/CHECKs.)
 
 Option B — psql (use the **direct** `:5432` URL for DDL, never the pooler):
 
 ```bash
-psql "$DIRECT_URL" -f supabase/migrations/0001_onemarket.sql
+for f in supabase/migrations/000*.sql; do psql "$DIRECT_URL" -f "$f"; done
 psql "$DIRECT_URL" -f supabase/seed.sql
 psql "$DIRECT_URL" -c "SELECT exchange_mic, exchange_symbol FROM instruments ORDER BY 1;"
-# expect 3 rows: XNAS/AAPL, XSHG/600519, XPAR/MC
+# expect 30 rows (smoke minimum: XNAS/AAPL, XSHG/600519, XPAR/MC)
 ```
 
 ## 3. Vercel env

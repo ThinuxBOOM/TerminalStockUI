@@ -33,7 +33,7 @@ jobs:
           APP_URL="${APP_URL%/}"
           echo "Target host check only (secret never printed):"
           printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
-          code=$(curl -s -o /tmp/retention.json -w "%{http_code}" \
+          code=$(curl -s --max-time 55 -o /tmp/retention.json -w "%{http_code}" \
             -X POST -H "Content-Type: application/json" \
             -H "Authorization: Bearer $CRON_SECRET" \
             -d '{"apply": true}' \

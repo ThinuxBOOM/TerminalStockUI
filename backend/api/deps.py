@@ -68,7 +68,7 @@ def get_market_service() -> MarketDataService:
     if _service is None:
         tracker = get_health_tracker()
         hook = _tracker_hook(tracker)
-        provider = YFinanceProvider(on_call=hook)
+        provider = YFinanceProvider(on_call=hook, timeout_s=10.0)
         # Milestone 0 chain: Alpaca live US (keys via env; unconfigured ->
         # flagged stubs). Each has an independent breaker; failures never
         # take down yfinance.

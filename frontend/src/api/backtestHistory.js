@@ -44,13 +44,16 @@ function normalizeRun(raw) {
     ...reliability ? { reliability } : {}
   };
 }
-async function getBacktestHistory(symbol, includeReliability = true) {
+async function getBacktestHistory(symbol, includeReliability = true, opts = {}) {
   const sym = normalizeSymbolParam(symbol);
   if (!sym) return [];
+  const signal = opts?.signal;
   return coalesceInflight(`backtest-history:${sym}:${includeReliability}`, async () => {
     try {
       const { data } = await api.get(`/api/backtest/${encodeURIComponent(sym)}`, {
-        params: { include_reliability: includeReliability }
+        params: { include_reliability: includeReliability },
+        timeout: 15000,
+        ...(signal ? { signal } : {})
       });
       const raw = data ?? {};
       const listRaw = Array.isArray(data) ? data : Array.isArray(raw.runs) ? raw.runs : Array.isArray(raw.results) ? raw.results : Array.isArray(raw.history) ? raw.history : [];

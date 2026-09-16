@@ -1,6 +1,7 @@
 import React, { memo, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getQuote } from "../api/client";
+import { extractBackendDetail } from "../api/client";
 import {
   ALL_ASPI_MICS,
   ASPI_BENCHMARKS,
@@ -56,16 +57,7 @@ function signedPct(v) {
 }
 
 function errorMessage(err, fallback) {
-  if (err instanceof Error && err.message) return err.message;
-  const e = err;
-  const data = e?.response?.data;
-  if (typeof data === "string" && data) return data;
-  if (data && typeof data === "object") {
-    const detail = data.detail ?? data.message;
-    if (typeof detail === "string" && detail) return detail;
-  }
-  if (typeof e?.message === "string" && e.message) return e.message;
-  return fallback;
+  return extractBackendDetail(err, fallback);
 }
 
 // Pure SVG line/area chart (same visual language as MarketGraphs.jsx).
@@ -73,7 +65,14 @@ function errorMessage(err, fallback) {
 // `color` overrides the up/down green/red — Top-20 composites pass term-cyan
 // so the index line never reads as a single-security move.
 function IndexLineSvg({ points, ariaSummary, valueLabel = "value", color = null }) {
-  const rows = useMemo(() => (Array.isArray(points) ? points : []), [points]);
+  const rowsRaw = useMemo(() => (Array.isArray(points) ? points : []), [points]);
+  // Pre-filter non-finite closes BEFORE building the SVG path: the old code
+  // filtered vals for min/max but built `d` from unfiltered rows, so one
+  // NaN close produced `path="…NaN"` and broke the entire line silently.
+  const rows = useMemo(
+    () => rowsRaw.filter((p) => Number.isFinite(Number(p?.close ?? p?.value))),
+    [rowsRaw]
+  );
   const W = 560;
   const H = 200;
   const padL = 52;
@@ -171,8 +170,9 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
     retry: false,
     staleTime: 30000,
   });
-  const displayCurrency = quote.data?.currency ?? cfg?.currency ?? "USD";
+  const displayCurrency = quote.data?.currency ?? cfg?.currency ?? null;
   const currencyKnown = Boolean(quote.data?.currency);
+  const quoteError = quote.isError ? errorMessage(quote.error, "quote unavailable") : null;
   const badgeProvenance = quote.data?.provenance ?? series.data?.provenance ?? null;
 
   if (!cfg) {
@@ -217,11 +217,14 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
       </div>
 
       <div className="mt-2">
-        {series.isLoading && <Skeleton label={`loading ${cfg.mic} index bars…`} lines={4} />}
+        {(series.isLoading || (series.isFetching && !series.data)) && <Skeleton label={`loading ${cfg.mic} index bars…`} lines={4} />}
+        {series.isFetching && series.data && (
+          <p className="mb-1 text-[11px] text-term-muted" role="status">refreshing…</p>
+        )}
         {series.isError && (
           <ErrorState
             title={`${cfg.mic} index unavailable`}
-            detail={errorMessage(series.error, `GET /api/market_data/bars failed for ${cfg.indexSymbol}.`)}
+            detail={errorMessage(series.error, `GET /api/market_data/bars failed for ${cfg.indexSymbol} (cold start ~20s native + 30s chain — retry; warm cache is fast).`)}
             onRetry={() => void series.refetch()}
           />
         )}
@@ -251,6 +254,11 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
         )}
       </div>
 
+      {quoteError && (
+        <p className="mt-1 text-[11px] text-term-amber" role="status" title={quoteError}>
+          Quote for {usedSymbol ?? cfg.indexSymbol} unavailable — showing venue-currency close ({quoteError.slice(0, 120)}).
+        </p>
+      )}
       {badgeProvenance && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <MarketStateBadge state={quote.data?.market_state ?? null} provenance={badgeProvenance} />
@@ -275,10 +283,11 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
 // the liquidity endpoint serves, screener-rank fallback otherwise) +
 // equal-weighted rebased line + native-currency constituents table.
 // No FX ranking anywhere: ordering is within one market only.
-function Top20AspiChart({ mic, userId = null, tier = null }) {
+function Top20AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" }) {
   const cfg = benchmarkForMic(mic);
   const [showLine, setShowLine] = useState(false);
   const [weighting, setWeighting] = useState("equal");
+  const [tf, setTf] = useState(ASPI_TIMEFRAMES.includes(defaultTimeframe) ? defaultTimeframe : "1d");
   const constituents = useQuery({
     queryKey: top20CacheKey(cfg?.mic ?? mic, userId, tier),
     queryFn: ({ signal }) => getTop20Constituents(cfg?.mic ?? mic, { userId, tier, signal }),
@@ -303,8 +312,8 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
     return any ? out : null;
   }, [rows]);
   const bars = useQuery({
-    queryKey: [...top20CacheKey(cfg?.mic ?? mic, userId, tier), "bars", "1d"],
-    queryFn: ({ signal }) => getTop20Bars(symbols, "1d", { signal }),
+    queryKey: [...top20CacheKey(cfg?.mic ?? mic, userId, tier), "bars", tf, [...symbols].sort().join(",")],
+    queryFn: ({ signal }) => getTop20Bars(symbols, tf, { signal }),
     enabled: showLine && symbols.length > 0,
     retry: false,
     staleTime: 120000,
@@ -315,10 +324,20 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
   );
   const compositeProvenance = useMemo(() => {
     if (!bars.data) return null;
-    const base = combineAspiProvenance(
-      bars.data.series.map((s) => s.provenance).filter(Boolean),
-      `aspi-top20-index:${cfg?.mic ?? mic}`
-    );
+    const present = bars.data.series.map((s) => s.provenance).filter(Boolean);
+    // All-provenance-missing must not synthesize a clean envelope: degrade
+    // to fallback_used + grade D so the outage is visible, not hidden.
+    const base =
+      present.length === 0
+        ? {
+            source: `aspi-top20-index:${cfg?.mic ?? mic}`,
+            as_of: new Date().toISOString(),
+            delay_minutes: -1,
+            quality_grade: "D",
+            fallback_used: true,
+            missing_fields: ["provenance"],
+          }
+        : combineAspiProvenance(present, `aspi-top20-index:${cfg?.mic ?? mic}`);
     const isCap = composite?.weighting === "cap-weighted";
     const missing = new Set([...(base.missing_fields ?? []), ...(isCap ? [] : ["market-cap-weights"])]);
     return { ...base, source: `${base.source}+${isCap ? "cap-weighted" : "equal-weighted"}`, missing_fields: [...missing] };
@@ -348,6 +367,19 @@ function Top20AspiChart({ mic, userId = null, tier = null }) {
       {constituents.data?.methodologyNote && (
         <p className="mt-1 text-[10px] text-term-muted">{constituents.data.methodologyNote}</p>
       )}
+      <div className="mt-2 flex gap-1" role="group" aria-label={`${cfg.mic} Top-20 timeframe`}>
+        {ASPI_TIMEFRAMES.map((t) => (
+          <button
+            key={t}
+            type="button"
+            className={`rounded border px-2 py-0.5 text-[11px] ${t === tf ? "border-term-green text-term-green" : "border-term-border text-term-muted"}`}
+            aria-pressed={t === tf}
+            onClick={() => setTf(t)}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
 
       <div className="mt-2">
         {constituents.isLoading && <Skeleton label={`loading ${cfg.mic} top 20…`} lines={5} />}

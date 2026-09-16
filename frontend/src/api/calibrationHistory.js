@@ -70,16 +70,17 @@ function extractList(data) {
   }
   return [];
 }
-async function getCalibrationHistory(symbol, horizon, limit = 20) {
+async function getCalibrationHistory(symbol, horizon, limit = 20, opts = {}) {
   const sym = normalizeSymbolParam(symbol);
   const h = Number(horizon);
   if (!sym || !Number.isFinite(h)) return [];
   const lim = Number.isFinite(Number(limit)) ? Math.min(100, Math.max(1, Number(limit))) : 20;
+  const signal = opts?.signal;
   return coalesceInflight(`calibration-history:${sym}:${h}:${lim}`, async () => {
     try {
       const { data } = await api.get(
         `/api/forecast/${encodeURIComponent(sym)}/calibration/history`,
-        { params: { horizon: h, limit: lim } }
+        { params: { horizon: h, limit: lim }, timeout: 15000, ...(signal ? { signal } : {}) }
       );
       const out = [];
       for (const row of extractList(data)) {

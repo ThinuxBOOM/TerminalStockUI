@@ -27,7 +27,7 @@ function useMarketLiquidity() {
     queryFn: getMarketsOverview,
     staleTime: 120000,
     gcTime: 600000,
-    retry: 1,
+    retry: false,
   });
 }
 
@@ -39,7 +39,7 @@ function useMarketDetail(mic, enabled) {
     enabled,
     staleTime: 120000,
     gcTime: 600000,
-    retry: 1,
+    retry: false,
   });
 }
 

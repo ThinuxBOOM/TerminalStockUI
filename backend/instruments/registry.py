@@ -44,6 +44,16 @@ SEED_INSTRUMENTS: list[Instrument] = [
           isin="US5949181045", sector="Technology"),
     _inst("XNAS", "NVDA", "NVIDIA Corporation", "USD", "US", "America/New_York",
           isin="US67066G1040", sector="Technology"),
+    _inst("XNAS", "TSLA", "Tesla, Inc.", "USD", "US", "America/New_York",
+          isin="US88160R1014", sector="Consumer Cyclical"),
+    _inst("XNAS", "GOOGL", "Alphabet Inc.", "USD", "US", "America/New_York",
+          isin="US02079K3059", sector="Technology"),
+    _inst("XNAS", "AMZN", "Amazon.com, Inc.", "USD", "US", "America/New_York",
+          isin="US0231351067", sector="Consumer Cyclical"),
+    _inst("XNAS", "META", "Meta Platforms, Inc.", "USD", "US", "America/New_York",
+          isin="US30303M1027", sector="Technology"),
+    _inst("XNAS", "AVGO", "Broadcom Inc.", "USD", "US", "America/New_York",
+          isin="US11135F1012", sector="Technology"),
     # Ticker-ambiguity fixtures: AAP (Advance Auto Parts, NYSE) vs AAPL.
     _inst("XNYS", "AAP", "Advance Auto Parts, Inc.", "USD", "US", "America/New_York",
           isin="US00751Y1064", sector="Consumer Cyclical"),
@@ -76,6 +86,26 @@ SEED_INSTRUMENTS: list[Instrument] = [
           isin="BE0003739530", sector="Healthcare"),
     _inst("XBRU", "ABI", "Anheuser-Busch InBev SA/NV", "EUR", "BE", "Europe/Brussels",
           isin="BE0974293251", sector="Consumer Defensive"),
+    # Index proxies (GET /api/markets/{mic}/index serves from DB; without
+    # these every index card pays a live 2y Yahoo fetch from serverless and
+    # 502s under throttle. US ETFs first: Euronext tries EWQ/EWN before
+    # CAC.PA/IAEX.AS per BENCHMARKS order.)
+    _inst("XNAS", "SPY", "SPDR S&P 500 ETF Trust", "USD", "US", "America/New_York",
+          sector="ETF"),
+    _inst("XNAS", "QQQ", "Invesco QQQ Trust", "USD", "US", "America/New_York",
+          sector="ETF"),
+    _inst("XNAS", "EWQ", "iShares MSCI France ETF", "USD", "US", "America/New_York",
+          sector="ETF"),
+    _inst("XNAS", "EWN", "iShares MSCI Netherlands ETF", "USD", "US", "America/New_York",
+          sector="ETF"),
+    _inst("XNAS", "EWK", "iShares MSCI Belgium ETF", "USD", "US", "America/New_York",
+          sector="ETF"),
+    _inst("XSHG", "000001", "SSE Composite Index", "CNY", "CN", "Asia/Shanghai",
+          sector="Index"),
+    _inst("XPAR", "CAC", "CAC 40 Index", "EUR", "FR", "Europe/Paris",
+          sector="Index"),
+    _inst("XAMS", "IAEX", "iShares AEX UCITS ETF", "EUR", "NL", "Europe/Amsterdam",
+          sector="ETF"),
 ]
 
 

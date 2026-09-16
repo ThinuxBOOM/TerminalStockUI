@@ -5,9 +5,10 @@ import StatusPill from "./StatusPill";
 import { SkeletonLine } from "./Skeleton";
 
 // Full-width market-status strip: one compact pill per venue in a
-// responsive grid (2 / 3 / 6 columns). Replaces the old narrow 1-column
-// card that left a two-column hole beside it on desktop. Short venue names
-// (never truncated) + live state badges; numbers stay on the liquidity
+// responsive grid (2 / 3 / 6 columns). Probe symbols (JPM/AAPL/...) are
+// liveness probes only — a delisted/halted probe reads "unavailable" without
+// implying the venue is down; GET /api/markets/overview is the authoritative
+// venue state (see MarketLiquidityPanel). Numbers stay on the liquidity
 // panel below so this strip scans in one glance.
 const VENUES = [
   { mic: "XNYS", short: "NYSE", label: "NYSE (XNYS)", symbol: "JPM" },
@@ -42,7 +43,17 @@ const VenuePill = memo(function VenuePill({ short, mic, symbol }) {
             <SkeletonLine />
           </span>
         )}
-        {q.isError && <span className="text-xs text-term-muted">unavailable</span>}
+        {q.isError && (
+          <button
+            type="button"
+            className="text-xs text-term-muted underline decoration-dotted hover:text-term-text"
+            title={q.error instanceof Error ? q.error.message : "Probe quote failed — venue may still be live (see overview). Click to retry."}
+            onClick={() => void q.refetch()}
+            aria-label={`Retry ${symbol} probe`}
+          >
+            unavailable — retry
+          </button>
+        )}
         {q.data && (
           <StatusPill
             marketState={q.data.market_state}

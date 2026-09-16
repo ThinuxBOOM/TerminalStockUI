@@ -28,6 +28,20 @@ services:
         generateValue: true # openssl rand -hex 32 equivalent; rotating invalidates stored provider keys
       - key: CRON_SECRET
         sync: false # REQUIRED in prod: Bearer for GET/POST /api/cron/{ingest,calibrate,evaluate}; empty locally
+      - key: INGEST_SYMBOLS
+        sync: false # OPTIONAL comma-list overriding the ingest universe (max 25, else DEFAULT_UNIVERSE in backend/market_data/ingest.py)
+      - key: INGEST_BAR_CHAIN
+        sync: false # OPTIONAL bar-chain override (default: alpaca->yfinance->stooq chain)
+      - key: EXTRA_SYMBOLS
+        sync: false # OPTIONAL registry additions without editing config (see backend/instruments/config.py)
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: TWELVEDATA_API_KEY
+        sync: false
       - key: REDIS_URL
         sync: false # OPTIONAL — leave empty for in-memory cache (no local disk). Or Upstash URL.
       - key: UPSTASH_REDIS_URL

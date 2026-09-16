@@ -63,7 +63,7 @@ function errorMessage(err) {
 // one card's graphs doesn't re-render every other card.
 // Fail-closed: stale/fallback provenance never renders a table —
 // isStaleLiquidity is an error gate to ErrorState, never a badge+table.
-function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
+function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history, onRetry }) {
   if (isStaleLiquidity(m?.provenance)) {
     return (
       <article
@@ -77,6 +77,7 @@ function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
           <ErrorState
             title="Market data unavailable"
             detail="Market data unavailable (no live feed). Retry."
+            onRetry={onRetry ? () => void onRetry() : undefined}
           />
         </div>
       </article>
@@ -165,7 +166,7 @@ function MarketCardInner({ m, maxTurnover, maxVolume, maxRange, history }) {
 
 const MarketCard = memo(MarketCardInner);
 
-function MarketCardWithGraphs({ m, maxTurnover, maxVolume, maxRange }) {
+function MarketCardWithGraphs({ m, maxTurnover, maxVolume, maxRange, onRetry }) {
   const [expanded, setExpanded] = useState(false);
   const detail = useMarketDetail(m.mic, expanded);
   // History is DB-only + cached server-side: eager load for the sparkline.
@@ -181,6 +182,7 @@ function MarketCardWithGraphs({ m, maxTurnover, maxVolume, maxRange }) {
         maxVolume={maxVolume}
         maxRange={maxRange}
         history={histQ.data}
+        onRetry={onRetry}
       />
       <button
         type="button"
@@ -308,6 +310,7 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
             maxTurnover={maxTurnover}
             maxVolume={maxVolume}
             maxRange={maxRange}
+            onRetry={onRetry}
           />
         ))}
       </div>

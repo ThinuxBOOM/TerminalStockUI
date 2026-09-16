@@ -1,7 +1,7 @@
 # OneMarket Analyzer — alert evaluation schedule (GitHub Actions)
 #
 # Why Actions and not a third Vercel cron: Hobby plans cap cron slots (both
-# are taken: /api/cron/ingest 01:00, /api/cron/calibrate 02:00 UTC), and
+# are taken: /api/cron/ingest 05:30, /api/cron/calibrate 06:30 UTC), and
 # price alerts want intraday cadence this schedule provides.
 # Setup (once): GitHub repo -> Settings -> Secrets and variables -> Actions ->
 #   New repository secret: APP_URL (e.g. https://terminalstockui.vercel.app,
@@ -30,7 +30,7 @@ jobs:
           APP_URL="${APP_URL%/}"
           echo "Target host check only (secret never printed):"
           printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
-          code=$(curl -s -o /tmp/eval.json -w "%{http_code}" \
+          code=$(curl -s --max-time 55 -o /tmp/eval.json -w "%{http_code}" \
             -H "Authorization: Bearer $CRON_SECRET" \
             "$APP_URL/api/cron/evaluate")
           echo "HTTP status: $code"

@@ -332,6 +332,16 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
         req.validate_gap()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Alphabet consistency with quote/bars/forecast (validate_symbol rejects
+    # ^, /, _ etc. with 422 instead of a downstream 502).
+    try:
+        from backend.security.validation import validate_symbol as _vsym
+
+        req.symbol = _vsym(req.symbol, field="symbol")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         bars = market.get_bars(req.symbol, timeframe="1d", limit=req.limit)
     except HTTPException:
@@ -341,17 +351,29 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
 
         if isinstance(exc, _PE):
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if isinstance(exc, (ValueError, KeyError, TypeError)):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         raise HTTPException(status_code=502, detail=f"backtest bars failed: {exc}") from exc
     rows = bars.get("bars", []) if isinstance(bars, dict) else []
     if not rows:
-        raise HTTPException(status_code=422, detail=f"insufficient history for {req.symbol!r}: 0 bars")
+        raise HTTPException(status_code=422, detail=f"insufficient history for {req.symbol!r}: 0 bars (required_bars>=100 for walk-forward)")
     try:
         # Single-pass frame build (one loop, not five list comps).
-        recs = [
-            (r["open"], r["high"], r["low"], r["close"],
-             float(r["volume"] or 0), r["ts"])
-            for r in rows
-        ]
+        # Drop malformed rows (vendor gaps must degrade, not KeyError->502).
+        recs = []
+        for r in rows:
+            try:
+                if not isinstance(r, dict):
+                    continue
+                import math as _math
+                if not _math.isfinite(float(r.get("close"))):  # type: ignore[arg-type]
+                    continue
+                recs.append((r.get("open"), r.get("high"), r.get("low"), r.get("close"),
+                             float(r.get("volume") or 0), r.get("ts")))
+            except (TypeError, ValueError):
+                continue
+        if not recs:
+            raise HTTPException(status_code=422, detail=f"insufficient history for {req.symbol!r}: 0 usable bars (required_bars>=100 for walk-forward)")
         frame = pd.DataFrame(
             {
                 "open": [o for o, _, _, _, _, _ in recs],
@@ -365,12 +387,14 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"backtest frame failed: {exc}") from exc
+        raise HTTPException(status_code=422, detail=f"backtest frame failed: {exc}") from exc
     try:
         # ensemble-v2: ML members train on the extended frame (v2).
         _, features = build_feature_bundle(frame)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"backtest features failed: {exc}") from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"backtest features failed: {exc}") from exc
     closes_feat = frame["close"].loc[features.index]
@@ -443,11 +467,14 @@ def backtest_history(
     ``include_reliability=true`` adds the full reliability table per horizon
     (additive; default false keeps the lightweight summary shape).
     """
-    sym = (symbol or "").strip().upper()
-    if not sym:
-        raise HTTPException(status_code=422, detail="symbol must be a non-empty string")
-    if len(sym) > 32 or not all(c.isalnum() or c in "._-/=" for c in sym):
-        raise HTTPException(status_code=422, detail="symbol contains unsupported characters")
+    from backend.security.validation import validate_symbol as _vsym
+
+    try:
+        sym = _vsym(symbol, field="symbol")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         bars = market.get_bars(sym, timeframe="1d", limit=5)
         provenance = dict(bars.get("provenance", {})) if isinstance(bars, dict) else {}

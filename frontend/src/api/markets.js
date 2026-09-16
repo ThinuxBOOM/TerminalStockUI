@@ -376,17 +376,20 @@ function normalizeLiquidityHistory(raw, micFallback = "", windowFallback = "1D")
 // Fail-closed: market breadth comes from the backend liquidity endpoints
 // only. Errors propagate to ErrorState — the client never synthesizes
 // breadth figures from screener snapshots.
-async function getMarketsOverview() {
+async function getMarketsOverview(opts = {}) {
+  const signal = opts?.signal;
   return coalesceInflight("markets-overview", async () => {
-    const { data } = await api.get("/api/markets/overview", { timeout: 6e4 });
+    const { data } = await api.get("/api/markets/overview", { timeout: 3e4, ...(signal ? { signal } : {}) });
     return normalizeMarketsOverview(data);
   });
 }
-async function getMarketLiquidity(mic) {
+async function getMarketLiquidity(mic, opts = {}) {
   const upper = String(mic ?? "").trim().toUpperCase();
+  const signal = opts?.signal;
   return coalesceInflight(`market-liquidity:${upper}`, async () => {
     const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
-      timeout: 6e4
+      timeout: 3e4,
+      ...(signal ? { signal } : {})
     });
     return normalizeMarketBreadth(data, upper);
   });
@@ -399,13 +402,15 @@ async function getMarketLiquidity(mic) {
 // DB-only daily aggregates from stored 1d bars (no live fetch, cached 60s).
 // Fail-closed: normalizes via normalizeLiquidityHistory; on 404/501 or any
 // error THROWS (never returns a client-fallback placeholder).
-async function getMarketLiquidityHistory(mic, window = "1D") {
+async function getMarketLiquidityHistory(mic, window = "1D", opts = {}) {
   const upper = String(mic ?? "").trim().toUpperCase();
   const w = normalizeLiquidityHistoryWindow(window);
+  const signal = opts?.signal;
   return coalesceInflight(`market-liquidity-history:${upper}:${w}`, async () => {
     const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity/history`, {
       params: { window: w },
-      timeout: 1e4
+      timeout: 1e4,
+      ...(signal ? { signal } : {})
     });
     const norm = normalizeLiquidityHistory(data, upper, w);
     if (!norm) throw new Error(`liquidity history unavailable for ${upper} (no live feed)`);
@@ -422,10 +427,12 @@ async function getMarketTopRows(mic, opts = {}) {
   const limit = Math.min(100, Math.max(1, Number(opts?.limit ?? 20) || 20));
   const sortRaw = String(opts?.sort ?? "turnover").trim().toLowerCase();
   const sort = ["turnover", "change", "volume"].includes(sortRaw) ? sortRaw : "turnover";
+  const signal = opts?.signal;
   return coalesceInflight(`market-top:${upper}:${sort}:${limit}`, async () => {
     const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity`, {
       params: { limit, sort },
-      timeout: 6e4
+      timeout: 3e4,
+      ...(signal ? { signal } : {})
     });
     return normalizeMarketBreadth(data, upper);
   });

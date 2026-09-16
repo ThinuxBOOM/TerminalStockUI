@@ -5,6 +5,8 @@ import { displaySymbol, searchInstruments } from "../../api/client";
 import Loading from "../../components/Loading";
 import ErrorState from "../../components/ErrorState";
 import EmptyState from "../../components/EmptyState";
+// XCOL omitted intentionally until the venue is enabled in config/markets.yaml
+// (disabled probe slot — present in MARKET_LABELS/MARKET_CURRENCIES but not selectable).
 const MARKET_OPTIONS = [
   { label: "All", value: "" },
   { label: "NYSE", value: "XNYS" },
@@ -191,20 +193,20 @@ function SearchBox({
       "aria-label": "Clear recent searches"
     },
     "clear"
-  )), /* @__PURE__ */ React.createElement("div", { className: "mt-4 min-w-0" }, !submitted && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type a ticker or company name. Search is exchange-aware (XNYS / XNAS / XSHG / XPAR / XAMS / XBRU). Try ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "AAPL"), " or", " ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "Moutai"), "."), submitted && isLoading && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && data && isFetching && !isLoading && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "refreshing\u2026"), submitted && isError && data && data.length > 0 && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, `search refresh failed (${error instanceof Error ? error.message : "backend unreachable"}) \u2014 showing last loaded results.`), submitted && isError && (!data || data.length === 0) && /* @__PURE__ */ React.createElement(
+  )), /* @__PURE__ */ React.createElement("div", { className: "mt-4 min-w-0" }, !submitted && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type a ticker or company name. Search is exchange-aware (XNYS / XNAS / XSHG / XPAR / XAMS / XBRU). Try ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "AAPL"), " or", " ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "Moutai"), "."), submitted && submitted.length < 2 && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type 2+ characters to search."), submitted && submitted.length >= 2 && isLoading && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && submitted.length >= 2 && data && isFetching && !isLoading && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "refreshing\u2026"), submitted && submitted.length >= 2 && isError && data && data.length > 0 && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, `search refresh failed (${error instanceof Error ? error.message : "backend unreachable"}) \u2014 showing last loaded results.`), submitted && submitted.length >= 2 && isError && (!data || data.length === 0) && /* @__PURE__ */ React.createElement(
     ErrorState,
     {
       title: "Search unavailable",
       detail: error instanceof Error ? error.message : "Backend unreachable. Check VITE_API_BASE_URL.",
       onRetry: () => void refetch()
     }
-  ), submitted && !isLoading && !isError && (data?.length ?? 0) === 0 && /* @__PURE__ */ React.createElement(
+  ), submitted && submitted.length >= 2 && !isLoading && !isFetching && !isError && (data?.length ?? 0) === 0 && data !== void 0 && /* @__PURE__ */ React.createElement(
     EmptyState,
     {
       title: `No instruments found for \u201C${submitted}\u201D`,
       detail: "Check spelling or exchange suffix (.SS / .PA / .AS / .BR)."
     }
-  ), submitted && !isLoading && !isError && (data?.length ?? 0) > 1 && /* @__PURE__ */ React.createElement(
+  ), submitted && submitted.length >= 2 && !isLoading && !isFetching && !isError && data === void 0 && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && submitted.length >= 2 && !isLoading && !isError && (data?.length ?? 0) > 1 && /* @__PURE__ */ React.createElement(
     "div",
     {
       className: "mb-2 rounded border border-term-amber p-2 text-xs text-term-amber",
@@ -225,6 +227,7 @@ function SearchBox({
     },
     visibleResults.map((r, i) => {
       const sym = displaySymbol(r);
+      if (!sym) return null;
       const curr = (r.currency ?? "").toUpperCase();
       const active = i === activeIndex;
       return /* @__PURE__ */ React.createElement(

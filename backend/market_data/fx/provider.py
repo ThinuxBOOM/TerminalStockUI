@@ -135,7 +135,7 @@ def _fetch_ecb_table() -> tuple[dict[str, float], str | None] | None:
     except Exception:
         return None
     try:
-        resp = httpx.get(ECB_URL, timeout=60.0)
+        resp = httpx.get(ECB_URL, timeout=10.0)
         resp.raise_for_status()
         return _parse_ecb_xml(resp.text)
     except Exception:
@@ -363,7 +363,7 @@ class FXProvider:
             raise ProviderError(NAME, "httpx package unavailable") from exc
         try:
             resp = httpx.get(
-                f"{BASE_URL}/latest", params={"from": base, "to": quote}, timeout=60.0
+                f"{BASE_URL}/latest", params={"from": base, "to": quote}, timeout=10.0
             )
             resp.raise_for_status()
             data = resp.json()

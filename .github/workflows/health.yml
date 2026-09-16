@@ -1,0 +1,38 @@
+# OneMarket Analyzer — provider health probe schedule (GitHub Actions)
+#
+# Why Actions and not a Vercel cron: Hobby plans cap cron slots (both are
+# taken: /api/cron/ingest 05:30, /api/cron/calibrate 06:30 UTC). The health
+# probe appends to provider_health_history for the health dashboard.
+# Cadence: daily 08:00 UTC (after score). Manual runs via workflow_dispatch.
+# Setup (once): same APP_URL + CRON_SECRET secrets as snapshots.yml.
+
+name: Probe provider health
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+jobs:
+  health:
+    name: probe provider health
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger health probe
+        run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
+          code=$(curl -s --max-time 55 -o /tmp/health.json -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/cron/health")
+          echo "HTTP status: $code"
+          cat /tmp/health.json
+          echo ""
+          test "$code" = "200"
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

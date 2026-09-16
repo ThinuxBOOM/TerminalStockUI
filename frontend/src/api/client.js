@@ -101,8 +101,79 @@ function isEndpointMissingError(err) {
   const s = httpStatus(err);
   return s === 404 || s === 501;
 }
+// Shared backend-detail extractor: prefers the FastAPI {detail} payload over
+// the generic axios message, so 502s render the throttle/warmup hint instead
+// of "Request failed with status code 502". Gateway HTML (Vercel cold
+// start/timeout, no JSON) and timeouts get friendly text. Never throws.
+function extractBackendDetail(err, fallback = "request failed") {
+  const e = err;
+  const status = httpStatus(e);
+  try {
+    const data = e?.response?.data;
+    if (typeof data === "string" && data.trim() !== "") {
+      const t = data.trim();
+      if (t.startsWith("<") || t.length > 2000) {
+        return `Gateway ${status ?? "error"} (cold start/timeout) — retry; warm cache makes repeats fast`;
+      }
+      return t.slice(0, 300);
+    }
+    if (data && typeof data === "object") {
+      const detail = data.detail ?? data.message ?? data?.error?.message;
+      if (typeof detail === "string" && detail.trim() !== "") {
+        return detail.slice(0, 300);
+      }
+      const code = data.code ?? data?.error?.code;
+      if (typeof code === "string" && code.trim() !== "") {
+        return code.slice(0, 300);
+      }
+    }
+  } catch {
+    // fall through to message below
+  }
+  if (e?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(String(e?.message ?? ""))) {
+    return "Request timed out (cold start) — retry; warm cache makes repeats fast";
+  }
+  if (e instanceof Error && e.message) return e.message;
+  if (typeof e?.message === "string" && e.message) return e.message;
+  return fallback;
+}
 const inflight = /* @__PURE__ */ new Map();
-function coalesceInflight(key, fn) {
+function coalesceInflight(key, fn, signal) {
+  // Abort-safe: callers with different AbortSignals must never share one
+  // caller's signal (aborting one component would abort the other, and the
+  // second signal would be ignored). Explicit-signal calls bypass coalescing
+  // and run directly; signal-free calls (background/prefetch) still dedupe.
+  // Additionally, the request-scoped keys below ALWAYS bypass: their fetch
+  // fns close over a per-component AbortSignal, so sharing the first caller's
+  // promise would leak its signal to a second component even when the second
+  // caller passes no explicit third arg (legacy call sites).
+  if (signal) {
+    try {
+      if (signal.aborted) return fn();
+    } catch {
+      return fn();
+    }
+    return fn();
+  }
+  try {
+    const k = String(key ?? "");
+    if (
+      k.startsWith("quote:") ||
+      k.startsWith("bars:") ||
+      k.startsWith("chart:") ||
+      k.startsWith("forecast:") ||
+      k.startsWith("analytics:") ||
+      k.startsWith("screener:") ||
+      k.startsWith("search:") ||
+      k.startsWith("fx-rank:") ||
+      k.startsWith("backtest-history:") ||
+      k.startsWith("calibration-history:")
+    ) {
+      return fn();
+    }
+  } catch {
+    // fall through to coalesced path
+  }
   const hit = inflight.get(key);
   if (hit) return hit;
   const p = fn().finally(() => {
@@ -141,8 +212,8 @@ function normalizeQuote(raw) {
   return QuoteSchema.parse({
     symbol: r?.symbol ?? r?.ticker ?? instrument?.provider_symbol ?? instrument?.exchange_symbol ?? instrument?.symbol ?? "UNKNOWN",
     price,
-    change: r?.change !== void 0 && r?.change !== null ? Number(r.change) : void 0,
-    change_pct: r?.change_pct !== void 0 && r?.change_pct !== null ? Number(r.change_pct) : void 0,
+    change: (() => { const v = r?.change !== void 0 && r?.change !== null ? Number(r.change) : void 0; return Number.isFinite(v) ? v : void 0; })(),
+    change_pct: (() => { const v = r?.change_pct !== void 0 && r?.change_pct !== null ? Number(r.change_pct) : void 0; return Number.isFinite(v) ? v : void 0; })(),
     currency: r?.currency ?? instrument?.currency ?? void 0,
     market_state,
     instrument,
@@ -178,9 +249,10 @@ function normalizeHealthProviders(raw) {
     };
   });
 }
-async function getHealth() {
+async function getHealth(opts) {
+  const signal = opts?.signal;
   return coalesceInflight("health", async () => {
-    const { data } = await api.get("/health");
+    const { data } = await api.get("/health", { timeout: 15000, ...(signal ? { signal } : {}) });
     const raw = data ?? {};
     if (Array.isArray(raw.providers)) {
       raw.providers = normalizeHealthProviders(raw.providers);
@@ -211,7 +283,7 @@ async function searchInstruments(query, market, opts) {
   const off = Math.min(200, Math.max(0, Number(opts?.offset ?? 0) || 0));
   const params = mic && mic !== "ALL" ? { q, market: mic, limit: lim, offset: off } : { q, limit: lim, offset: off };
   return coalesceInflight(`search:${q.toLowerCase()}:${mic || "ALL"}:${lim}:${off}`, async () => {
-    const { data } = await api.get("/api/instruments/search", { params, ...signal ? { signal } : {} });
+    const { data } = await api.get("/api/instruments/search", { params, timeout: 15000, ...signal ? { signal } : {} });
     const list = Array.isArray(data) ? data : data?.results ?? data?.items ?? [];
     const out = [];
     for (const row of list) {
@@ -231,8 +303,30 @@ async function getQuote(symbol, market, opts) {
   const params = { symbol: sym };
   if (mic && mic !== "ALL") params.market = mic;
   return coalesceInflight(`quote:${sym}:${mic || "ALL"}`, async () => {
-    const { data } = await api.get("/api/market_data/quote", { params, ...signal ? { signal } : {} });
-    return normalizeQuote(data);
+    try {
+      const { data } = await api.get("/api/market_data/quote", { params, timeout: 15e3, ...signal ? { signal } : {} });
+      return normalizeQuote(data);
+    } catch (err) {
+      // Degraded quote from last bars close (502/transient only): header
+      // still renders a price instead of a full-page ErrorState.
+      const st = err?.response?.status;
+      if (st !== 502 && st !== 504) throw err;
+      try {
+        const bars = await getBars(sym, "1d", 5, opts);
+        const candles = Array.isArray(bars?.candles) ? bars.candles : [];
+        const last = candles[candles.length - 1];
+        if (last && Number.isFinite(Number(last.close))) {
+          return normalizeQuote({
+            symbol: sym,
+            price: Number(last.close),
+            currency: void 0,
+            provenance: { ...(bars?.provenance ?? {}), fallback_used: true, missing_fields: [...(bars?.provenance?.missing_fields ?? []), "quote-degraded-from-bars"] }
+          });
+        }
+      } catch {
+      }
+      throw err;
+    }
   });
 }
 function freshnessOf(p) {
@@ -599,15 +693,16 @@ function normalizeBacktest(raw, symbol, horizons) {
 }
 const BACKTEST_TIMEOUT_MS = 6e4;
 const RANK_TIMEOUT_MS = 6e4;
-async function runBacktest(symbol, horizons) {
+async function runBacktest(symbol, horizons, opts) {
   const sym = normalizeSymbolParam(symbol);
   const h = Array.isArray(horizons) ? [...horizons] : horizons;
+  const signal = opts?.signal;
   return coalesceInflight(`backtest:${sym}:${JSON.stringify(h)}`, async () => {
     try {
       const { data } = await api.post(
         "/api/backtest/run",
         { symbol: sym, horizons: h },
-        { timeout: BACKTEST_TIMEOUT_MS }
+        { timeout: BACKTEST_TIMEOUT_MS, ...(signal ? { signal } : {}) }
       );
       return normalizeBacktest(flattenBacktestRun(data, sym, h), sym, h);
     } catch (runErr) {
@@ -616,7 +711,7 @@ async function runBacktest(symbol, horizons) {
         const { data } = await api.post(
           "/api/backtest",
           { symbol: sym, horizons: h },
-          { timeout: BACKTEST_TIMEOUT_MS }
+          { timeout: BACKTEST_TIMEOUT_MS, ...(signal ? { signal } : {}) }
         );
         return normalizeBacktest(flattenBacktestRun(data, sym, h), sym, h);
       } catch {
@@ -699,13 +794,14 @@ function tryNormalizeAIOpinion(raw) {
   }
 }
 const AI_TIMEOUT_MS = 6e4;
-async function postAIInsight(symbol, profile) {
+async function postAIInsight(symbol, profile, opts) {
   const sym = normalizeSymbolParam(symbol);
+  const signal = opts?.signal;
   return coalesceInflight(`ai-insight:${sym}:${profile}`, async () => {
     const { data } = await api.post(
       "/api/ai/insight",
       { symbol: sym, profile },
-      { timeout: AI_TIMEOUT_MS }
+      { timeout: AI_TIMEOUT_MS, ...(signal ? { signal } : {}) }
     );
     return normalizeAIOpinion(data);
   });
@@ -753,15 +849,16 @@ function normalizeAIPerformance(raw) {
   }
   return out;
 }
-async function getAIPerformance() {
+async function getAIPerformance(opts) {
+  const signal = opts?.signal;
   return coalesceInflight("ai-performance", async () => {
     try {
-      const { data } = await api.get("/api/ai/providers/performance");
+      const { data } = await api.get("/api/ai/providers/performance", { timeout: 15000, ...(signal ? { signal } : {}) });
       return normalizeAIPerformance(data);
     } catch (pathErr) {
       if (!isEndpointMissingError(pathErr)) throw pathErr;
       try {
-        const { data } = await api.get("/api/ai/performance");
+        const { data } = await api.get("/api/ai/performance", { timeout: 15000, ...(signal ? { signal } : {}) });
         return normalizeAIPerformance(data);
       } catch {
         throw pathErr;
@@ -769,9 +866,10 @@ async function getAIPerformance() {
     }
   });
 }
-async function getProviderKeysStatus() {
+async function getProviderKeysStatus(opts) {
+  const signal = opts?.signal;
   return coalesceInflight("provider-keys-status", async () => {
-    const { data } = await api.get("/api/providers/keys/status");
+    const { data } = await api.get("/api/providers/keys/status", { timeout: 15000, ...(signal ? { signal } : {}) });
     const list = data?.providers;
     if (!Array.isArray(list)) return [];
     return list.map((p) => ({
@@ -782,9 +880,10 @@ async function getProviderKeysStatus() {
     }));
   });
 }
-async function getProviderBudgets() {
+async function getProviderBudgets(opts) {
+  const signal = opts?.signal;
   return coalesceInflight("provider-budgets", async () => {
-    const { data } = await api.get("/api/providers/budget");
+    const { data } = await api.get("/api/providers/budget", { timeout: 15000, ...(signal ? { signal } : {}) });
     const budgets = data?.budgets;
     if (!budgets || typeof budgets !== "object") return {};
     const out = {};
@@ -820,19 +919,22 @@ function normalizeAIHealthTest(raw, provider) {
   }
   return null;
 }
-async function testProviderHealth(provider) {
+async function testProviderHealth(provider, opts) {
   const prov = String(provider ?? "").trim();
+  const signal = opts?.signal;
   try {
-    const { data: data2 } = await api.post("/api/ai/providers/health/test", { provider: prov });
+    const { data: data2 } = await api.post("/api/ai/providers/health/test", { provider: prov }, { timeout: 15000, ...(signal ? { signal } : {}) });
     const parsed = normalizeAIHealthTest(data2, prov);
     if (parsed) return parsed;
   } catch (err) {
     if (!isEndpointMissingError(err)) throw err;
   }
+  // Body-only: the backend reads `provider` from the JSON body; sending it
+  // again as a query param risks 422 on strict validation.
   const { data } = await api.post(
     "/api/providers/health/test",
     { provider: prov },
-    { params: { provider: prov } }
+    { timeout: 15000, ...(signal ? { signal } : {}) }
   );
   const d = data ?? {};
   if (typeof d.ok === "boolean")
@@ -930,11 +1032,12 @@ function normalizeFXRate(raw, base, quote) {
     provenance: normalizeProvenance(r, "fx-api")
   });
 }
-async function getFXRate(base, quote) {
+async function getFXRate(base, quote, opts) {
   const b = ccy(base, "EUR");
   const q = ccy(quote, "USD");
+  const signal = opts?.signal;
   return coalesceInflight(`fx-rate:${b}:${q}`, async () => {
-    const { data } = await api.get("/api/fx/rate", { params: { base: b, quote: q } });
+    const { data } = await api.get("/api/fx/rate", { params: { base: b, quote: q }, timeout: 15000, ...(signal ? { signal } : {}) });
     return normalizeFXRate(data, b, q);
   });
 }
@@ -954,16 +1057,17 @@ function normalizeConvert(raw, amount, from, to) {
     provenance: normalizeProvenance(r, "fx-api")
   });
 }
-async function convertFX(amount, from, to) {
+async function convertFX(amount, from, to, opts) {
   const f = ccy(from, "EUR");
   const t = ccy(to, "USD");
   const amt = Number(amount);
+  const signal = opts?.signal;
   return coalesceInflight(`fx-convert:${amt}:${f}:${t}`, async () => {
     const { data } = await api.post("/api/fx/convert", {
       amount,
       from: f,
       to: t
-    });
+    }, { timeout: 15000, ...(signal ? { signal } : {}) });
     return normalizeConvert(data, amount, f, t);
   });
 }
@@ -1035,6 +1139,7 @@ async function rankCrossMarket(symbols, targetCcy, opts) {
     seen.add(norm);
     clean.push(norm);
   }
+  if (clean.length === 0) return { ranking: [], target_ccy: target, provenance: normalizeProvenance({}, "fx-rank") };
   const signal = opts?.signal;
   return coalesceInflight(`fx-rank:${clean.join(",")}:${target}`, async () => {
     const { data } = await api.post(
@@ -1053,9 +1158,10 @@ function numOrUndef(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : void 0;
 }
-async function getProvidersHealth() {
+async function getProvidersHealth(opts) {
+  const signal = opts?.signal;
   return coalesceInflight("providers-health", async () => {
-    const { data } = await api.get("/api/providers/health");
+    const { data } = await api.get("/api/providers/health", { timeout: 15000, ...(signal ? { signal } : {}) });
     const raw = data ?? {};
     const list = Array.isArray(data) ? data : Array.isArray(raw.providers) ? raw.providers : [];
     return list.map((row) => {
@@ -1081,7 +1187,7 @@ async function getProvidersHealth() {
     });
   });
 }
-async function getAuditForecasts(symbolOrLimit = 5, maybeLimit = 5) {
+async function getAuditForecasts(symbolOrLimit = 5, maybeLimit = 5, opts) {
   // Supports both legacy (limit) and new (symbol, limit) call shapes:
   // getAuditForecasts(5) | getAuditForecasts("AAPL") | getAuditForecasts("AAPL", 20)
   let symbol = "";
@@ -1092,11 +1198,13 @@ async function getAuditForecasts(symbolOrLimit = 5, maybeLimit = 5) {
   } else {
     limit = symbolOrLimit;
   }
+  // Third-arg opts form: getAuditForecasts("AAPL", 20, { signal }).
+  const signal = opts?.signal ?? maybeLimit?.signal;
   const n = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 5;
   const symKey = symbol || "ALL";
   return coalesceInflight(`audit-forecasts:${symKey}:${n}`, async () => {
     const params = symbol ? { symbol, limit: n } : { limit: n };
-    const { data } = await api.get("/api/audit/forecasts", { params });
+    const { data } = await api.get("/api/audit/forecasts", { params, timeout: 15000, ...(signal ? { signal } : {}) });
     const raw = data ?? {};
     const listRaw = Array.isArray(data) ? data : Array.isArray(raw.forecasts) ? raw.forecasts : Array.isArray(raw.results) ? raw.results : [];
     const forecasts = listRaw.map((f) => ({
@@ -1146,13 +1254,16 @@ function normalizeBacktestHistoryRun(raw) {
     data_version: typeof r.data_version === "string" ? r.data_version : null
   };
 }
-async function getBacktestHistory(symbol, includeReliability = true) {
+async function getBacktestHistory(symbol, includeReliability = true, opts) {
   const sym = normalizeSymbolParam(symbol);
   if (!sym) return [];
+  const signal = opts?.signal;
   return coalesceInflight(`backtest-history:${sym}:${includeReliability}`, async () => {
     try {
       const { data } = await api.get(`/api/backtest/${encodeURIComponent(sym)}`, {
-        params: { include_reliability: includeReliability }
+        params: { include_reliability: includeReliability },
+        timeout: 15000,
+        ...(signal ? { signal } : {})
       });
       const raw = data ?? {};
       const listRaw = Array.isArray(data) ? data : Array.isArray(raw.runs) ? raw.runs : Array.isArray(raw.results) ? raw.results : Array.isArray(raw.history) ? raw.history : [];
@@ -1354,6 +1465,8 @@ function normalizeBarTime(v) {
   if (typeof v === "string") {
     const s = v.trim();
     if (!s) return null;
+    // Numeric-string epoch (s/ms): "1712345678901" or "1712345678".
+    if (/^\d{10,13}$/.test(s)) return normalizeBarTime(Number(s));
     const day = s.slice(0, 10);
     if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
     const d = new Date(s);
@@ -1374,6 +1487,9 @@ function normalizeBarsToCandles(raw, symbol, timeframe = "1d") {
     const high = numFinite(rec.high);
     const low = numFinite(rec.low);
     const close = numFinite(rec.close);
+    // Strict contract (bars.test.js): a candle needs full OHLC — partial
+    // vendor gaps are dropped, never zero-filled or rendered as null-OHLC.
+    // closesFromCandles/index composites derive from close alone downstream.
     if (open === null || high === null || low === null || close === null) continue;
     candles.push({ time, open, high, low, close });
   }
@@ -1561,27 +1677,36 @@ async function getChart(symbol, timeframe = "1d", limit = 90, opts) {
     try {
       const { data } = await api.get("/api/market_data/chart", {
         params: { symbol: sym, timeframe: tf, limit: n },
+        timeout: 3e4,
         ...signal ? { signal } : {}
       });
       return normalizeChart(data, sym, tf);
     } catch (err) {
-      if (!isEndpointMissingError(err)) throw err;
-      // Rollout shim: backends without /chart combine the two legacy calls.
+      const st = err?.response?.status;
+      // 502 (cold DB / throttle) falls back to legacy bars+quote: bars
+      // often succeed where the stitched chart missed (or vice versa).
+      // Bars-only still renders (header degrades to last close).
+      if (!isEndpointMissingError(err) && st !== 502) throw err;
+      // Rollout shim + 502 fallback: backends without /chart combine the two legacy calls.
       // Numbers can skew here (that's what /chart fixes); the header still
       // prefers the quote leg.
-      const [quote, bars] = await Promise.all([
-        getQuote(sym, void 0, opts),
-        getBars(sym, tf, n, opts)
-      ]);
-      return {
-        symbol: sym,
-        timeframe: tf,
-        quote,
-        candles: bars.candles,
-        stitched: false,
-        stitched_reason: "legacy-backend",
-        provenance: bars.provenance
-      };
+      try {
+        const [quote, bars] = await Promise.all([
+          getQuote(sym, void 0, opts).catch(() => null),
+          getBars(sym, tf, n, opts)
+        ]);
+        return {
+          symbol: sym,
+          timeframe: tf,
+          quote,
+          candles: bars.candles,
+          stitched: false,
+          stitched_reason: st === 502 ? "chart-502-bars-fallback" : "legacy-backend",
+          provenance: bars.provenance
+        };
+      } catch {
+        throw err;
+      }
     }
   });
 }
@@ -1590,18 +1715,23 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
   const tf = String(timeframe ?? "1d").trim() || "1d";
   const n = Number.isFinite(Number(limit)) ? Math.min(BARS_MAX_LIMIT, Math.max(1, Math.floor(Number(limit)))) : 90;
   const signal = opts?.signal;
+  const timeout = Number.isFinite(Number(opts?.timeout)) ? Math.min(30000, Math.max(3000, Number(opts.timeout))) : 20000;
   return coalesceInflight(`bars:${sym}:${tf}:${n}`, async () => {
     try {
       const { data } = await api.get("/api/market_data/bars", {
         params: { symbol: sym, timeframe: tf, limit: n },
+        timeout,
         ...signal ? { signal } : {}
       });
       return normalizeBarsToCandles(data, sym, tf);
     } catch (err) {
       // Rollout shim: older deployed backends cap limit<=250 (422). Retry
       // once at the legacy cap so 2Y/5Y presets degrade instead of failing.
+      // Symbol-422s (bad ticker) must NOT retry — only limit-422s.
       const status = err?.response?.status;
-      if (status === 422 && n > 250) {
+      const detailText = String(err?.response?.data?.detail ?? err?.response?.data?.message ?? "").toLowerCase();
+      const looksLikeLimit = detailText.includes("limit") || detailText.includes("less than or equal") || detailText.includes("250");
+      if (status === 422 && n > 250 && looksLikeLimit) {
         const { data } = await api.get("/api/market_data/bars", {
           params: { symbol: sym, timeframe: tf, limit: 250 },
           ...signal ? { signal } : {}
@@ -1612,6 +1742,6 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
     }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, testProviderHealth };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, testProviderHealth };
 
 export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };

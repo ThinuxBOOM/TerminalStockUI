@@ -542,6 +542,23 @@ def _persist_forecast_record(result: dict, symbol: str, market_service=None) -> 
                 registry = getattr(market_service, "registry", None)
                 if registry is not None:
                     inst, _, _ = registry.resolve(symbol)
+                    if inst is None:
+                        # Valid non-seed tickers (GOOGL/META/...) resolve via
+                        # the provisional path so the audit trail is kept.
+                        # Alphabet-invalid input yields None and stays
+                        # unpersisted (never pollute instruments with stubs).
+                        try:
+                            from backend.market_data.service import (
+                                _provisional_instrument as _prov,
+                            )
+                            from backend.security.validation import (
+                                validate_symbol as _vsym,
+                            )
+
+                            _vsym(symbol, field="symbol")
+                            inst = _prov(symbol)
+                        except Exception:
+                            inst = None
                     if inst is not None:
                         resolved = True
                         mic = str(inst.exchange_mic or "").strip().upper() or None

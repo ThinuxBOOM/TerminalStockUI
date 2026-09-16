@@ -143,7 +143,7 @@ function LiquidationCard({ mic, defaultLimit = 20 }) {
 
       {data && (
         <p className="term-num mt-1 text-[10px] text-term-muted" role="status">
-          n={data.aggregates.n} · skipped={data.aggregates.skipped} · long_proxy={data.aggregates.long_proxy_n} · short_proxy={data.aggregates.short_proxy_n} · mean {data.aggregates.mean_intensity.toFixed(2)} · max {data.aggregates.max_intensity.toFixed(2)}
+          n={data.aggregates.n} · skipped={data.aggregates.skipped} · long_proxy={data.aggregates.long_proxy_n} · short_proxy={data.aggregates.short_proxy_n} · mean {Number.isFinite(Number(data.aggregates?.mean_intensity)) ? Number(data.aggregates.mean_intensity).toFixed(2) : "—"} · max {Number.isFinite(Number(data.aggregates?.max_intensity)) ? Number(data.aggregates.max_intensity).toFixed(2) : "—"}
         </p>
       )}
       {data?.methodology && (

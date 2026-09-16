@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getChart, getForecast, auditForecastsUrl, loadFavoriteIndicators, resolveTimeframePreset, saveFavoriteIndicators } from "../../api/client";
+import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getChart, getForecast, auditForecastsUrl, extractBackendDetail, loadFavoriteIndicators, resolveTimeframePreset, saveFavoriteIndicators } from "../../api/client";
 import ProvenanceBadge from "../../components/ProvenanceBadge";
 import FreshnessBadge from "../../components/FreshnessBadge";
 import MarketStateBadge from "../../components/MarketStateBadge";
@@ -18,6 +18,10 @@ import { SourceBadge, BlendedForecastBar, DeepResearchStub } from "../../compone
 const PriceChart = lazy(() => import("./PriceChart"));
 
 const DISCLOSURE = "Not investment advice. For informational purposes only.";
+
+function briefError(err, fallback) {
+  return extractBackendDetail(err, fallback);
+}
 
 function eventsFromAnalytics(a) {
   if (!a) return [];
@@ -148,14 +152,14 @@ function SecurityBrief({ symbol }) {
               symbol={symbol}
               data={barsQ.data?.candles ?? null}
               loading
-              error={barsQ.isError ? (barsQ.error instanceof Error ? barsQ.error.message : "bars endpoint unreachable") : null}
+              error={barsQ.isError ? briefError(barsQ.error, "bars endpoint unreachable") : null}
               provenance={barsQ.data?.provenance ?? null}
               indicators={analyticsQ.data?.indicators ?? {}}
               requestedIndicators={selectedIndicators}
               indicatorsLoading={analyticsQ.isLoading || analyticsQ.isFetching}
-              indicatorsError={analyticsQ.isError ? (analyticsQ.error instanceof Error ? analyticsQ.error.message : "analytics endpoint unreachable") : null}
+              indicatorsError={analyticsQ.isError ? briefError(analyticsQ.error, "analytics endpoint unreachable") : null}
               indicatorsProvenance={analyticsQ.data?.provenance ?? null}
-              currency="USD"
+              currency={null}
               onRetryIndicators={() => void analyticsQ.refetch()}
             />
           </Suspense>
@@ -165,18 +169,49 @@ function SecurityBrief({ symbol }) {
     );
   }
   if (quote.isError) {
-    // Hard error with no quote payload: ErrorState (with retry), not a
-    // "cached data" banner — nothing is being shown.
+    // Partial render: a quote/chart 502 must not discard already-fetched
+    // forecast + analytics (parallel queries, already paid for). Show the
+    // header ErrorState but still render ForecastCard/events/analytics below
+    // when their queries resolved.
+    const hasForecastFallback = forecastQ.data != null;
+    const hasAnalyticsFallback = analyticsQ.data != null;
+    if (!hasForecastFallback && !hasAnalyticsFallback) {
+      return (
+        <div className="max-w-full">
+          <ErrorState
+            title="Quote unavailable"
+            detail={briefError(quote.error, "quote endpoint unreachable")}
+            onRetry={() => {
+              void quote.refetch();
+              void forecastQ.refetch();
+              void analyticsQ.refetch();
+            }}
+          />
+          <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
+        </div>
+      );
+    }
     return (
       <div className="max-w-full">
         <ErrorState
           title="Quote unavailable"
-          detail={quote.error instanceof Error ? quote.error.message : "quote endpoint unreachable"}
+          detail={briefError(quote.error, "quote endpoint unreachable")}
           onRetry={() => {
             void quote.refetch();
             void forecastQ.refetch();
+            void analyticsQ.refetch();
           }}
         />
+        {hasForecastFallback && (
+          <div className="term-panel mt-4 min-w-0 p-4">
+            <ForecastCard price={null} currency={null} forecast={forecastQ.data} symbol={symbol} />
+          </div>
+        )}
+        {hasAnalyticsFallback && (
+          <section className="mt-4">
+            <AnalyticsSnapshot analytics={analyticsQ.data} loading={false} failed={false} />
+          </section>
+        )}
         <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
       </div>
     );
@@ -190,6 +225,7 @@ function SecurityBrief({ symbol }) {
           onRetry={() => {
             void quote.refetch();
             void forecastQ.refetch();
+            void analyticsQ.refetch();
           }}
         />
         <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
@@ -205,7 +241,7 @@ function SecurityBrief({ symbol }) {
               {q.symbol}
             </h2>
             <p className="term-num text-display font-bold text-term-text">
-              <CurrencyValue value={q.price} currency={q.currency ?? "USD"} />
+              <CurrencyValue value={q.price} currency={q.currency ?? null} />
             </p>
             {typeof q.change_pct === "number" && Number.isFinite(q.change_pct) && (
               <p className={`term-num text-sm font-semibold ${changeColor(q.change_pct)}`}>
@@ -233,7 +269,7 @@ function SecurityBrief({ symbol }) {
             <Skeleton label="loading live forecast…" lines={4} />
           </div>
         )}
-        {!forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? "USD"} forecast={forecast} symbol={symbol} />}
+        {!forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} />}
         {!forecastQ.isLoading && !forecast && (
           <ForecastUnavailable detail="live forecast unreachable — no placeholder numbers shown" onRetry={() => void forecastQ.refetch()} />
         )}
@@ -247,14 +283,14 @@ function SecurityBrief({ symbol }) {
               symbol={symbol}
               data={barsQ.data?.candles ?? null}
               loading={barsQ.isLoading || barsQ.isFetching}
-              error={barsQ.isError ? (barsQ.error instanceof Error ? barsQ.error.message : "bars endpoint unreachable") : null}
+              error={barsQ.isError ? briefError(barsQ.error, "bars endpoint unreachable") : null}
               provenance={barsQ.data?.provenance ?? null}
               indicators={analyticsQ.data?.indicators ?? {}}
               requestedIndicators={selectedIndicators}
               indicatorsLoading={analyticsQ.isLoading || analyticsQ.isFetching}
-              indicatorsError={analyticsQ.isError ? (analyticsQ.error instanceof Error ? analyticsQ.error.message : "analytics endpoint unreachable") : null}
+              indicatorsError={analyticsQ.isError ? briefError(analyticsQ.error, "analytics endpoint unreachable") : null}
               indicatorsProvenance={analyticsQ.data?.provenance ?? null}
-              currency={q.currency ?? "USD"}
+              currency={q.currency ?? null}
               onRetryIndicators={() => void analyticsQ.refetch()}
             />
           </Suspense>
@@ -331,7 +367,7 @@ function ForecastCard({ price, currency, forecast: f, symbol }) {
           Forecast: <b className="text-term-text">{f.label}, {f.horizon_days} days</b> <FreshnessBadge p={f.provenance} />
         </p>
         <p className="text-2xl font-bold text-term-green">
-          Probability: {(f.probability * 100).toFixed(0)}% <ProvenanceBadge p={f.provenance} />
+          Probability: {Number.isFinite(Number(f.probability)) ? `${(Number(f.probability) * 100).toFixed(0)}%` : "—"} <ProvenanceBadge p={f.provenance} />
         </p>
         <p className="text-xs">Confidence: <b>{f.confidence}</b></p>
         <p className="text-xs">Data quality: <b className="text-term-cyan">{f.quality_grade}</b></p>

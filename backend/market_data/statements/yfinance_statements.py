@@ -147,17 +147,33 @@ class YFinanceStatementsProvider:
         if yf is None:
             raise ProviderError(NAME, "yfinance package unavailable")
         try:
-            ticker = yf.Ticker(symbol)
-            inc = ticker.financials
-            bal = ticker.balance_sheet
-            cfs = ticker.cashflow
-            try:
-                info = dict(ticker.info or {})
-            except Exception:
-                info = {}
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+
+            def _do_frames():
+                ticker = yf.Ticker(symbol)
+                try:
+                    inc = ticker.financials
+                except Exception:
+                    inc = None
+                try:
+                    bal = ticker.balance_sheet
+                except Exception:
+                    bal = None
+                try:
+                    cfs = ticker.cashflow
+                except Exception:
+                    cfs = None
+                try:
+                    info = dict(ticker.info or {})
+                except Exception:
+                    info = {}
+                return inc, bal, cfs, info
+
+            with _TPE(max_workers=1) as _pool:
+                inc, bal, cfs, info = _pool.submit(_do_frames).result(timeout=10)
         except ProviderError:
             raise
-        except Exception as exc:  # network / parse failure
+        except Exception as exc:  # network / parse failure / timeout
             raise ProviderError(NAME, f"{type(exc).__name__}: {exc}") from exc
         return inc, bal, cfs, info
 

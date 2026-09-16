@@ -57,7 +57,7 @@ BASE_URL = "https://api.twelvedata.com"
 
 #: Yahoo suffixes TwelveData-free cannot serve (US-only on the free tier;
 #: Euronext/global need Grow+ and stay on yfinance/stooq here).
-_NON_US_SUFFIXES: tuple[str, ...] = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE")
+_NON_US_SUFFIXES: tuple[str, ...] = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".BO", ".L")
 
 #: Exchange datetime strings arrive zone-naive in US/Eastern; parsed to
 #: UTC when possible, otherwise the fetch time is used (never trust a
@@ -214,7 +214,7 @@ class TwelveDataProvider:
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: float = 12.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
         # Free Basic is ruthless on quotas: hard client-side cap 6/min +

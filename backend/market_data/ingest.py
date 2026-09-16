@@ -22,13 +22,43 @@ logger = logging.getLogger(__name__)
 #: Default ingest universe (overridable via the ``INGEST_SYMBOLS`` env
 #: comma-list). Canonical provider forms (Yahoo suffixes included).
 DEFAULT_UNIVERSE: list[str] = [
+    # US majors (registry seeds; screener/liquidity breadth needs them warm).
     "AAPL",
     "MSFT",
+    "NVDA",
+    "TSLA",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "AVGO",
+    "AAP",
     "JPM",
+    # SSE seeds (Top-20 shows 5 rows; all must be warm).
     "600519.SS",
+    "600000.SS",
+    "600036.SS",
+    "601318.SS",
+    "600900.SS",
+    # Euronext seeds.
     "MC.PA",
+    "ACA.PA",
+    "OR.PA",
     "ASML.AS",
+    "INGA.AS",
     "UCB.BR",
+    "ABI.BR",
+    # Index proxies (GET /api/markets/{mic}/index serves from DB; without
+    # these every index card pays a live 2y Yahoo fetch from serverless and
+    # 502s under throttle. US ETFs first: Euronext tries EWQ/EWN before
+    # CAC.PA/IAEX.AS per BENCHMARKS order.)
+    "SPY",
+    "QQQ",
+    "000001.SS",
+    "EWQ",
+    "EWN",
+    "EWK",
+    "CAC.PA",
+    "IAEX.AS",
 ]
 
 DEFAULT_TIMEFRAME = "1d"
@@ -84,6 +114,17 @@ def _local_tz_for_symbol(symbol_hint: str) -> str:
         return "Europe/Amsterdam"
     if sym.endswith(".BR"):
         return "Europe/Brussels"
+    if sym.endswith(".BO"):
+        return "Asia/Colombo"
+    if sym.endswith(".L"):
+        return "Europe/London"
+    if sym.endswith((".CN", ".FR", ".NL", ".BE")):
+        return {
+            ".CN": "Asia/Shanghai",
+            ".FR": "Europe/Paris",
+            ".NL": "Europe/Amsterdam",
+            ".BE": "Europe/Brussels",
+        }[sym[-3:]]
     return "America/New_York"
 
 
@@ -95,9 +136,22 @@ def default_universe() -> list[str]:
         seen: set[str] = set()
         for part in raw.split(","):
             item = part.strip()
-            if item and item.upper() not in seen:
+            if not item:
+                continue
+            # Validate + cap: an unbounded env list guarantees a serverless
+            # timeout (each symbol pays a live Yahoo fetch). Cap at 25.
+            try:
+                from backend.security.validation import validate_symbol as _vsym
+                _vsym(item, field="symbol")
+            except Exception:
+                logger.warning("ingest: skipping invalid INGEST_SYMBOLS entry %r", item[:32])
+                continue
+            if item.upper() not in seen:
                 seen.add(item.upper())
                 out.append(item)
+            if len(out) >= 25:
+                logger.warning("ingest: INGEST_SYMBOLS capped at 25 entries")
+                break
         if out:
             return out
     return list(DEFAULT_UNIVERSE)
@@ -200,6 +254,7 @@ def fetch_daily_bars(
     provider_symbol: str,
     period: str = FETCH_PERIOD,
     interval: str = FETCH_INTERVAL,
+    timeout: float = 12.0,
 ) -> list[dict]:
     """Fetch daily bars for one provider symbol via yfinance (lazy import).
 
@@ -207,16 +262,51 @@ def fetch_daily_bars(
     ascending ``[{ts (aware UTC), open, high, low, close, volume}]``.
     Raises on missing package / empty history / no usable rows; callers
     convert that into a per-symbol error entry (never a batch 500).
+
+    Timeout: yfinance has no global timeout — the history call runs in a
+    worker thread and is joined with ``timeout`` (default 12s, well under
+    the Vercel ``maxDuration``) so a hung Yahoo fetch never holds a
+    serverless invocation to its 60s kill.
     """
     symbol = (provider_symbol or "").strip().upper()
     if not symbol:
         raise ValueError("empty symbol")
+    # Yahoo class-share form uses a dash (BRK-B); users type BRK.B. The
+    # quote chain normalizes per provider, but bars fetch a single string —
+    # map dotted bare tickers to dash form unless the dot starts a known
+    # venue suffix (.SS/.PA/.AS/.BR/...). Suffix forms pass through intact.
+    try:
+        if "." in symbol and not symbol.endswith(
+            (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".L")
+        ):
+            symbol = symbol.replace(".", "-")
+    except Exception:
+        pass
     try:
         import yfinance as yf
     except Exception as exc:
         raise RuntimeError("yfinance package unavailable") from exc
-    ticker = yf.Ticker(symbol)
-    hist = ticker.history(period=period, interval=interval, auto_adjust=True)
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    def _do_history():
+        ticker = yf.Ticker(symbol)
+        # yfinance >=0.2.40 accepts timeout=; older versions ignore **kwargs
+        # via curl — try with timeout first, fall back without.
+        try:
+            return ticker.history(period=period, interval=interval, auto_adjust=True, timeout=10)
+        except TypeError:
+            return ticker.history(period=period, interval=interval, auto_adjust=True)
+
+    try:
+        budget = max(3.0, min(float(timeout), 25.0))
+    except (TypeError, ValueError):
+        budget = 12.0
+    try:
+        with _TPE(max_workers=1) as _pool:
+            _fut = _pool.submit(_do_history)
+            hist = _fut.result(timeout=budget)
+    except Exception as exc:
+        raise RuntimeError(f"yahoo fetch timed out/failed for {symbol}: {type(exc).__name__}") from exc
     if hist is None or len(hist) == 0:
         raise RuntimeError(f"no data for {symbol}")
     try:  # single-ticker fetches are flat; flatten MultiIndex just in case
@@ -297,7 +387,7 @@ def fetch_stooq_daily_bars(
     url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "onemarket/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=12) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:
         raise RuntimeError(f"stooq fetch failed for {symbol}: {type(exc).__name__}") from exc
@@ -391,13 +481,13 @@ def fetch_alpaca_daily_bars(
         "feed": use_feed,
     }
     bars: list[dict] = []
-    for _page in range(6):  # bounded: 6 x 5000 rows max, far past 2y of dailies
+    for _page in range(2):  # bounded: 2 x 5000 rows max (2y of dailies fits one page)
         try:
             resp = httpx.get(
                 f"{BASE_URL}/v2/stocks/{alpaca_symbol}/bars",
                 params=dict(params),
                 headers=headers,
-                timeout=60.0,
+                timeout=12.0,
             )
         except Exception as exc:
             raise RuntimeError(f"alpaca bars failed for {symbol}: {type(exc).__name__}") from exc
@@ -456,7 +546,7 @@ def fetch_alpaca_daily_bars(
 #: Yahoo suffixes outside Alpaca's US-only feed (mirrors
 #: providers.alpaca._NON_US_SUFFIXES; MIC unknown at this layer, so bare
 #: tickers always attempt Alpaca — US default, fast-fail otherwise).
-_NON_US_BAR_SUFFIXES = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE")
+_NON_US_BAR_SUFFIXES = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".BO", ".L")
 
 
 def _is_alpaca_bars_eligible(provider_symbol: str) -> bool:
@@ -664,23 +754,116 @@ def ingest_symbols(
 
     ingested: dict[str, int] = {}
     errors: dict[str, str] = {}
+    # Parallel fetch, sequential persist: Yahoo fetches are I/O-bound and
+    # dominate wall time (9 symbols x 5-15s sequential = 45-135s > Vercel
+    # maxDuration 60). Fetch in a 4-worker pool with a 15s per-symbol
+    # join, then upsert on this thread's single DB session (sessions are
+    # not thread-safe). DB writes stay sequential and race-safe.
     try:
-        for raw in wanted:
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _done
+        from backend.security.validation import sanitize_error as _sanerr
+
+        def _resolve(raw_sym: str):
             try:
-                instrument, _, _ = registry.resolve(raw)
-                if instrument is None:
-                    errors[raw] = f"unknown instrument for {raw!r}"
-                    continue
-                provider_symbol = (
-                    instrument.provider_symbol or raw.strip().upper()
-                )
-                fetched = fetch(provider_symbol)
-                # Backward compat: legacy fetch_fn returns bare bars list;
-                # the chain-aware default returns (bars, source).
-                if isinstance(fetched, tuple) and len(fetched) == 2:
-                    bars, bar_source = fetched[0], fetched[1]
-                else:
-                    bars, bar_source = fetched, "yfinance"
+                instrument, _, _ = registry.resolve(raw_sym)
+            except Exception:
+                return None, f"unknown instrument for {raw_sym!r}"
+            if instrument is not None:
+                return instrument, None
+            try:
+                from backend.security.validation import validate_symbol as _vsym
+                _vsym(raw_sym, field="symbol")
+            except Exception:
+                return None, f"unknown instrument for {raw_sym!r}"
+            try:
+                from backend.market_data.service import _provisional_instrument as _prov
+            except Exception:
+                _prov = None  # type: ignore[assignment]
+            try:
+                instrument = _prov(raw_sym) if _prov is not None else None
+            except Exception:
+                instrument = None
+            if instrument is None:
+                return None, f"unknown instrument for {raw_sym!r}"
+            return instrument, None
+
+        # Phase 1: resolve (no I/O) + submit fetches in parallel.
+        resolved: dict[str, object] = {}
+        for raw in wanted:
+            inst, err = _resolve(raw)
+            if err is not None:
+                errors[raw] = err
+                continue
+            resolved[raw] = inst  # type: ignore[assignment]
+
+        fetched: dict[str, tuple] = {}
+        if resolved:
+            def _do_fetch(item_raw: str):
+                inst = resolved[item_raw]
+                try:
+                    provider_symbol = (
+                        getattr(inst, "provider_symbol", None) or item_raw.strip().upper()
+                    )
+                except Exception:
+                    provider_symbol = item_raw.strip().upper()
+                try:
+                    out = fetch(provider_symbol)
+                    if isinstance(out, tuple) and len(out) == 2:
+                        bars, bar_source = out[0], out[1]
+                    else:
+                        bars, bar_source = out, "yfinance"
+                    return (item_raw, provider_symbol, bars, bar_source, None)
+                except Exception as exc:
+                    try:
+                        reason = _sanerr(exc)[:200]
+                    except Exception:
+                        reason = f"{type(exc).__name__}"
+                    return (item_raw, provider_symbol, None, None, reason)
+
+            workers = max(1, min(4, len(resolved)))
+            try:
+                with _TPE(max_workers=workers) as _pool:
+                    _futs = { _pool.submit(_do_fetch, r): r for r in resolved }
+                    for _fut in _done(_futs, timeout=55):
+                        try:
+                            item_raw, provider_symbol, bars, bar_source, reason = _fut.result(timeout=2)
+                        except Exception as exc:
+                            r0 = _futs[_fut]
+                            try:
+                                reason0 = _sanerr(exc)[:200]
+                            except Exception:
+                                reason0 = "fetch timed out"
+                            errors[r0] = reason0
+                            continue
+                        if reason is not None:
+                            errors[item_raw] = reason
+                            continue
+                        fetched[item_raw] = (provider_symbol, bars, bar_source)
+            except Exception:
+                # Pool-level timeout/failure: fall back to sequential fetch
+                # for any unresolved symbols so the batch still progresses.
+                for r in resolved:
+                    if r in fetched or r in errors:
+                        continue
+                    try:
+                        _, provider_symbol, bars, bar_source, reason = _do_fetch(r)
+                        if reason is not None:
+                            errors[r] = reason
+                        else:
+                            fetched[r] = (provider_symbol, bars, bar_source)
+                    except Exception as exc:
+                        try:
+                            errors[r] = _sanerr(exc)[:200]
+                        except Exception:
+                            errors[r] = "fetch failed"
+
+        # Phase 2: persist sequentially on this thread's session.
+        for raw in wanted:
+            if raw in errors or raw not in fetched:
+                continue
+            try:
+                provider_symbol, bars, bar_source = fetched[raw]
+                instrument = resolved[raw]
                 db_inst = _get_or_create_db_instrument(db, instrument)
                 count = _upsert_bars(db, db_inst, bars, timeframe=timeframe, source=bar_source)
                 db.commit()
@@ -710,8 +893,11 @@ def ingest_symbols(
                     db.rollback()
                 except Exception:
                     pass
-                reason = f"{type(exc).__name__}: {str(exc)[:200]}"
-                errors[raw] = reason
+                try:
+                    from backend.security.validation import sanitize_error as _sanerr2
+                    errors[raw] = _sanerr2(exc)[:200]
+                except Exception:
+                    errors[raw] = f"{type(exc).__name__}"
                 logger.warning("ingest symbol failed symbols=1")
     finally:
         try:

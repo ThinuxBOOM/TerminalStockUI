@@ -91,7 +91,7 @@ async function getMarketLiquidationProxy(mic, opts = {}) {
   return coalesceInflight(`market-liquidation:${upper}:${sort}:${limit}`, async () => {
     const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidation-proxy`, {
       params: { limit, sort },
-      timeout: 60000,
+      timeout: 30000,
       ...(signal ? { signal } : {}),
     });
     return normalizeLiquidationProxy(data, upper);

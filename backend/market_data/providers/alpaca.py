@@ -42,7 +42,7 @@ DEFAULT_DELAY_MINUTES = 0
 BASE_URL = "https://data.alpaca.markets"
 
 #: Yahoo suffixes Alpaca cannot serve (US-only feed).
-_NON_US_SUFFIXES: tuple[str, ...] = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE")
+_NON_US_SUFFIXES: tuple[str, ...] = (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".BO", ".L")
 
 _ALLOWED_FEEDS = ("iex", "sip", "delayed_sip")
 
@@ -202,7 +202,7 @@ class AlpacaProvider:
         delay_minutes: int = DEFAULT_DELAY_MINUTES,
         stub_mode: bool = False,
         on_call: object | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: float = 12.0,
     ) -> None:
         self.breaker = breaker or CircuitBreaker()
         # Alpaca free is generous (200/min) — cap at 150/min client-side so

@@ -65,7 +65,7 @@ const ASPI_BENCHMARKS = {
     venue: "Euronext Paris",
     indexLabel: "CAC 40",
     indexSymbol: "^FCHI",
-    proxies: ["CAC.PA", "EWQ"],
+    proxies: ["EWQ", "CAC.PA"],
     currency: "EUR",
     timezone: "Europe/Paris",
     enabled: true,
@@ -75,7 +75,7 @@ const ASPI_BENCHMARKS = {
     venue: "Euronext Amsterdam",
     indexLabel: "AEX",
     indexSymbol: "^AEX",
-    proxies: ["IAEX.AS", "EWN"],
+    proxies: ["EWN", "IAEX.AS"],
     currency: "EUR",
     timezone: "Europe/Amsterdam",
     enabled: true,
@@ -490,10 +490,11 @@ function isEndpointMissingError(err) {
 
 // Per-market benchmark series. Prefers the native backend endpoint
 // GET /api/markets/{mic}/index (server-side proxy chain, same symbols as
-// below); falls back to the frontend getBars proxy chain ONLY when the
-// endpoint is missing (404/501) so older backends keep working. Fail-closed:
-// a 422 (disabled venue / bad symbol) or 502 (no live data) throws the
-// backend error immediately — never tries a second opinion. Zero-candle
+// below); falls back to the frontend getBars proxy chain when the endpoint
+// is missing (404/501), on network errors, or on 502 (cold DB / Yahoo
+// throttle — transient, retryable via the per-proxy bars chain which rides
+// the 120s bars cache). Fail-closed only on 422 (disabled venue / bad
+// symbol): that is a fatal answer, never a second opinion. Zero-candle
 // successes count as a miss.
 function normalizeNativeIndexSeries(raw, micFallback = "") {
   const r = isRecord(raw) ? raw : {};
@@ -544,20 +545,31 @@ async function getAspiSeries(mic, timeframe = "1d", opts = {}) {
       const native = normalizeNativeIndexSeries(data, cfg.mic);
       if (native.points.length > 0) return native;
     } catch (err) {
-      // Fail-closed: 422 (disabled venue / bad symbol) and 502 (no live
-      // data) are honest backend answers — throw immediately, never try a
-      // second opinion. Only 404/501 (endpoint missing) or network errors
-      // fall through to the frontend chain.
-      if (httpStatus(err) === 422 || httpStatus(err) === 502) {
+      // Fail-closed on 422 (disabled venue / bad symbol): fatal, throw
+      // immediately. 502 (cold DB / throttle) is transient — fall through
+      // to the frontend bars chain below, which tries each proxy via the
+      // cached getBars path. Only 422 throws here.
+      if (httpStatus(err) === 422) {
         throw err;
       }
-      // 404/501 or network: frontend chain below.
+      // 502/504/404/501/network/timeout: frontend chain below.
       try {
         return await getAspiSeriesViaBars(cfg, tf, limit, signal);
       } catch (chainErr) {
-        // If the native call failed with something other than missing, keep
-        // the chain error (it tried every proxy); otherwise rethrow chain.
-        throw chainErr;
+        // Preserve both errors: the chain tried every proxy, but the native
+        // failure (throttle vs missing endpoint) decides the user copy.
+        // Timeout gets a friendly message; otherwise the chain detail wins.
+        const chainMsg =
+          chainErr instanceof Error && chainErr.message
+            ? chainErr.message
+            : String(chainErr ?? "index bars chain failed");
+        const nativeTimeout =
+          err?.code === "ECONNABORTED" ||
+          /timeout of \d+ms exceeded/i.test(String(err?.message ?? ""));
+        const msg = nativeTimeout
+          ? `${chainMsg} (native index timed out — cold start, retry; warm cache is fast)`
+          : chainMsg;
+        throw new Error(msg, { cause: { native: err, chain: chainErr } });
       }
     }
     return getAspiSeriesViaBars(cfg, tf, limit, signal);
@@ -569,14 +581,30 @@ async function getAspiSeriesViaBars(cfg, tf, limit, signal) {
     { symbol: cfg.indexSymbol, isProxy: false },
     ...(Array.isArray(cfg.proxies) ? cfg.proxies : []).map((p) => ({ symbol: p, isProxy: true })),
   ];
-  let lastError = null;
+  // Sequential in preference order (primary first), but each candidate gets
+  // its own 15s fail-fast and the whole chain gets a 30s overall deadline so
+  // 1 primary + 2 proxies can never hang 180s. All per-candidate errors are
+  // preserved for the AggregateError when everything misses.
+  const errors = [];
   let sawEmpty = false;
+  const deadlineMs = 30000;
+  const startedAt = Date.now();
   for (const c of candidates) {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= deadlineMs) {
+      errors.push(new Error(`chain budget exceeded after ${elapsed}ms before trying ${c.symbol}`));
+      break;
+    }
+    const remaining = Math.max(3000, Math.min(15000, deadlineMs - elapsed));
     try {
-      const bars = await getBars(c.symbol, tf, limit, signal ? { signal } : undefined);
+      const bars = await getBars(c.symbol, tf, limit, {
+        ...(signal ? { signal } : {}),
+        timeout: remaining,
+      });
       const candles = Array.isArray(bars?.candles) ? bars.candles : [];
       if (candles.length === 0) {
         sawEmpty = true;
+        errors.push(new Error(`empty bars for ${c.symbol}`));
         continue;
       }
       return normalizeAspiSeries({
@@ -590,10 +618,28 @@ async function getAspiSeriesViaBars(cfg, tf, limit, signal) {
         provenance: bars.provenance,
       });
     } catch (err) {
-      lastError = err;
+      errors.push(err instanceof Error ? err : new Error(String(err ?? `bars failed for ${c.symbol}`)));
+      // Aborted outer signal: stop trying further proxies immediately.
+      if (signal?.aborted) break;
     }
   }
-  if (lastError) throw lastError;
+  if (errors.length > 0) {
+    const first = errors[0];
+    const msg =
+      first instanceof Error && first.message ? first.message : `index unavailable for ${cfg.mic}`;
+    const agg =
+      typeof AggregateError !== "undefined"
+        ? new AggregateError(errors, msg)
+        : Object.assign(new Error(msg), { errors });
+    // Empty-but-no-throw case stays honest about proxies tried.
+    if (errors.every((e) => String(e?.message ?? "").startsWith("empty bars")) || sawEmpty) {
+      throw new Error(
+        `index bars empty for ${cfg.mic} (${cfg.indexSymbol}) — no proxy configured`,
+        { cause: { errors } }
+      );
+    }
+    throw agg;
+  }
   throw new Error(
     sawEmpty
       ? `index bars empty for ${cfg.mic} (${cfg.indexSymbol}) — no proxy configured`
@@ -615,32 +661,129 @@ async function getTop20Constituents(mic, opts = {}) {
   const tier = opts?.tier ?? null;
   const signal = opts?.signal;
   return coalesceInflight(top20InflightKey(upper, userId, tier), async () => {
-    const liq = await getMarketTopRows(upper, { limit: TOP20_LIMIT, sort: "turnover" });
-    const liqRows = Array.isArray(liq?.rows) ? liq.rows : [];
-    let screenerResults = [];
+    // Liquidity is preferred; on 502/throw fall back to honestly-labelled
+    // screener-rank (never a dead ErrorState when a second opinion exists).
+    let liq = null;
+    let liqError = null;
     try {
-      const screenP = getScreener(
-        { market: upper, minDirection: 0, limit: TOP20_LIMIT },
-        signal ? { signal } : undefined
-      );
-      const timeoutP = new Promise((resolve) => setTimeout(() => resolve(null), 8000));
-      const screen = await Promise.race([screenP, timeoutP]);
-      screenerResults = Array.isArray(screen?.results) ? screen.results : [];
-    } catch {
-      screenerResults = [];
+      liq = await getMarketTopRows(upper, { limit: TOP20_LIMIT, sort: "turnover" });
+    } catch (err) {
+      liqError = err;
+      liq = null;
     }
-    const picked = normalizeTop20({ mic: upper, liquidityRows: liqRows, limit: TOP20_LIMIT }, upper);
+    const liqRows = Array.isArray(liq?.rows) ? liq.rows : [];
+    // Screener enrichment: best-effort 8s race with proper cleanup — the
+    // timer is cleared on settle and the inner fetch is aborted on timeout
+    // or outer-signal abort so nothing runs 60s in the background.
+    let screenerResults = [];
+    {
+      const inner = new AbortController();
+      const onOuterAbort = () => {
+        try {
+          inner.abort();
+        } catch {
+          // never throws
+        }
+      };
+      if (signal) {
+        if (signal.aborted) inner.abort();
+        else signal.addEventListener("abort", onOuterAbort, { once: true });
+      }
+      let timer = null;
+      try {
+        const screenP = getScreener(
+          { market: upper, minDirection: 0, limit: TOP20_LIMIT },
+          { signal: inner.signal }
+        );
+        const timeoutP = new Promise((resolve) => {
+          timer = setTimeout(() => {
+            try {
+              inner.abort();
+            } catch {
+              // never throws
+            }
+            resolve(null);
+          }, 8000);
+        });
+        const screen = await Promise.race([screenP, timeoutP]);
+        screenerResults = Array.isArray(screen?.results) ? screen.results : [];
+      } catch {
+        screenerResults = [];
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+        if (signal) {
+          try {
+            signal.removeEventListener("abort", onOuterAbort);
+          } catch {
+            // never throws
+          }
+        }
+      }
+    }
+    // Liquidity hit: normal path (honest provenance, no fallback flag).
+    if (liq && liqRows.length > 0) {
+      const picked = normalizeTop20({ mic: upper, liquidityRows: liqRows, limit: TOP20_LIMIT }, upper);
+      const prov = isRecord(liq?.provenance)
+        ? liq.provenance
+        : {
+            source: `aspi-top20:${upper}`,
+            as_of: new Date().toISOString(),
+            delay_minutes: -1,
+            quality_grade: "D",
+            fallback_used: true,
+            missing_fields: ["provenance"],
+          };
+      return {
+        ...picked,
+        rows: enrichConstituentsWithScreener(picked.rows, screenerResults),
+        provenance: prov,
+        fallback_used: Boolean(prov?.fallback_used),
+      };
+    }
+    // Liquidity miss but screener available: honestly-labelled fallback
+    // (methodology=screener-rank-fallback, fallback_used=true). Both miss:
+    // rethrow the liquidity error so the UI ErrorState shows the root cause.
+    if (screenerResults.length > 0) {
+      const picked = normalizeTop20(
+        { mic: upper, liquidityRows: [], screenerRows: screenerResults, limit: TOP20_LIMIT },
+        upper
+      );
+      return {
+        ...picked,
+        rows: enrichConstituentsWithScreener(picked.rows, screenerResults),
+        provenance: {
+          source: `aspi-top20:${upper}:screener-fallback`,
+          as_of: new Date().toISOString(),
+          delay_minutes: -1,
+          quality_grade: "D",
+          fallback_used: true,
+          missing_fields: ["liquidity", ...(liqError ? ["liquidity-error"] : [])],
+        },
+        fallback_used: true,
+      };
+    }
+    if (liqError) throw liqError;
+    const picked = normalizeTop20({ mic: upper, liquidityRows: [], limit: TOP20_LIMIT }, upper);
     return {
       ...picked,
-      rows: enrichConstituentsWithScreener(picked.rows, screenerResults),
-      provenance: isRecord(liq?.provenance) ? liq.provenance : combineAspiProvenance([], `aspi-top20:${upper}`),
-      fallback_used: false,
+      rows: [],
+      provenance: {
+        source: `aspi-top20:${upper}`,
+        as_of: new Date().toISOString(),
+        delay_minutes: -1,
+        quality_grade: "D",
+        fallback_used: true,
+        missing_fields: ["liquidity", "screener"],
+      },
+      fallback_used: true,
     };
   });
 }
 
 // Bars for each Top-20 constituent (for the equal-weighted composite).
 // allSettled: one bad symbol never kills the composite; skips are reported.
+// Concurrency 6 + 30s overall budget: 20 parallel 60s getBars used to hold
+// the composite past the Vercel maxDuration and spam Yahoo from cloud IPs.
 async function getTop20Bars(symbols, timeframe = "1d", opts = {}) {
   const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
   const limit = Math.min(ASPI_LIMIT[tf] ?? 90, TOP20_BARS_LIMIT);
@@ -649,12 +792,33 @@ async function getTop20Bars(symbols, timeframe = "1d", opts = {}) {
     0,
     TOP20_LIMIT
   );
-  const settled = await Promise.allSettled(
-    clean.map((sym) => getBars(sym, tf, limit, signal ? { signal } : undefined))
-  );
+  const runOne = (sym) => getBars(sym, tf, limit, { ...(signal ? { signal } : {}), timeout: 15000 });
+  const settled = await Promise.race([
+    (async () => {
+      // Simple pool of 6.
+      const out = new Array(clean.length);
+      let idx = 0;
+      async function worker() {
+        while (idx < clean.length) {
+          const i = idx++;
+          try {
+            out[i] = { status: "fulfilled", value: await runOne(clean[i]) };
+          } catch (e) {
+            out[i] = { status: "rejected", reason: e };
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(6, clean.length) }, worker));
+      return out;
+    })(),
+    new Promise((resolve) => setTimeout(() => resolve(null), 30000)),
+  ]);
+  const finalSettled = Array.isArray(settled)
+    ? settled
+    : clean.map((sym) => ({ status: "rejected", reason: new Error("top20 bars timed out after 30s") }));
   const series = [];
   const skipped = [];
-  settled.forEach((s, i) => {
+  finalSettled.forEach((s, i) => {
     const sym = clean[i];
     if (s.status !== "fulfilled") {
       skipped.push({ symbol: sym, reason: s.reason instanceof Error ? s.reason.message : String(s.reason ?? "bars failed") });

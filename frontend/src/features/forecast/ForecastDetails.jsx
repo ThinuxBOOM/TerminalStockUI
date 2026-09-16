@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AI_PROFILES,
   FORECAST_HORIZONS,
+  extractBackendDetail,
   friendlyAIError,
   getAnalytics,
   getForecast,
@@ -40,15 +41,34 @@ function ForecastDetails({ symbol }) {
     placeholderData: keepPreviousData,
   });
   // Prefetch adjacent horizons in the background (warm cache, no waterfall).
+  // Lifetime-linked: each prefetch is raced against unmount/horizon-change
+  // via an AbortController, and rejections are swallowed so background
+  // warmups never surface as unhandled rejections.
   useEffect(() => {
+    const ctrl = new AbortController();
     for (const h of FORECAST_HORIZONS) {
       if (h === horizon) continue;
-      void queryClient.prefetchQuery({
-        queryKey: ["forecast", symbol, h],
-        queryFn: ({ signal }) => getForecast(symbol, h, { signal }),
-        staleTime: 300000,
-      });
+      if (ctrl.signal.aborted) break;
+      void queryClient
+        .prefetchQuery({
+          queryKey: ["forecast", symbol, h],
+          queryFn: ({ signal }) => {
+            if (ctrl.signal.aborted) throw new Error("prefetch aborted");
+            return getForecast(symbol, h, { signal });
+          },
+          staleTime: 300000,
+        })
+        .catch(() => {
+          // background warmup only — never surface
+        });
     }
+    return () => {
+      try {
+        ctrl.abort();
+      } catch {
+        // never throws
+      }
+    };
   }, [queryClient, symbol, horizon]);
   const analyticsQ = useQuery({
     queryKey: ["analytics", symbol],
@@ -57,15 +77,32 @@ function ForecastDetails({ symbol }) {
     staleTime: 300000,
     gcTime: 600000,
   });
+  const aiCtrl = useRef(null);
+  useEffect(() => () => {
+    try {
+      aiCtrl.current?.abort();
+    } catch {
+      // never throws
+    }
+  }, []);
   const aiM = useMutation({
-    mutationFn: () => postAIInsight(symbol, aiProfile),
+    mutationFn: () => {
+      try {
+        aiCtrl.current?.abort();
+      } catch {
+        // never throws
+      }
+      const ctrl = new AbortController();
+      aiCtrl.current = ctrl;
+      return postAIInsight(symbol, aiProfile, { signal: ctrl.signal });
+    },
   });
   const live = forecastQ.data ?? null;
   const f = live;
   const analytics = analyticsQ.data ?? null;
   const calHistoryQ = useQuery({
     queryKey: ["calibration-history", symbol, horizon],
-    queryFn: () => getCalibrationHistory(symbol, horizon, 20),
+    queryFn: ({ signal }) => getCalibrationHistory(symbol, horizon, 20, { signal }),
     retry: false,
     staleTime: 300000,
     gcTime: 600000,
@@ -79,7 +116,7 @@ function ForecastDetails({ symbol }) {
     [liveBins, latestMeta]
   );
   const hasAnyCalibration = chartRows.length > 0 || calHistory.length > 0;
-  const normalizedSymbol = symbol.trim().toUpperCase();
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
   const recentBacktest = useMemo(
     // Match the viewed horizon: a 5d run must not vouch for the 63d tab.
     () => getRecentBacktests().find(
@@ -103,7 +140,8 @@ function ForecastDetails({ symbol }) {
     (typeof inputs.data_version === "string" ? inputs.data_version : null);
   // Safe degrade: a malformed AI payload never breaks the research section —
   // tryNormalize returns null and the (B) block renders its AI DISABLED state.
-  const aiOpinion = aiM.data ? tryNormalizeAIOpinion(aiM.data) ?? aiM.data : null;
+  // (No raw fallback: restoring the malformed object defeats the guard.)
+  const aiOpinion = aiM.data ? tryNormalizeAIOpinion(aiM.data) : null;
 
   return (
     <div className="space-y-4">
@@ -123,11 +161,16 @@ function ForecastDetails({ symbol }) {
         <span className="text-term-muted">targets: direction probability · return range · vol regime · drawdown</span>
       </div>
 
-      {forecastQ.isLoading && <Loading label={`loading forecast ${symbol} ${horizon}d…`} />}
+      {forecastQ.isLoading && (
+        <>
+          <Loading label={`loading forecast ${symbol} ${horizon}d…`} />
+          <p className="mt-1 text-[11px] text-term-muted" role="status">Cold fetch can take ~60s — warm cache makes repeats fast.</p>
+        </>
+      )}
       {forecastQ.isError && (
         <ErrorState
           title="Forecast unavailable"
-          detail={`forecast endpoint unreachable (${forecastQ.error instanceof Error ? forecastQ.error.message : "unknown error"}) — forecast unavailable, no placeholder numbers shown`}
+          detail={`forecast endpoint unreachable (${extractBackendDetail(forecastQ.error, "unknown error")}) — forecast unavailable, no placeholder numbers shown`}
           onRetry={() => void forecastQ.refetch()}
         />
       )}
@@ -171,10 +214,10 @@ function ForecastDetails({ symbol }) {
               <div>Spread: <b>{f.ensemble_spread.toFixed(2)}</b>{typeof f.n_members === "number" ? <span className="text-term-muted"> · {f.n_members} members</span> : null}</div>
             ) : null}
             {f.target_price && typeof f.target_price.last_close === "number" ? (
-              <div>Target: <b>{f.target_price.low?.toFixed?.(2)} / {f.target_price.mid?.toFixed?.(2)} / {f.target_price.high?.toFixed?.(2)}</b> <span className="text-term-muted">(last {f.target_price.last_close.toFixed(2)})</span></div>
+              <div>Target: <b>{Number.isFinite(Number(f.target_price.low)) ? Number(f.target_price.low).toFixed(2) : "—"} / {Number.isFinite(Number(f.target_price.mid)) ? Number(f.target_price.mid).toFixed(2) : "—"} / {Number.isFinite(Number(f.target_price.high)) ? Number(f.target_price.high).toFixed(2) : "—"}</b> <span className="text-term-muted">(last {f.target_price.last_close.toFixed(2)})</span></div>
             ) : null}
             {f.ensemble_weights && typeof f.ensemble_weights === "object" ? (
-              <div className="col-span-2 md:col-span-4">Weights: <span className="text-term-muted">{Object.entries(f.ensemble_weights).map(([k, v]) => `${k}=${Number(v).toFixed(2)}`).join(" · ")}</span></div>
+              <div className="col-span-2 md:col-span-4">Weights: <span className="text-term-muted">{Object.entries(f.ensemble_weights).map(([k, v]) => `${k}=${Number.isFinite(Number(v)) ? Number(v).toFixed(2) : "—"}`).join(" · ")}</span></div>
             ) : null}
           </dl>
           {(f.confidence_reasons ?? []).length > 0 ? (
@@ -347,7 +390,7 @@ function ForecastDetails({ symbol }) {
           {calHistoryQ.isLoading && <p className="mt-2 text-[11px] text-term-muted" role="status">loading calibration history…</p>}
           {calHistoryQ.isError && (
             <p className="mt-2 text-[11px] text-term-amber" role="alert">
-              ⚠ calibration history unavailable ({calHistoryQ.error instanceof Error ? calHistoryQ.error.message : "backend unreachable"}) — live bins above unaffected.
+              ⚠ calibration history unavailable ({extractBackendDetail(calHistoryQ.error, "backend unreachable")}) — live bins above unaffected.
             </p>
           )}
           {calHistory.length > 0 && (
@@ -406,7 +449,14 @@ function ForecastDetails({ symbol }) {
           </p>
         )}
         {analyticsQ.isLoading && <p className="mt-1 text-xs text-term-muted">loading analytics…</p>}
-        {analyticsQ.isError && <p className="mt-1 text-xs text-term-amber">⚠ analytics endpoint unreachable — snapshot unavailable, forecast above unaffected.</p>}
+        {analyticsQ.isError && (
+          <p className="mt-1 text-xs text-term-amber">
+            ⚠ analytics endpoint unreachable — snapshot unavailable, forecast above unaffected.{" "}
+            <button className="term-btn-ghost ml-2 text-xs" type="button" onClick={() => void analyticsQ.refetch()}>
+              RETRY ANALYTICS
+            </button>
+          </p>
+        )}
         {analytics && (
           <>
             <AnalyticsGrid title="Technical" data={analytics.technical} />
@@ -442,6 +492,22 @@ function ForecastDetails({ symbol }) {
         <button className="term-btn" type="button" disabled={aiM.isPending} onClick={() => aiM.mutate()}>
           {aiM.isPending ? "REQUESTING…" : aiM.data ? "REFRESH AI OPINION" : "REQUEST AI OPINION"}
         </button>
+        {aiM.isPending && (
+          <button
+            className="term-btn-ghost text-xs"
+            type="button"
+            onClick={() => {
+              try {
+                aiCtrl.current?.abort();
+              } catch {
+                // never throws
+              }
+              aiM.reset();
+            }}
+          >
+            CANCEL
+          </button>
+        )}
         {aiM.isError && <span className="text-term-amber">⚠ {friendlyAIError(aiM.error)}— deterministic forecast above is unaffected.</span>}
       </div>
       {/* Tier-gated stub — always unlocked, no enforcement. */}
