@@ -433,7 +433,8 @@ def test_stale_db_bars_refresh_instead_of_serve(isolated_db, monkeypatch):
     _seed_daily_bars(isolated_db, "AAPL", date(2024, 4, 1))
     calls: list[str] = []
 
-    def _fresh(provider_symbol: str):
+    def _fresh(provider_symbol: str, period: str = "2y", interval: str = "1d"):
+        assert period == "2y" and interval == "1d"  # chain-call contract
         calls.append(provider_symbol)
         return _fresh_fake_bars(expected)
 

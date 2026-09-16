@@ -62,6 +62,14 @@ Ranked by reliability × coverage × free-tier fit for THIS app.
 - **ToS:** brokerage account required (paper is fine); keys header-only,
   never logged.
 - **Reliability:** high. US-only by construction.
+- **Bars:** `/v2/stocks/{SYM}/bars` (`timeframe=1Day`, `adjustment=all`
+  — split/dividend-adjusted like yfinance `auto_adjust`) feeds daily bars
+  for Alpaca-covered US symbols first (`ingest.fetch_alpaca_daily_bars`;
+  default bar chain becomes `alpaca,yfinance,stooq` only when keys
+  resolve, else `yfinance,stooq`), so Alpaca quotes and price charts come
+  from the same feed — no Alpaca-quote vs yfinance-chart mismatch.
+  On-demand backfill (`_fetch_and_store_bars`) uses the same rule and
+  persists the winning link in `price_bars.source`.
 
 ### 4. Finnhub free — real-time US (key) ✅ NEW in chain
 - **Delay:** 0 for US (`/quote` is real-time on free).

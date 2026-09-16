@@ -34,10 +34,29 @@ DEFAULT_UNIVERSE: list[str] = [
 DEFAULT_TIMEFRAME = "1d"
 
 #: Bar-chain order for daily ingestion (overridable via ``INGEST_BAR_CHAIN``
-#: comma-list, e.g. ``yfinance,stooq``). yfinance stays first (full 2y
-#: history); stooq is a best-effort gap-filler for symbols yfinance misses.
-#: Unknown names are ignored so a typo never breaks a cron tick.
+#: comma-list, e.g. ``yfinance,stooq``). Without Alpaca keys this stays
+#: ``["yfinance", "stooq"]`` (yfinance first: full 2y history; stooq is a
+#: best-effort gap-filler). With keys, ``bar_chain()`` prepends ``alpaca``
+#: so Alpaca-covered (US) symbols ingest from the same feed as their quotes
+#: (no Alpaca-quote vs yfinance-chart mismatch). Unknown names are ignored
+#: so a typo never breaks a cron tick.
 DEFAULT_BAR_CHAIN: list[str] = ["yfinance", "stooq"]
+
+
+def _alpaca_keys_present() -> bool:
+    """True when Alpaca key id + secret resolve (env/args). No network."""
+    try:
+        from backend.market_data.providers.alpaca import resolve_keys
+    except Exception:
+        try:
+            from .providers.alpaca import resolve_keys  # type: ignore[no-redef]
+        except Exception:
+            return False
+    try:
+        key, secret = resolve_keys()
+    except Exception:
+        return False
+    return bool(key and secret)
 
 #: Single yfinance history fetch per symbol (same Ticker.history pattern as
 #: the quote provider's ``2d`` fetch, extended to daily bars).
@@ -85,16 +104,26 @@ def default_universe() -> list[str]:
 
 
 def bar_chain() -> list[str]:
-    """Ordered fetch fallbacks for daily bars (env ``INGEST_BAR_CHAIN``)."""
+    """Ordered fetch fallbacks for daily bars (env ``INGEST_BAR_CHAIN``).
+
+    Explicit env wins (alpaca/yfinance/stooq names accepted). Otherwise the
+    default prepends ``alpaca`` when Alpaca keys resolve (same-feed bars for
+    Alpaca-covered US symbols, matching their quotes) and stays
+    ``["yfinance", "stooq"]`` when unconfigured (alpaca would fail fast
+    without network, so omitting it also keeps cron logs quiet).
+    """
     raw = (os.getenv("INGEST_BAR_CHAIN", "") or "").strip().lower()
-    if not raw:
-        return list(DEFAULT_BAR_CHAIN)
-    out: list[str] = []
-    for part in raw.split(","):
-        name = part.strip()
-        if name in ("yfinance", "stooq") and name not in out:
-            out.append(name)
-    return out or list(DEFAULT_BAR_CHAIN)
+    if raw:
+        out: list[str] = []
+        for part in raw.split(","):
+            name = part.strip()
+            if name in ("alpaca", "yfinance", "stooq") and name not in out:
+                out.append(name)
+        if out:
+            return out
+    if _alpaca_keys_present():
+        return ["alpaca", "yfinance", "stooq"]
+    return list(DEFAULT_BAR_CHAIN)
 
 
 def _fnum(value: object) -> float | None:
@@ -295,6 +324,122 @@ def fetch_stooq_daily_bars(
     return bars
 
 
+def fetch_alpaca_daily_bars(
+    provider_symbol: str,
+    *,
+    feed: str | None = None,
+    limit: int = 5000,
+) -> list[dict]:
+    """Fetch split/dividend-adjusted daily bars via Alpaca (US only, needs keys).
+
+    ``GET /v2/stocks/{SYM}/bars?timeframe=1Day&adjustment=all&sort=asc``
+    (``adjustment=all`` matches the yfinance ``auto_adjust=True`` lineage
+    the forecasting engine assumes). One page holds 2y of dailies
+    (``limit=5000``); ``next_page_token`` is followed defensively (bounded).
+    Alpaca daily timestamps are midnight ET in UTC, so the calendar date is
+    the trading day itself (same convention as the yfinance path's
+    exchange-midnight-in-UTC). Returns ascending
+    ``[{ts (aware UTC), open, high, low, close, volume}]``. Raises on
+    missing keys / non-US symbol (fast, no network) / empty history;
+    callers convert that into a chain miss (never a batch 500).
+    """
+    symbol = (provider_symbol or "").strip().upper()
+    if not symbol:
+        raise ValueError("empty symbol")
+    try:
+        from backend.market_data.providers.alpaca import (
+            BASE_URL,
+            resolve_feed,
+            resolve_keys,
+            to_alpaca_symbol,
+        )
+    except Exception as exc:
+        raise RuntimeError("alpaca provider unavailable") from exc
+    # Fast-fail before any network: non-US symbols and missing keys.
+    alpaca_symbol = to_alpaca_symbol(symbol)  # raises for .SS/.PA/.AS/.BR
+    key_id, secret = resolve_keys()
+    if not (key_id and secret):
+        raise RuntimeError("alpaca API keys missing")
+    try:
+        import httpx
+    except Exception as exc:
+        raise RuntimeError("httpx package unavailable") from exc
+    try:
+        page_limit = max(100, min(int(limit), 10000))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        page_limit = 5000
+    use_feed = resolve_feed(feed)
+    headers = {"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret}
+    params: dict[str, object] = {
+        "timeframe": "1Day",
+        "limit": page_limit,
+        "adjustment": "all",
+        "sort": "asc",
+        "feed": use_feed,
+    }
+    bars: list[dict] = []
+    for _page in range(6):  # bounded: 6 x 5000 rows max, far past 2y of dailies
+        try:
+            resp = httpx.get(
+                f"{BASE_URL}/v2/stocks/{alpaca_symbol}/bars",
+                params=dict(params),
+                headers=headers,
+                timeout=60.0,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"alpaca bars failed for {symbol}: {type(exc).__name__}") from exc
+        try:
+            status = int(getattr(resp, "status_code", 200) or 200)
+        except (TypeError, ValueError):
+            status = 200
+        if status in (401, 403):
+            raise RuntimeError("alpaca unauthorized (check Alpaca keys)")
+        if status == 404:
+            raise RuntimeError(f"no data for {symbol}")
+        if status == 429:
+            raise RuntimeError("alpaca rate limited (429)")
+        if status >= 400:
+            raise RuntimeError(f"alpaca HTTP {status}")
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise RuntimeError(f"alpaca bad JSON for {symbol}: {type(exc).__name__}") from exc
+        rows = (payload or {}).get("bars") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError(f"alpaca unexpected bars schema for {symbol}")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                ts = _index_to_utc(row.get("t"), symbol_hint=symbol)
+            except Exception:
+                continue
+            if ts is None:
+                continue
+            close = _fnum(row.get("c"))
+            if close is None:
+                continue
+            bars.append({
+                "ts": ts,
+                "open": _fnum(row.get("o")),
+                "high": _fnum(row.get("h")),
+                "low": _fnum(row.get("l")),
+                "close": close,
+                "volume": _inum(row.get("v")),
+            })
+        try:
+            token = (payload or {}).get("next_page_token")
+        except Exception:
+            token = None
+        if not token:
+            break
+        params["page_token"] = str(token)
+    bars.sort(key=lambda item: item["ts"])
+    if not bars:
+        raise RuntimeError(f"no usable alpaca bars for {symbol}")
+    return bars
+
+
 def fetch_daily_bars_with_fallback(
     provider_symbol: str,
     period: str = FETCH_PERIOD,
@@ -306,8 +451,8 @@ def fetch_daily_bars_with_fallback(
     Default chain is :func:`bar_chain` (env ``INGEST_BAR_CHAIN``). Tries each
     link in order, returning the first non-empty success. Raises the last
     error when every link fails so callers report a per-symbol error.
-    ``source`` is the winning link name (``yfinance``/``stooq``) for
-    ``price_bars.source`` lineage.
+    ``source`` is the winning link name (``alpaca``/``yfinance``/``stooq``)
+    for ``price_bars.source`` lineage.
     """
     links = list(chain) if chain else bar_chain()
     last_exc: Exception | None = None
@@ -315,6 +460,8 @@ def fetch_daily_bars_with_fallback(
         try:
             if link == "stooq":
                 return fetch_stooq_daily_bars(provider_symbol, period, interval), "stooq"
+            if link == "alpaca":
+                return fetch_alpaca_daily_bars(provider_symbol), "alpaca"
             return fetch_daily_bars(provider_symbol, period, interval), "yfinance"
         except Exception as exc:
             last_exc = exc

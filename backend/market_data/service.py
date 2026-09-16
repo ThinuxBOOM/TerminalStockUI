@@ -1047,12 +1047,32 @@ class MarketDataService:
             from backend.market_data.ingest import (
                 _get_or_create_db_instrument,
                 _upsert_bars,
-                fetch_daily_bars,
+                fetch_daily_bars_with_fallback,
             )
         except Exception:
             return False
+        # Same-feed bars for Alpaca-covered US symbols: Alpaca first (when
+        # eligible AND keys resolve — both checks are local, no network),
+        # yfinance otherwise. Non-US paths keep today's yfinance-only
+        # behavior exactly (SSE/Euronext never touch Alpaca).
         try:
-            bars = fetch_daily_bars(provider_symbol)
+            chain: list[str] = ["yfinance"]
+            if MarketDataService._is_alpaca_eligible(
+                getattr(instrument, "exchange_mic", None), provider_symbol
+            ):
+                try:
+                    from backend.market_data.ingest import _alpaca_keys_present
+
+                    if _alpaca_keys_present():
+                        chain = ["alpaca", "yfinance"]
+                except Exception:
+                    pass
+        except Exception:
+            chain = ["yfinance"]
+        try:
+            bars, bars_source = fetch_daily_bars_with_fallback(
+                provider_symbol, chain=chain
+            )
         except Exception:
             self._remember_fetch_miss(miss_key)
             return False
@@ -1065,7 +1085,7 @@ class MarketDataService:
             db = Session()
             try:
                 db_inst = _get_or_create_db_instrument(db, instrument)
-                _upsert_bars(db, db_inst, bars, timeframe="1d")
+                _upsert_bars(db, db_inst, bars, timeframe="1d", source=bars_source)
                 db.commit()
             except Exception:
                 try:
