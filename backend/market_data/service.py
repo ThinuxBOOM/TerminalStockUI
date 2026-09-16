@@ -10,10 +10,13 @@ no stale data. Ever.
 from __future__ import annotations
 
 import hashlib
+import logging
 import random
 import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 from .health import ProviderHealthTracker, market_state
 from .provenance import Provenance, build_provenance
@@ -1050,7 +1053,66 @@ class MarketDataService:
         out["stitched"] = bool(stitched)
         out["stitched_reason"] = reason
         out["forming"] = bool(forming)
+        try:
+            final_source = str(
+                (bars_payload.get("provenance") or {}).get("source") or ""
+            )
+        except Exception:
+            final_source = ""
+        out["alpaca_bars"] = self._alpaca_bars_status(
+            symbol_text, timeframe, final_source
+        )
         return out
+
+    def _alpaca_bars_status(
+        self, symbol_text: str, timeframe: str, final_source: str
+    ) -> dict:
+        """Why the bars feed is (or isn't) Alpaca — self-serve in /chart.
+
+        Reasons: ``already-alpaca`` (nothing to do), ``non-1d-timeframe``,
+        ``non-us-symbol`` (Alpaca is US-only), ``keys-missing`` (set
+        ``ALPACA_API_KEY_ID`` + ``ALPACA_API_SECRET_KEY`` on the backend),
+        ``cooldown-active`` (a recent Alpaca bars attempt failed — backend
+        logs carry the ``alpaca bars miss`` reason; retries resume
+        automatically), or ``attempted-unavailable`` (the gate passed but
+        the rows still aren't Alpaca — the attempt failed, see logs).
+        Never raises.
+        """
+        try:
+            if (timeframe or "1d") != "1d":
+                return {"wanted": False, "reason": "non-1d-timeframe"}
+            if str(final_source or "").strip().lower() == "alpaca":
+                return {"wanted": False, "reason": "already-alpaca"}
+            try:
+                instrument, _, _ = self.registry.resolve(symbol_text)
+            except Exception:
+                instrument = None
+            try:
+                mic = getattr(instrument, "exchange_mic", None) if instrument else None
+                psym = ((getattr(instrument, "provider_symbol", None)
+                         or symbol_text.upper())
+                        if instrument else (symbol_text or "").upper())
+            except Exception:
+                mic, psym = None, (symbol_text or "").upper()
+            if not MarketDataService._is_alpaca_eligible(mic, psym):
+                return {"wanted": False, "reason": "non-us-symbol"}
+            try:
+                from backend.market_data.ingest import _alpaca_keys_present
+
+                if not _alpaca_keys_present():
+                    return {"wanted": False, "reason": "keys-missing"}
+            except Exception:
+                return {"wanted": False, "reason": "keys-missing"}
+            try:
+                if time.monotonic() < float(
+                    getattr(self, "_alpaca_bars_unavailable_until", 0.0) or 0.0
+                ):
+                    return {"wanted": False, "reason": "cooldown-active"}
+            except Exception:
+                pass
+            return {"wanted": True, "reason": "attempted-unavailable"}
+        except Exception:
+            return {"wanted": False, "reason": "unknown"}
 
     def _bars_payload_is_fresh(self, payload: dict | None, symbol: str, timeframe: str) -> bool:
         """Daily-only freshness gate for a bars payload.
@@ -1386,7 +1448,20 @@ class MarketDataService:
 
                 bars = fetch_alpaca_daily_bars(provider_symbol)
                 bars_source = "alpaca"
-            except Exception:
+            except Exception as exc:
+                # Visible in backend logs (type + short reason only — key
+                # material never flows through exceptions here): repeated
+                # lines here mean the Alpaca bars leg is down while quotes
+                # may still work (different endpoint/subscription).
+                try:
+                    logger.warning(
+                        "alpaca bars miss symbol=%s reason=%s: %s",
+                        provider_symbol,
+                        type(exc).__name__,
+                        str(exc)[:160],
+                    )
+                except Exception:
+                    pass
                 try:
                     self._alpaca_bars_unavailable_until = (
                         time.monotonic() + _ALPACA_BARS_COOLDOWN_S

@@ -164,7 +164,20 @@ def _index_to_utc(idx: object, symbol_hint: str = "") -> datetime | None:
         elif isinstance(idx, date):
             moment = datetime(idx.year, idx.month, idx.day)
         else:
-            moment = datetime.fromisoformat(str(idx))
+            text = str(idx).strip()
+            # Vendor-string normalization: 'Z' suffix + nanosecond fractions
+            # (Alpaca emits 9-digit fractions; fromisoformat takes 3 or 6 —
+            # without this every Alpaca bar row is dropped as unparseable).
+            # Inputs without fractions/suffixes pass through byte-identical.
+            if text.endswith(("Z", "z")):
+                text = text[:-1] + "+00:00"
+            try:
+                import re as _re
+
+                text = _re.sub(r"(\.\d{6})\d+(?=[+-]\d{2}:?\d{2}$|$)", r"\1", text)
+            except Exception:
+                pass
+            moment = datetime.fromisoformat(text)
     except Exception:
         return None
     if not isinstance(moment, datetime):
