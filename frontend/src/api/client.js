@@ -1499,6 +1499,63 @@ function saveFavoriteIndicators(userId, list) {
     return false;
   }
 }
+function normalizeChart(raw, symbol, timeframe = "1d") {
+  // Single-call chart payload: live quote + bars stitched with that exact
+  // quote (backend GET /api/market_data/chart). Header price and the last
+  // candle close are the same number by construction — no quote-vs-bars
+  // time skew. Quote parse failure degrades to quote=null (bars still
+  // render); the caller falls back to the legacy quote hook for the header.
+  const r = raw ?? {};
+  const candlesOut = normalizeBarsToCandles(r, symbol, timeframe);
+  let quote = null;
+  try {
+    if (r.quote && typeof r.quote === "object") quote = normalizeQuote(r.quote);
+  } catch {
+    quote = null;
+  }
+  return {
+    symbol: candlesOut.symbol,
+    timeframe: candlesOut.timeframe,
+    quote,
+    candles: candlesOut.candles,
+    stitched: Boolean(r.stitched),
+    stitched_reason: typeof r.stitched_reason === "string" ? r.stitched_reason : null,
+    provenance: candlesOut.provenance
+  };
+}
+async function getChart(symbol, timeframe = "1d", limit = 90, opts) {
+  const sym = normalizeSymbolParam(symbol);
+  const tf = String(timeframe ?? "1d").trim() || "1d";
+  const n = Number.isFinite(Number(limit)) ? Math.min(BARS_MAX_LIMIT, Math.max(1, Math.floor(Number(limit)))) : 90;
+  const signal = opts?.signal;
+  return coalesceInflight(`chart:${sym}:${tf}:${n}`, async () => {
+    try {
+      const { data } = await api.get("/api/market_data/chart", {
+        params: { symbol: sym, timeframe: tf, limit: n },
+        ...signal ? { signal } : {}
+      });
+      return normalizeChart(data, sym, tf);
+    } catch (err) {
+      if (!isEndpointMissingError(err)) throw err;
+      // Rollout shim: backends without /chart combine the two legacy calls.
+      // Numbers can skew here (that's what /chart fixes); the header still
+      // prefers the quote leg.
+      const [quote, bars] = await Promise.all([
+        getQuote(sym, void 0, opts),
+        getBars(sym, tf, n, opts)
+      ]);
+      return {
+        symbol: sym,
+        timeframe: tf,
+        quote,
+        candles: bars.candles,
+        stitched: false,
+        stitched_reason: "legacy-backend",
+        provenance: bars.provenance
+      };
+    }
+  });
+}
 async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
   const sym = normalizeSymbolParam(symbol);
   const tf = String(timeframe ?? "1d").trim() || "1d";
@@ -1526,6 +1583,6 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
     }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, testProviderHealth };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, testProviderHealth };
 
 export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };

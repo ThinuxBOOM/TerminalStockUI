@@ -15,7 +15,7 @@ from backend.security.validation import (
 )
 from backend.analytics.technical.overlays import compute_indicators, parse_indicators
 from backend.api.deps import get_market_service, get_registry
-from backend.api.schemas import BarsResponse, QuoteResponse
+from backend.api.schemas import BarsResponse, ChartResponse, QuoteResponse
 
 router = APIRouter(prefix="/api/market_data", tags=["market_data"])
 
@@ -104,6 +104,41 @@ def bars(
         raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="bars failed")) from exc
+
+
+@router.get("/chart", response_model=ChartResponse)
+def chart(
+    symbol: str = Query(..., min_length=1, max_length=32),
+    timeframe: str = Query(default="1d"),
+    limit: int = Query(default=90, ge=1, le=1000),
+    svc: MarketDataService = Depends(get_market_service),
+):
+    """GET /api/market_data/chart?symbol=AAPL&timeframe=1d&limit=90.
+
+    One backend handling returns the live quote AND the bars series with
+    the quote overlaid onto the terminal 1d bar, so the header price and
+    the chart's last print are the same number from the same call (no
+    quote-vs-bars time skew). Quote failure degrades to ``quote=null`` +
+    ``stitched=false`` (bars still served); bars failure is 502 as today.
+    """
+    symbol = validate_symbol(symbol)
+    timeframe = validate_timeframe(timeframe)
+    try:
+        out = svc.get_chart(symbol, timeframe, limit)
+    except HTTPException:
+        raise
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=sanitize_error(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="chart failed")) from exc
+    try:
+        if isinstance(out.get("quote"), dict):
+            out["quote"] = _enrich_market_state(out["quote"])
+    except Exception:
+        pass
+    return out
 
 
 @router.get("/indicators")

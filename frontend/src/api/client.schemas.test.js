@@ -304,6 +304,62 @@ describe("normalizeAnalytics with ?indicators (overlay series passthrough)", () 
     expect(out.indicators.SMA20).toEqual([{ time: "2026-01-15", value: 100 }]);
     expect(out.provenance.source).toBe("stub");
   });
+  it("normalizeChart keeps header price and last candle from the same call", async () => {
+    const { normalizeChart } = await import("./client");
+    const out = normalizeChart(
+      {
+        symbol: "AAPL",
+        timeframe: "1d",
+        quote: {
+          symbol: "AAPL",
+          price: 333.28,
+          currency: "USD",
+          provenance: prov(),
+        },
+        bars: [
+          { ts: "2026-09-16", open: 331, high: 332, low: 330, close: 333.28 },
+        ],
+        stitched: true,
+        stitched_reason: null,
+        provenance: prov(),
+      },
+      "AAPL",
+      "1d"
+    );
+    expect(out.quote.price).toBe(333.28);
+    expect(out.candles[out.candles.length - 1].close).toBe(out.quote.price);
+    expect(out.stitched).toBe(true);
+  });
+  it("normalizeChart degrades honestly on quote problems (bars still render)", async () => {
+    const { normalizeChart } = await import("./client");
+    const missing = normalizeChart(
+      {
+        symbol: "AAPL",
+        quote: null,
+        bars: [{ ts: "2026-09-16", open: 1, high: 1, low: 1, close: 1 }],
+        stitched: false,
+        stitched_reason: "quote-missing",
+        provenance: prov(),
+      },
+      "AAPL"
+    );
+    expect(missing.quote).toBeNull();
+    expect(missing.candles).toHaveLength(1);
+    expect(missing.stitched).toBe(false);
+    // Bogus price never leaks NaN into the header — it normalizes to null.
+    const bogus = normalizeChart(
+      {
+        symbol: "AAPL",
+        quote: { symbol: "AAPL", price: "bogus", provenance: prov() },
+        bars: [{ ts: "2026-09-16", open: 1, high: 1, low: 1, close: 1 }],
+        stitched: false,
+        provenance: prov(),
+      },
+      "AAPL"
+    );
+    expect(bogus.quote.price).toBeNull();
+    expect(bogus.candles).toHaveLength(1);
+  });
   it("yields empty indicators (never fabricated) when the backend sends snapshot-only", async () => {
     const { normalizeAnalytics } = await import("./client");
     const out = normalizeAnalytics(

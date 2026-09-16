@@ -828,6 +828,124 @@ class MarketDataService:
             f"no live bars for {symbol} (DB thin/empty/stale, live fetch missed)",
         )
 
+    @staticmethod
+    def _stitch_quote_into_bars(
+        bars: list[dict], quote: dict | None
+    ) -> tuple[list[dict], bool, str | None]:
+        """Overlay the live quote onto a COPY of 1d bars (pure helper).
+
+        When the quote's session date equals the last bar's date, the last
+        bar's close/high/low (and volume when the quote carries a finite
+        one) are set from the quote so the chart's terminal print is the
+        live price — same number, same call. Never appends a forming bar
+        (its open is unknowable without fabrication) and never mutates the
+        input rows (the bars payload may be a shared cache object; DB rows
+        are untouched — forecasting keeps clean daily history).
+        Returns ``(bars_copy, stitched, reason)``; ``reason`` is None when
+        stitched. Never raises.
+        """
+        try:
+            rows = [dict(b) if isinstance(b, dict) else b for b in (bars or [])]
+        except Exception:
+            return bars, False, "bars-unusable"
+        if not rows:
+            return rows, False, "no-bars"
+        if not isinstance(quote, dict):
+            return rows, False, "quote-missing"
+        try:
+            price = float(quote.get("price"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return rows, False, "quote-priceless"
+        try:
+            import math as _math
+
+            if not _math.isfinite(price) or price <= 0:
+                return rows, False, "quote-priceless"
+        except Exception:
+            return rows, False, "quote-priceless"
+        try:
+            as_of_raw = ((quote.get("provenance") or {}).get("as_of")
+                         if isinstance(quote.get("provenance"), dict) else None)
+            as_of_raw = as_of_raw if as_of_raw is not None else quote.get("as_of")
+            quote_day = str(as_of_raw)[:10]
+            if len(quote_day) != 10:
+                return rows, False, "quote-undated"
+            last = rows[-1]
+            last_day = str((last or {}).get("ts") or "")[:10]
+            if len(last_day) != 10:
+                return rows, False, "bars-undated"
+        except Exception:
+            return rows, False, "quote-undated"
+        if quote_day != last_day:
+            return rows, False, (
+                "quote-newer-session" if quote_day > last_day else "quote-stale"
+            )
+        try:
+            last["close"] = price
+            try:
+                if last.get("high") is None or float(last["high"]) < price:
+                    last["high"] = price
+            except (TypeError, ValueError):
+                last["high"] = price
+            try:
+                if last.get("low") is None or float(last["low"]) > price:
+                    last["low"] = price
+            except (TypeError, ValueError):
+                last["low"] = price
+            try:
+                qvol = quote.get("volume")
+                if qvol is not None and not isinstance(qvol, bool):
+                    qvol_f = float(qvol)  # type: ignore[arg-type]
+                    import math as _math2
+
+                    if _math2.isfinite(qvol_f) and qvol_f >= 0:
+                        last["volume"] = int(qvol_f)
+            except (TypeError, ValueError):
+                pass
+        except Exception:
+            return rows, False, "stitch-failed"
+        return rows, True, None
+
+    def get_chart(
+        self, symbol: str, timeframe: str = "1d", limit: int = 30
+    ) -> dict:
+        """Single-call chart payload: live quote + bars stitched with it.
+
+        Fetches the bars series (existing DB-first + refresh path, raises
+        502 when unservable exactly like :meth:`get_bars`) and the live
+        quote (same provider chain) in ONE backend handling, then overlays
+        the quote onto the terminal 1d bar (same-date sessions only) so the
+        header price and the chart's last print are the same number from
+        the same call. Quote failure degrades to ``quote=None`` +
+        ``stitched=False`` (bars still served); bars failure raises.
+        Non-1d timeframes skip stitching (no intraday forming bar). The
+        stitched rows are response copies — stored bars and the forecast
+        engine (which reads :meth:`get_bars`, never this) are untouched.
+        """
+        try:
+            symbol_text = str(symbol or "").strip()
+        except Exception:
+            symbol_text = ""
+        bars_payload = self.get_bars(symbol_text, timeframe, limit)
+        bars = bars_payload.get("bars", []) if isinstance(bars_payload, dict) else []
+        quote: dict | None = None
+        if (timeframe or "1d") == "1d":
+            try:
+                quote = self.get_quote(symbol_text, None)
+            except Exception:
+                quote = None
+        stitched, reason = False, "quote-missing"
+        if quote is not None and (timeframe or "1d") == "1d":
+            bars, stitched, reason = self._stitch_quote_into_bars(bars, quote)
+        elif (timeframe or "1d") != "1d":
+            reason = "non-1d-timeframe"
+        out = dict(bars_payload) if isinstance(bars_payload, dict) else {}
+        out["bars"] = bars
+        out["quote"] = quote
+        out["stitched"] = bool(stitched)
+        out["stitched_reason"] = reason
+        return out
+
     def _bars_payload_is_fresh(self, payload: dict | None, symbol: str, timeframe: str) -> bool:
         """Daily-only freshness gate for a bars payload.
 

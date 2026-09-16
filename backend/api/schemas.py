@@ -68,6 +68,25 @@ class BarsResponse(BaseModel):
     provenance: Provenance
 
 
+class ChartResponse(BaseModel):
+    """Single-call chart payload: live quote + bars stitched with it.
+
+    ``quote`` is None (with ``stitched=False``) when the live quote leg
+    fails — bars still served. ``stitched`` is True only when the terminal
+    1d bar's close/high/low were set from ``quote.price`` in this same
+    handling, so the header price and the chart's last print cannot skew.
+    """
+
+    symbol: str
+    instrument_id: str | None = None
+    timeframe: str = "1d"
+    quote: QuoteResponse | None = None
+    bars: list[BarOut] = Field(default_factory=list)
+    stitched: bool = False
+    stitched_reason: str | None = None
+    provenance: Provenance
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"] = "ok"
     postgres: str = "unknown"

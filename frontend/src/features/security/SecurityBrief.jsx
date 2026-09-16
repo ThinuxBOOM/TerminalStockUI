@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getBars, getForecast, getQuote, auditForecastsUrl, loadFavoriteIndicators, resolveTimeframePreset, saveFavoriteIndicators } from "../../api/client";
+import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getChart, getForecast, auditForecastsUrl, loadFavoriteIndicators, resolveTimeframePreset, saveFavoriteIndicators } from "../../api/client";
 import ProvenanceBadge from "../../components/ProvenanceBadge";
 import FreshnessBadge from "../../components/FreshnessBadge";
 import MarketStateBadge from "../../components/MarketStateBadge";
@@ -103,9 +103,12 @@ function SecurityBrief({ symbol }) {
       return next;
     });
   }
+  // Single-call chart: live quote + bars stitched with that exact quote
+  // (GET /api/market_data/chart), so the header price and the chart's last
+  // print are the same number from the same call — no quote-vs-bars skew.
   const quote = useQuery({
-    queryKey: ["quote", symbol],
-    queryFn: ({ signal }) => getQuote(symbol, undefined, { signal }),
+    queryKey: ["chart", symbol, preset.timeframe, preset.limit],
+    queryFn: ({ signal }) => getChart(symbol, preset.timeframe, preset.limit, { signal }),
     retry: false,
     staleTime: 30000,
   });
@@ -121,16 +124,11 @@ function SecurityBrief({ symbol }) {
     retry: false,
     staleTime: 60000,
   });
-  const barsQ = useQuery({
-    queryKey: ["bars", symbol, preset.timeframe, preset.limit],
-    queryFn: ({ signal }) => getBars(symbol, preset.timeframe, preset.limit, { signal }),
-    retry: false,
-    staleTime: 60000,
-  });
+  const barsQ = quote; // alias: bars now ride the same chart response (candles/provenance below)
   const forecast = forecastQ.data ?? null;
   const analytics = analyticsQ.data ?? null;
   const events = useMemo(() => eventsFromAnalytics(analytics), [analytics]);
-  const q = quote.data;
+  const q = quote.data?.quote ?? null;
   // Non-blocking quote: the header skeletons inline while forecast, chart
   // and events (already fetching in parallel) render from their own queries.
   const quoteLoading = quote.isLoading && !q;
