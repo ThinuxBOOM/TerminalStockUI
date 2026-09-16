@@ -231,19 +231,83 @@ def _120_bars():
     } for i in range(120)]
 
 
+def _seed_fresh_yahoo_bars(url: str, symbol: str = "AAPL"):
+    """Seed 120 fresh yfinance rows ending the last completed XNAS session."""
+    from datetime import timedelta
+    from backend.db.models import Instrument as DBInstrument
+    from backend.db.models import PriceBar as _PriceBar
+    from backend.db.session import get_session_factory, init_db
+    from backend.instruments.calendars import last_completed_trading_day
+
+    end_day = last_completed_trading_day("XNAS")
+    init_db(url)
+    Session = get_session_factory(url)
+    db = Session()
+    try:
+        inst = DBInstrument(
+            exchange_mic="XNAS", exchange_symbol=symbol,
+            provider_symbol=symbol, company_name=symbol, currency="USD",
+        )
+        db.add(inst)
+        db.flush()
+        price = 300.0
+        for i in range(120):
+            day = end_day - timedelta(days=(119 - i))
+            ts = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+            o = round(price, 2)
+            c = round(price * 1.001, 2)
+            db.add(_PriceBar(
+                instrument_id=inst.instrument_id, ts=ts, timeframe="1d",
+                open=o, high=round(max(o, c) * 1.002, 2),
+                low=round(min(o, c) * 0.998, 2), close=c,
+                volume=1_000_000 + i, source="yfinance",
+                as_of=datetime.now(timezone.utc), quality_grade="B",
+            ))
+            price = c
+        db.commit()
+    finally:
+        db.close()
+    return end_day
+
+
+def _alpaca_bars_on_grid(end_day, close_base: float = 500.0):
+    """120 Alpaca bars on the SAME calendar grid (merge overwrites by PK)."""
+    from datetime import timedelta
+
+    bars = []
+    price = close_base
+    for i in range(120):
+        day = end_day - timedelta(days=(119 - i))
+        o = round(price, 2)
+        c = round(price * 1.001, 2)
+        bars.append({
+            "ts": datetime(day.year, day.month, day.day, tzinfo=timezone.utc),
+            "open": o, "high": round(max(o, c) * 1.002, 2),
+            "low": round(min(o, c) * 0.998, 2), "close": c,
+            "volume": 2_000_000 + i,
+        })
+        price = c
+    return bars
+
+
 def test_ondemand_backfill_prefers_alpaca_for_us(isolated_db, monkeypatch, alpaca_keys):
     from backend.market_data import ingest as ing
 
-    seen: dict[str, object] = {}
+    calls: list[str] = []
 
-    def _chain(symbol, chain=None, **k):
-        seen["chain"] = list(chain or [])
-        return list(_120_bars()), "alpaca"
+    def _alpaca(symbol, **k):
+        calls.append(f"alpaca:{symbol}")
+        return list(_120_bars())
 
-    monkeypatch.setattr(ing, "fetch_daily_bars_with_fallback", _chain)
+    def _yf(symbol, period="2y", interval="1d"):
+        calls.append(f"yfinance:{symbol}")
+        return list(_120_bars())
+
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _alpaca)
+    monkeypatch.setattr(ing, "fetch_daily_bars", _yf)
     svc = _service()
     assert svc._fetch_and_store_bars("AAPL", "1d") is True
-    assert seen["chain"] == ["alpaca", "yfinance"]
+    assert calls == ["alpaca:AAPL"]  # yfinance never touched
     Session = get_session_factory()
     db = Session()
     try:
@@ -257,29 +321,131 @@ def test_ondemand_backfill_prefers_alpaca_for_us(isolated_db, monkeypatch, alpac
 def test_ondemand_backfill_sse_stays_yfinance(isolated_db, monkeypatch, alpaca_keys):
     from backend.market_data import ingest as ing
 
-    seen: dict[str, object] = {}
+    def _alpaca(symbol, **k):
+        raise AssertionError("SSE must never touch Alpaca")
 
-    def _chain(symbol, chain=None, **k):
-        seen["chain"] = list(chain or [])
+    def _yf(symbol, period="2y", interval="1d"):
         assert symbol == "600519.SS"
-        return list(_120_bars()), "yfinance"
+        return list(_120_bars())
 
-    monkeypatch.setattr(ing, "fetch_daily_bars_with_fallback", _chain)
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _alpaca)
+    monkeypatch.setattr(ing, "fetch_daily_bars", _yf)
     svc = _service()
     assert svc._fetch_and_store_bars("600519.SS", "1d") is True
-    assert seen["chain"] == ["yfinance"]
 
 
 def test_ondemand_backfill_yfinance_when_unconfigured(isolated_db, monkeypatch):
     from backend.market_data import ingest as ing
 
-    seen: dict[str, object] = {}
+    def _alpaca(symbol, **k):
+        raise AssertionError("unconfigured keys must not attempt Alpaca")
 
-    def _chain(symbol, chain=None, **k):
-        seen["chain"] = list(chain or [])
-        return list(_120_bars()), "yfinance"
+    def _yf(symbol, period="2y", interval="1d"):
+        return list(_120_bars())
 
-    monkeypatch.setattr(ing, "fetch_daily_bars_with_fallback", _chain)
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _alpaca)
+    monkeypatch.setattr(ing, "fetch_daily_bars", _yf)
     svc = _service()
     assert svc._fetch_and_store_bars("AAPL", "1d") is True
-    assert seen["chain"] == ["yfinance"]
+
+
+def test_get_bars_refreshes_yahoo_rows_from_alpaca(isolated_db, monkeypatch, alpaca_keys):
+    """Fresh yfinance DB rows are refreshed (not served) for US symbols."""
+    from backend.market_data import ingest as ing
+
+    end_day = _seed_fresh_yahoo_bars(isolated_db)
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars",
+                        lambda symbol, **k: _alpaca_bars_on_grid(end_day))
+    svc = _service()
+    out = svc.get_bars("AAPL", timeframe="1d", limit=120)
+    assert len(out["bars"]) == 120
+    assert out["provenance"]["source"] == "alpaca"
+    assert out["provenance"]["fallback_used"] is False
+    # Alpaca values overwrote the seeded ~300s with ~500s on the same grid.
+    assert out["bars"][0]["close"] == pytest.approx(
+        _alpaca_bars_on_grid(end_day)[0]["close"])
+    assert out["bars"][0]["close"] > 400.0
+
+
+def test_get_bars_serves_yahoo_when_alpaca_down_no_502(isolated_db, monkeypatch, alpaca_keys):
+    """Alpaca outage + fresh yfinance rows: serve honestly, cool down."""
+    from backend.market_data import ingest as ing
+
+    _seed_fresh_yahoo_bars(isolated_db)
+    attempts: list[str] = []
+
+    def _boom(symbol, **k):
+        attempts.append(symbol)
+        raise RuntimeError("alpaca down")
+
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _boom)
+    svc = _service()
+    out = svc.get_bars("AAPL", timeframe="1d", limit=120)
+    assert len(out["bars"]) == 120
+    assert out["provenance"]["source"] == "yfinance"  # honest badge
+    assert attempts == ["AAPL"]
+    # Cooldown: second view serves DB without another slow Alpaca attempt.
+    out2 = svc.get_bars("AAPL", timeframe="1d", limit=120)
+    assert len(out2["bars"]) == 120
+    assert attempts == ["AAPL"]
+
+
+def test_get_bars_no_alpaca_attempt_unconfigured_or_non_1d(
+    isolated_db, monkeypatch, alpaca_keys
+):
+    from backend.market_data import ingest as ing
+
+    def _boom(symbol, **k):
+        raise AssertionError("Alpaca must not be attempted")
+
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _boom)
+    # Non-1d timeframe: refresh impossible -> serve/fail as today.
+    svc = _service()
+    _seed_fresh_yahoo_bars(isolated_db)
+    with pytest.raises(Exception):
+        svc.get_bars("AAPL", timeframe="1wk", limit=5)
+
+
+def test_get_bars_no_alpaca_attempt_without_keys(isolated_db, monkeypatch):
+    from backend.market_data import ingest as ing
+
+    def _boom(symbol, **k):
+        raise AssertionError("unconfigured keys must not attempt Alpaca")
+
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _boom)
+    _seed_fresh_yahoo_bars(isolated_db)
+    svc = _service()
+    out = svc.get_bars("AAPL", timeframe="1d", limit=120)
+    assert len(out["bars"]) == 120
+    assert out["provenance"]["source"] == "yfinance"
+
+
+def test_ondemand_backfill_alpaca_miss_falls_back_and_cools_down(
+    isolated_db, monkeypatch, alpaca_keys
+):
+    from backend.market_data import ingest as ing
+
+    attempts: list[str] = []
+
+    def _alpaca_boom(symbol, **k):
+        attempts.append(symbol)
+        raise RuntimeError("alpaca down")
+
+    def _yf(symbol, period="2y", interval="1d"):
+        return list(_120_bars())
+
+    monkeypatch.setattr(ing, "fetch_alpaca_daily_bars", _alpaca_boom)
+    monkeypatch.setattr(ing, "fetch_daily_bars", _yf)
+    svc = _service()
+    assert svc._fetch_and_store_bars("AAPL", "1d") is True
+    assert attempts == ["AAPL"]
+    # Cooldown: the next backfill skips Alpaca (one slow view per outage).
+    assert svc._fetch_and_store_bars("MSFT", "1d") is True
+    assert attempts == ["AAPL"]
+    Session = get_session_factory()
+    db = Session()
+    try:
+        rows = db.execute(select(PriceBar)).scalars().all()
+        assert rows and {r.source for r in rows} == {"yfinance"}
+    finally:
+        db.close()

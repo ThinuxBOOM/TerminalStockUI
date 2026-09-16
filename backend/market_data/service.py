@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
@@ -67,6 +68,11 @@ except ImportError:  # pragma: no cover
 #: All three are single-venue/composite feeds (Alpaca IEX, Finnhub US,
 #: TwelveData limited-venue US) — live-but-partial, never full NBBO/SIP.
 _LIVE_DELAY_ZERO_SOURCES = frozenset({"alpaca", "finnhub", "twelvedata"})
+
+#: Cooldown after a failed Alpaca bars attempt before the next one (one slow
+#: view per outage, then fast yfinance-served views until the cooldown
+#: lapses — never a per-view network timeout while Alpaca is down).
+_ALPACA_BARS_COOLDOWN_S = 900.0
 
 
 def _utcnow() -> datetime:
@@ -292,6 +298,9 @@ class MarketDataService:
             except Exception:
                 pass
         self.cache = cache
+        # Monotonic deadline until which Alpaca bars attempts are skipped
+        # (set on failure; see _alpaca_bars_wanted). Per-process, GIL-atomic.
+        self._alpaca_bars_unavailable_until: float = 0.0
 
     def _call_akshare(self, ak_code: str) -> dict | None:
         """Invoke AKShare secondary; None when unavailable. Never raises."""
@@ -360,6 +369,81 @@ class MarketDataService:
         diverge per provider without touching the Alpaca rule.
         """
         return MarketDataService._is_alpaca_eligible(mic, provider_symbol)
+
+    def _alpaca_bars_wanted(self, mic: str | None, provider_symbol: str) -> bool:
+        """True when an Alpaca bars attempt should be made (all local checks).
+
+        US-eligible symbol AND resolvable keys AND no active failure
+        cooldown. Never performs network I/O. Never raises.
+        """
+        try:
+            if not MarketDataService._is_alpaca_eligible(mic, provider_symbol):
+                return False
+            try:
+                if time.monotonic() < float(
+                    getattr(self, "_alpaca_bars_unavailable_until", 0.0) or 0.0
+                ):
+                    return False
+            except Exception:
+                pass
+            try:
+                from backend.market_data.ingest import _alpaca_keys_present
+
+                if not _alpaca_keys_present():
+                    return False
+            except Exception:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _bars_should_prefer_alpaca_refresh(
+        self, symbol: str, timeframe: str, payload: dict | None
+    ) -> bool:
+        """True when fresh DB bars must be refreshed from Alpaca anyway.
+
+        US-market charts render from Alpaca (same feed as Alpaca quotes), so
+        a fresh DB payload whose majority source is NOT alpaca is refreshed
+        instead of served — one live Alpaca upsert flips the whole overlapping
+        history (merge overwrites same-ts rows). Non-1d timeframes, non-US
+        symbols, missing keys, active cooldowns, and already-Alpaca payloads
+        return False (serve as today). Never raises.
+        """
+        try:
+            if (timeframe or "1d") != "1d":
+                return False
+            if not isinstance(payload, dict):
+                return False
+            try:
+                source = str(
+                    (payload.get("provenance") or {}).get("source") or ""
+                ).strip().lower()
+            except Exception:
+                source = ""
+            if source == "alpaca":
+                return False
+            try:
+                symbol_text = str(symbol or "").strip()
+            except Exception:
+                return False
+            if not symbol_text:
+                return False
+            try:
+                instrument, _, _ = self.registry.resolve(symbol_text)
+            except Exception:
+                return False
+            if instrument is None:
+                return False
+            try:
+                mic = getattr(instrument, "exchange_mic", None)
+                provider_symbol = (
+                    getattr(instrument, "provider_symbol", None) or symbol_text.upper()
+                )
+            except Exception:
+                return False
+            return bool(self._alpaca_bars_wanted(mic, provider_symbol))
+        except Exception:
+            return False
 
     def _call_chain_provider(self, prov: object, symbol: str, market: str | None) -> dict | None:
         """Invoke one opt-in chain provider; None on miss. Never raises.
@@ -706,12 +790,18 @@ class MarketDataService:
         try:
             db_out = self._get_bars_from_db(symbol, timeframe, limit)
             if db_out is not None and self._bars_payload_is_fresh(db_out, symbol, timeframe):
-                if self.cache is not None and cache_key is not None:
-                    try:
-                        self.cache.set(cache_key, db_out, ttl_s=120)  # type: ignore[union-attr]
-                    except Exception:
-                        pass
-                return db_out
+                if self._bars_should_prefer_alpaca_refresh(symbol, timeframe, db_out):
+                    # Fresh but wrong feed for a US chart: fall through to
+                    # the live Alpaca refresh below instead of serving
+                    # yfinance rows under an Alpaca quote.
+                    pass
+                else:
+                    if self.cache is not None and cache_key is not None:
+                        try:
+                            self.cache.set(cache_key, db_out, ttl_s=120)  # type: ignore[union-attr]
+                        except Exception:
+                            pass
+                    return db_out
             # Stale (not thin): fall through to the live refresh below —
             # days-old bars are never served.
         except Exception:
@@ -1006,9 +1096,12 @@ class MarketDataService:
         On-demand backfill for symbols the cron universe never ingested: the
         first chart view persists real bars, later views are DB-served.
         Only ``1d`` is fetched (storing daily bars under another timeframe
-        would be dishonest). Misses are negatively cached (300s) so an
-        unfetchable symbol does not pay a network timeout on every view.
-        Never raises.
+        would be dishonest). Alpaca-covered US symbols fetch Alpaca first
+        (same feed as their quotes); anything else — and any Alpaca miss —
+        falls back to the yfinance fetch. Misses are negatively cached
+        (300s) so an unfetchable symbol does not pay a network timeout on
+        every view. An Alpaca miss additionally starts the bars cooldown so
+        one slow view per outage is followed by fast ones. Never raises.
         """
         if (timeframe or "1d") != "1d":
             return False
@@ -1047,35 +1140,43 @@ class MarketDataService:
             from backend.market_data.ingest import (
                 _get_or_create_db_instrument,
                 _upsert_bars,
-                fetch_daily_bars_with_fallback,
+                fetch_daily_bars,
             )
         except Exception:
             return False
         # Same-feed bars for Alpaca-covered US symbols: Alpaca first (when
-        # eligible AND keys resolve — both checks are local, no network),
-        # yfinance otherwise. Non-US paths keep today's yfinance-only
-        # behavior exactly (SSE/Euronext never touch Alpaca).
+        # eligible AND keys resolve AND no cooldown — all local checks, no
+        # network), yfinance otherwise. Non-US paths keep today's
+        # yfinance-only behavior exactly (SSE/Euronext never touch Alpaca).
+        # Direct attempts (not the generic chain) so an Alpaca miss starts
+        # the cooldown while the yfinance cover still serves.
+        bars: list[dict] | None = None
+        bars_source = "yfinance"
         try:
-            chain: list[str] = ["yfinance"]
-            if MarketDataService._is_alpaca_eligible(
-                getattr(instrument, "exchange_mic", None), provider_symbol
-            ):
-                try:
-                    from backend.market_data.ingest import _alpaca_keys_present
+            mic = getattr(instrument, "exchange_mic", None)
+        except Exception:
+            mic = None
+        if self._alpaca_bars_wanted(mic, provider_symbol):
+            try:
+                from backend.market_data.ingest import fetch_alpaca_daily_bars
 
-                    if _alpaca_keys_present():
-                        chain = ["alpaca", "yfinance"]
+                bars = fetch_alpaca_daily_bars(provider_symbol)
+                bars_source = "alpaca"
+            except Exception:
+                try:
+                    self._alpaca_bars_unavailable_until = (
+                        time.monotonic() + _ALPACA_BARS_COOLDOWN_S
+                    )
                 except Exception:
                     pass
-        except Exception:
-            chain = ["yfinance"]
-        try:
-            bars, bars_source = fetch_daily_bars_with_fallback(
-                provider_symbol, chain=chain
-            )
-        except Exception:
-            self._remember_fetch_miss(miss_key)
-            return False
+                bars = None
+        if bars is None:
+            try:
+                bars = fetch_daily_bars(provider_symbol)
+                bars_source = "yfinance"
+            except Exception:
+                self._remember_fetch_miss(miss_key)
+                return False
         if not bars:
             self._remember_fetch_miss(miss_key)
             return False
