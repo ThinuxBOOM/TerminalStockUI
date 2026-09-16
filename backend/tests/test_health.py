@@ -190,7 +190,7 @@ def test_providers_health_lists_all_known_enriched():
     resp = client.get("/api/providers/health")
     assert resp.status_code == 200, resp.text
     rows = {p["provider"]: p for p in resp.json()["providers"]}
-    for name in ("yfinance", "akshare", "alpaca", "stooq", "fx",
+    for name in ("yfinance", "alpaca", "fx",
                  "gemini", "openai", "anthropic", "xai"):
         assert name in rows, f"missing known provider {name}"
         for key in ("state", "latency_p50_ms", "latency_p95_ms", "error_rate_1h",
@@ -266,7 +266,7 @@ def test_providers_health_probes_zero_sample_providers(monkeypatch):
     out = providers_module.providers_health(tracker)
     rows = {p["provider"]: p for p in out["providers"]}
     assert "yfinance" not in calls
-    assert {"akshare", "fx", "gemini"} <= set(calls)
-    assert rows["akshare"]["total_calls"] == 1
-    assert rows["akshare"]["latency_p50_ms"] == 42.0
+    assert {"alpaca", "fx", "gemini"} <= set(calls)
+    assert rows["alpaca"]["total_calls"] == 1
+    assert rows["alpaca"]["latency_p50_ms"] == 42.0
     assert rows["yfinance"]["latency_p50_ms"] == 120.0

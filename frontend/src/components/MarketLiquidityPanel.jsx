@@ -168,6 +168,9 @@ const MarketCard = memo(MarketCardInner);
 function MarketCardWithGraphs({ m, maxTurnover, maxVolume, maxRange }) {
   const [expanded, setExpanded] = useState(false);
   const detail = useMarketDetail(m.mic, expanded);
+  // History is DB-only + cached server-side: eager load for the sparkline.
+  // Thin/empty history returns points:[] and the sparkline shows its honest
+  // placeholder (never a spinner hang).
   const histQ = useMarketLiquidityHistory(m.mic, "1D", true);
   const rows = detail.data?.rows?.length ? detail.data.rows : (m.rows ?? []);
   return (

@@ -1,11 +1,12 @@
 """M6 SSE provider tests (no network).
 
 Covers:
-- symbol normalization 600519 <-> 600519.SS
+- symbol normalization 600519 <-> 600519.SS (dormant akshare helpers)
 - CNY currency (never USD for XSHG)
-- stub_mode + missing-akshare fallback (flagged fallback_used=True)
-- breaker isolation (yfinance vs akshare independent)
-- service SSE fallback chain yfinance(.SS) -> akshare(6-digit) -> stub
+- stub_mode + missing-akshare fallback (flagged fallback_used=True,
+  dormant module unit tests only)
+- breaker isolation (provider breakers independent)
+- service SSE path is yfinance(.SS)-only (akshare dropped) -> stub raises
 """
 
 from __future__ import annotations
@@ -187,36 +188,17 @@ def test_provider_circuit_open_returns_flagged_stub():
     assert q["currency"] == "CNY"
 
 
-def test_service_breaker_isolation_yf_open_akshare_wins(isolated_db):
-    # yfinance breaker open -> its get_quote returns stub fallback;
-    # akshare live mock must still win the SSE chain.
+def test_service_breaker_isolation_yf_open_raises(isolated_db):
+    # yfinance breaker open -> its get_quote returns stub fallback, which the
+    # yfinance-only SSE path refuses (fail-closed, akshare dropped).
     yf_breaker = CircuitBreaker(failure_threshold=1)
     yf_breaker.record_failure()
     assert yf_breaker.state == "open"
     yf = YFinanceProvider(stub_mode=False, breaker=yf_breaker)
 
-    ak = AKShareProvider(stub_mode=False, breaker=CircuitBreaker())
-    assert ak.breaker.state == "closed"
-
-    def _ak_live(symbol, market=None):
-        return {
-            "symbol": "600519.SS",
-            "price": 1685.0,
-            "open": 1678.0,
-            "high": 1690.0,
-            "low": 1675.0,
-            "prev_close": 1680.0,
-            "volume": 3_100_000,
-            "currency": "CNY",
-            "as_of": _utcnow(),
-        }
-
-    ak._fetch_raw = _ak_live  # type: ignore[method-assign]
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
-    out = svc.get_quote("600519.SS")
-    assert out["provenance"]["source"] == "akshare"
-    assert out["currency"] == "CNY"
-    assert out["provenance"]["fallback_used"] is False
+    svc = MarketDataService(provider=yf)
+    with pytest.raises(ProviderError):
+        svc.get_quote("600519.SS")
 
 
 # -- service fallback chain ---------------------------------------------------
@@ -236,32 +218,11 @@ def _live_yf_raw_cny(symbol: str) -> dict:
     }
 
 
-def _live_ak_raw(symbol: str, market=None) -> dict:
-    return {
-        "symbol": "600519.SS",
-        "price": 1690.0,
-        "open": 1682.0,
-        "high": 1695.0,
-        "low": 1680.0,
-        "prev_close": 1685.0,
-        "volume": 3_000_000,
-        "currency": "CNY",
-        "as_of": _utcnow(),
-    }
-
-
 def test_service_sse_yfinance_wins_when_live(isolated_db, monkeypatch):
     yf = YFinanceProvider(stub_mode=False)
-    ak = AKShareProvider(stub_mode=False)
     monkeypatch.setattr(yf, "_fetch_raw", _live_yf_raw_cny)
-    monkeypatch.setattr(
-        ak, "_fetch_raw", lambda symbol, market=None: (_ for _ in ()).throw(
-            ProviderError("akshare", "should not be called live")
-        )
-        if False else _live_ak_raw(symbol, market),
-    )
-    # Force yfinance live; akshare would also be live but yfinance is first.
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    # yfinance-only SSE path (akshare dropped).
+    svc = MarketDataService(provider=yf)
     out = svc.get_quote("600519.SS")
     assert out["provenance"]["source"] == "yfinance"
     assert out["currency"] == "CNY"
@@ -269,49 +230,41 @@ def test_service_sse_yfinance_wins_when_live(isolated_db, monkeypatch):
     assert out["symbol"] == "600519.SS"
 
 
-def test_service_sse_akshare_wins_when_yfinance_fails(isolated_db, monkeypatch):
+def test_service_sse_yfinance_failure_raises(isolated_db, monkeypatch):
+    """yfinance down -> SSE raises (no akshare fallback anymore)."""
     yf = YFinanceProvider(stub_mode=False)
-    ak = AKShareProvider(stub_mode=False)
 
     def _yf_boom(symbol):
         raise ProviderError("yfinance", "network down")
 
     monkeypatch.setattr(yf, "_fetch_raw", _yf_boom)
-    monkeypatch.setattr(ak, "_fetch_raw", _live_ak_raw)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
-    out = svc.get_quote("600519.SS")
-    assert out["provenance"]["source"] == "akshare"
-    assert out["currency"] == "CNY"
-    assert out["price"] == 1690.0
-    assert out["provenance"]["fallback_used"] is False
+    svc = MarketDataService(provider=yf)
+    with pytest.raises(ProviderError):
+        svc.get_quote("600519.SS")
 
 
 def test_service_sse_bare_code_resolves_and_wins(isolated_db, monkeypatch):
     # Bare 600519 (+ market=XSHG) normalizes to 600519.SS via registry/chain.
     # Fail-closed: use live-shaped doubles (stubs are refused by the service).
     yf = YFinanceProvider(stub_mode=False)
-    ak = AKShareProvider(stub_mode=False)
     monkeypatch.setattr(yf, "_fetch_raw", _live_yf_raw_cny)
-    monkeypatch.setattr(ak, "_fetch_raw", _live_ak_raw)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    svc = MarketDataService(provider=yf)
     out_bare = svc.get_quote("600519", market="XSHG")
     out_full = svc.get_quote("600519.SS")
     assert out_bare["symbol"] == "600519.SS"
     assert out_full["symbol"] == "600519.SS"
     assert out_bare["currency"] == "CNY"
     assert out_full["currency"] == "CNY"
-    # yfinance is first in the SSE chain, so it wins when live.
     assert out_bare["provenance"]["source"] == "yfinance"
     assert out_bare["provenance"]["fallback_used"] is False
     assert out_full["provenance"]["fallback_used"] is False
 
 
-def test_service_sse_both_fail_raises_provider_error(isolated_db):
-    # Fail-closed: no live quote from yfinance+akshare -> ProviderError.
+def test_service_sse_yfinance_stub_raises_provider_error(isolated_db):
+    # Fail-closed: stub-only yfinance -> ProviderError.
     # The old stub/grade-C cover is dead (stubs are refused, never served).
     yf = YFinanceProvider(stub_mode=True)
-    ak = AKShareProvider(stub_mode=True)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    svc = MarketDataService(provider=yf)
     with pytest.raises(ProviderError):
         svc.get_quote("600519.SS")
 
@@ -327,15 +280,13 @@ def test_service_refuses_fallback_flagged_quote(isolated_db):
     live = _liveify_stub(raw_stub, source="yfinance")
     assert live["fallback_used"] is False
     assert live["price"] is not None
-    ak = AKShareProvider(stub_mode=True)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    svc = MarketDataService(provider=yf)
     with pytest.raises(ProviderError):
         svc.get_quote("600519.SS")
 
 
 def test_service_sse_currency_never_usd_even_if_yfinance_says_usd(isolated_db, monkeypatch):
     yf = YFinanceProvider(stub_mode=False)
-    ak = AKShareProvider(stub_mode=True)
 
     def _yf_usd(symbol):
         raw = _live_yf_raw_cny(symbol)
@@ -343,7 +294,7 @@ def test_service_sse_currency_never_usd_even_if_yfinance_says_usd(isolated_db, m
         return raw
 
     monkeypatch.setattr(yf, "_fetch_raw", _yf_usd)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    svc = MarketDataService(provider=yf)
     out = svc.get_quote("600519.SS")
     assert out["currency"] == "CNY"
     assert out["provenance"]["source"] == "yfinance"
@@ -352,10 +303,8 @@ def test_service_sse_currency_never_usd_even_if_yfinance_says_usd(isolated_db, m
 def test_service_sse_delay_from_calendars(isolated_db, monkeypatch):
     # Fail-closed: delay still comes from calendars, verified on a live quote.
     yf = YFinanceProvider(stub_mode=False)
-    ak = AKShareProvider(stub_mode=False)
     monkeypatch.setattr(yf, "_fetch_raw", _live_yf_raw_cny)
-    monkeypatch.setattr(ak, "_fetch_raw", _live_ak_raw)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    svc = MarketDataService(provider=yf)
     out = svc.get_quote("600519.SS")
     assert out["provenance"]["delay_minutes"] == expected_delay_minutes("XSHG")
     assert out["provenance"]["fallback_used"] is False
@@ -364,7 +313,6 @@ def test_service_sse_delay_from_calendars(isolated_db, monkeypatch):
 def test_service_us_behavior_preserved(isolated_db, monkeypatch):
     # US path serves ONLY live quotes (stubs raise); currency stays USD.
     yf = YFinanceProvider(stub_mode=False)
-    ak = AKShareProvider(stub_mode=False)
 
     def _live_yf_usd(symbol: str) -> dict:
         return {
@@ -380,8 +328,7 @@ def test_service_us_behavior_preserved(isolated_db, monkeypatch):
         }
 
     monkeypatch.setattr(yf, "_fetch_raw", _live_yf_usd)
-    monkeypatch.setattr(ak, "_fetch_raw", _live_ak_raw)
-    svc = MarketDataService(provider=yf, akshare_provider=ak)
+    svc = MarketDataService(provider=yf)
     out = svc.get_quote("AAPL")
     assert out["symbol"] == "AAPL"
     assert out["currency"] == "USD"

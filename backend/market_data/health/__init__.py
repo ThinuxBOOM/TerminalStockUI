@@ -57,14 +57,15 @@ log = logging.getLogger(__name__)
 STALE_MULTIPLE = 2
 
 #: All providers with first-class health rows (dashboard guarantee).
-#: Core set per spec: yfinance/akshare/alpaca/stooq/fx + AI
+#: Core set per spec: yfinance/alpaca/fx + AI
 #: (gemini/openai/anthropic/xai); finnhub/twelvedata free-tier gap-fillers
 #: included additively (same envelope, kind=data).
+#: (akshare/stooq dropped: akshare pip package uninstallable here and its
+#: probe used a US symbol on an SSE-only feed; stooq retired its keyless
+#: quote endpoint — both reported degraded permanently.)
 KNOWN_PROVIDERS: tuple[str, ...] = (
     "yfinance",
-    "akshare",
     "alpaca",
-    "stooq",
     "finnhub",
     "twelvedata",
     "fx",
@@ -75,9 +76,7 @@ KNOWN_PROVIDERS: tuple[str, ...] = (
 )
 DATA_PROVIDERS: tuple[str, ...] = (
     "yfinance",
-    "akshare",
     "alpaca",
-    "stooq",
     "finnhub",
     "twelvedata",
     "fx",
@@ -98,7 +97,7 @@ FX_PROBE_BASE = "EUR"
 FX_PROBE_QUOTE = "USD"
 
 #: Providers that require a configured credential (authenticated tier).
-#: Free-tier: yfinance / akshare / stooq / fx (no key). finnhub/twelvedata
+#: Free-tier: yfinance / fx (no key). finnhub/twelvedata
 #: free tiers require a (free) API key, so they count as authenticated.
 #: Used for authenticated-vs-free quota messaging and quota.auth_required.
 AUTH_REQUIRED_PROVIDERS = frozenset({
@@ -768,14 +767,6 @@ def _build_data_provider(key: str):
         from backend.market_data.providers.yfinance import YFinanceProvider
 
         return YFinanceProvider(on_call=None)
-    if key == "akshare":
-        try:
-            from backend.market_data.providers.akshare import AKShareProvider
-        except Exception as exc:
-            raise ValueError(f"akshare unavailable: {exc}") from exc
-        if AKShareProvider is None:  # type: ignore[truthy-function]
-            raise ValueError("akshare unavailable")
-        return AKShareProvider(on_call=None)
     if key == "alpaca":
         try:
             from backend.market_data.providers.alpaca import AlpacaProvider
@@ -784,14 +775,6 @@ def _build_data_provider(key: str):
         if AlpacaProvider is None:  # type: ignore[truthy-function]
             raise ValueError("alpaca unavailable")
         return AlpacaProvider(on_call=None)
-    if key == "stooq":
-        try:
-            from backend.market_data.providers.stooq import StooqProvider
-        except Exception as exc:
-            raise ValueError(f"stooq unavailable: {exc}") from exc
-        if StooqProvider is None:  # type: ignore[truthy-function]
-            raise ValueError("stooq unavailable")
-        return StooqProvider(on_call=None)
     if key == "finnhub":
         try:
             from backend.market_data.providers.finnhub_free import FinnhubProvider

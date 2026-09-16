@@ -34,13 +34,13 @@ DEFAULT_UNIVERSE: list[str] = [
 DEFAULT_TIMEFRAME = "1d"
 
 #: Bar-chain order for daily ingestion (overridable via ``INGEST_BAR_CHAIN``
-#: comma-list, e.g. ``yfinance,stooq``). Without Alpaca keys this stays
-#: ``["yfinance", "stooq"]`` (yfinance first: full 2y history; stooq is a
-#: best-effort gap-filler). With keys, ``bar_chain()`` prepends ``alpaca``
+#: comma-list, e.g. ``yfinance``). Without Alpaca keys this stays
+#: ``["yfinance"]``. With keys, ``bar_chain()`` prepends ``alpaca``
 #: so Alpaca-covered (US) symbols ingest from the same feed as their quotes
 #: (no Alpaca-quote vs yfinance-chart mismatch). Unknown names are ignored
-#: so a typo never breaks a cron tick.
-DEFAULT_BAR_CHAIN: list[str] = ["yfinance", "stooq"]
+#: so a typo never breaks a cron tick. (stooq dropped: upstream retired its
+#: keyless quote endpoint — every stooq fetch 404s.)
+DEFAULT_BAR_CHAIN: list[str] = ["yfinance"]
 
 
 def _alpaca_keys_present() -> bool:
@@ -106,23 +106,23 @@ def default_universe() -> list[str]:
 def bar_chain() -> list[str]:
     """Ordered fetch fallbacks for daily bars (env ``INGEST_BAR_CHAIN``).
 
-    Explicit env wins (alpaca/yfinance/stooq names accepted). Otherwise the
-    default prepends ``alpaca`` when Alpaca keys resolve (same-feed bars for
-    Alpaca-covered US symbols, matching their quotes) and stays
-    ``["yfinance", "stooq"]`` when unconfigured (alpaca would fail fast
-    without network, so omitting it also keeps cron logs quiet).
+    Explicit env wins (alpaca/yfinance names accepted; legacy "stooq" entries
+    are ignored). Otherwise the default prepends ``alpaca`` when Alpaca keys
+    resolve (same-feed bars for Alpaca-covered US symbols, matching their
+    quotes) and stays ``["yfinance"]`` when unconfigured (alpaca would fail
+    fast without network, so omitting it also keeps cron logs quiet).
     """
     raw = (os.getenv("INGEST_BAR_CHAIN", "") or "").strip().lower()
     if raw:
         out: list[str] = []
         for part in raw.split(","):
             name = part.strip()
-            if name in ("alpaca", "yfinance", "stooq") and name not in out:
+            if name in ("alpaca", "yfinance") and name not in out:
                 out.append(name)
         if out:
             return out
     if _alpaca_keys_present():
-        return ["alpaca", "yfinance", "stooq"]
+        return ["alpaca", "yfinance"]
     return list(DEFAULT_BAR_CHAIN)
 
 
@@ -479,16 +479,17 @@ def fetch_daily_bars_with_fallback(
     Default chain is :func:`bar_chain` (env ``INGEST_BAR_CHAIN``). Tries each
     link in order, returning the first non-empty success. Raises the last
     error when every link fails so callers report a per-symbol error.
-    ``source`` is the winning link name (``alpaca``/``yfinance``/``stooq``)
+    ``source`` is the winning link name (``alpaca``/``yfinance``)
     for ``price_bars.source`` lineage. The ``alpaca`` link is US-only:
     non-US symbols skip it silently (routing, not failure — no warning).
+    Legacy ``"stooq"`` links are skipped (provider dropped).
     """
     links = list(chain) if chain else bar_chain()
     last_exc: Exception | None = None
     for link in links:
         try:
             if link == "stooq":
-                return fetch_stooq_daily_bars(provider_symbol, period, interval), "stooq"
+                continue  # dropped provider: skip silently, never fetch
             if link == "alpaca":
                 if not _is_alpaca_bars_eligible(provider_symbol):
                     continue  # US-only feed: skip silently, never warn
@@ -587,7 +588,7 @@ def _upsert_bars(db, db_instrument, bars: list[dict], *, timeframe: str, source:
         src = str(source or "yfinance").strip().lower() or "yfinance"
     except Exception:
         src = "yfinance"
-    if src not in ("yfinance", "stooq", "akshare", "alpaca", "finnhub", "twelvedata"):
+    if src not in ("yfinance", "alpaca", "finnhub", "twelvedata"):
         src = "yfinance"
     count = 0
     for item in bars or []:

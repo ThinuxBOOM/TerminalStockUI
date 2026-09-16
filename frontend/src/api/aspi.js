@@ -533,10 +533,12 @@ async function getAspiSeries(mic, timeframe = "1d", opts = {}) {
   const signal = opts?.signal;
   return coalesceInflight(aspiInflightKey(cfg.mic, tf, userId, tier), async () => {
     // Native endpoint first (backend owns the proxy chain + provenance).
+    // 20s fail-fast: a hung index fetch must fall through to the bars chain
+    // instead of holding the chart in a 60s spinner.
     try {
       const { data } = await api.get(`/api/markets/${encodeURIComponent(cfg.mic)}/index`, {
         params: { timeframe: tf },
-        timeout: 60000,
+        timeout: 20000,
         ...(signal ? { signal } : {}),
       });
       const native = normalizeNativeIndexSeries(data, cfg.mic);
@@ -604,6 +606,9 @@ async function getAspiSeriesViaBars(cfg, tf, limit, signal) {
 // Fail-closed: liquidity errors propagate to ErrorState — no
 // screener-rank synthesis. (normalizeTop20 keeps its screener-rank branch
 // as a pure, honestly-labelled helper covered by unit tests.)
+// Perf: screener enrichment is best-effort with an 8s race — a full screener
+// scan (quote+forecast per symbol) must never hold the Top-20 table hostage
+// behind a 60s timeout.
 async function getTop20Constituents(mic, opts = {}) {
   const upper = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
   const userId = opts?.userId ?? null;
@@ -614,10 +619,12 @@ async function getTop20Constituents(mic, opts = {}) {
     const liqRows = Array.isArray(liq?.rows) ? liq.rows : [];
     let screenerResults = [];
     try {
-      const screen = await getScreener(
-        { market: upper, minDirection: 0, limit: 50 },
+      const screenP = getScreener(
+        { market: upper, minDirection: 0, limit: TOP20_LIMIT },
         signal ? { signal } : undefined
       );
+      const timeoutP = new Promise((resolve) => setTimeout(() => resolve(null), 8000));
+      const screen = await Promise.race([screenP, timeoutP]);
       screenerResults = Array.isArray(screen?.results) ? screen.results : [];
     } catch {
       screenerResults = [];

@@ -22,7 +22,6 @@ from backend.forecasting.service import reset_forecast_service
 from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.fx.provider import FXProvider
 from backend.market_data.health import ProviderHealthTracker
-from backend.market_data.providers.akshare import AKShareProvider
 from backend.market_data.providers.base import CircuitBreaker, ProviderError
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
@@ -34,19 +33,20 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _stub_service(provider=None, akshare_provider=None) -> MarketDataService:
+def _stub_service(provider=None, **kwargs) -> MarketDataService:
     tracker = ProviderHealthTracker()
     if provider is None:
         provider = YFinanceProvider(
             stub_mode=True, on_call=lambda p, ms, ok: tracker.record(p, ms, ok)
         )
-    kwargs: dict = {
-        "registry": InstrumentRegistry(), "provider": provider,
-        "health": tracker, "cache": InMemoryCache(),
-    }
-    if akshare_provider is not None:
-        kwargs["akshare_provider"] = akshare_provider
-    return MarketDataService(**kwargs)  # type: ignore[arg-type]
+    # Legacy akshare_provider/stooq_provider kwargs are accepted by the
+    # service but ignored (providers dropped) — strip them here.
+    kwargs.pop("akshare_provider", None)
+    kwargs.pop("stooq_provider", None)
+    return MarketDataService(
+        registry=InstrumentRegistry(), provider=provider,
+        health=tracker, cache=InMemoryCache(), **kwargs,
+    )  # type: ignore[arg-type]
 
 
 def _live_market_service() -> MarketDataService:
@@ -176,17 +176,17 @@ def test_breaker_open_returns_flagged_stub_usable():
 
 def test_breaker_objects_are_isolated():
     yf = YFinanceProvider(stub_mode=True, breaker=CircuitBreaker(failure_threshold=1))
-    ak = AKShareProvider(stub_mode=True, breaker=CircuitBreaker(failure_threshold=1))
+    yf2 = YFinanceProvider(stub_mode=True, breaker=CircuitBreaker(failure_threshold=1))
     fx = FXProvider(breaker=CircuitBreaker(failure_threshold=1))
-    assert yf.breaker is not ak.breaker
+    assert yf.breaker is not yf2.breaker
     yf.breaker.record_failure()
     assert yf.breaker.state == "open"
-    assert ak.breaker.state == "closed"  # yfinance down != akshare down
+    assert yf2.breaker.state == "closed"  # one feed down != other feed down
     assert fx.breaker.state == "closed"
 
 
-def test_sse_chain_survives_yfinance_outage_via_akshare():
-    """yfinance breaker open: SSE quote still served live via AKShare."""
+def test_sse_yfinance_outage_is_fail_closed():
+    """yfinance down: SSE quote raises (yfinance-only path, akshare dropped)."""
     yf_breaker = CircuitBreaker(failure_threshold=1)
     yf_breaker.record_failure()
     yf = YFinanceProvider(stub_mode=False, breaker=yf_breaker)
@@ -196,23 +196,9 @@ def test_sse_chain_survives_yfinance_outage_via_akshare():
 
     yf._fetch_raw = _boom  # type: ignore[method-assign]
 
-    ak = AKShareProvider(stub_mode=False)
-
-    def _live(symbol: str, market=None) -> dict:
-        return {
-            "symbol": "600519.SS", "price": 1700.0, "open": 1690.0,
-            "high": 1710.0, "low": 1685.0, "prev_close": 1692.0,
-            "volume": 1_000_000, "currency": "CNY", "as_of": _utcnow(),
-        }
-
-    ak._fetch_raw = _live  # type: ignore[method-assign]
-    svc = _stub_service(provider=yf, akshare_provider=ak)
-    quote = svc.get_quote("600519.SS")
-    assert quote["price"] == 1700.0
-    assert quote["currency"] == "CNY"
-    assert quote["provenance"]["fallback_used"] is False
-    assert quote["provenance"]["source"] == "akshare"
-    assert yf.breaker.state == "open" and ak.breaker.state == "closed"
+    svc = _stub_service(provider=yf)
+    with pytest.raises(ProviderError):
+        svc.get_quote("600519.SS")
 
 
 def test_fx_outage_maps_502_not_retryable_maps_400():

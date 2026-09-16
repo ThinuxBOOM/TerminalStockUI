@@ -392,23 +392,20 @@ async function getMarketLiquidity(mic) {
   });
 }
 // ---------------------------------------------------------------------------
-// Proposed backend shape (not yet deployed):
-//   GET /api/markets/{mic}/liquidity/history?window=1D
-//   -> {
-//   //   mic: "XNYS", window: "1D" | "5D" | "1M" | ...,
-//   //   currency: "USD", points: [{ t, turnover, volume, advancers, decliners,
-//   //     unchanged, avg_change_pct }], provenance
-//   // }
+// Backend shape (deployed: GET /api/markets/{mic}/liquidity/history):
+//   -> { mic, window: "1D"|"5D"|"1M"|"3M"|"6M"|"1Y", currency,
+//   //   points: [{ t, turnover, volume, advancers, decliners,
+//   //     unchanged, avg_change_pct }], provenance }
+// DB-only daily aggregates from stored 1d bars (no live fetch, cached 60s).
 // Fail-closed: normalizes via normalizeLiquidityHistory; on 404/501 or any
-// error THROWS to ErrorState (never returns a client-fallback placeholder).
-// Caller must show ErrorState with retry.
+// error THROWS (never returns a client-fallback placeholder).
 async function getMarketLiquidityHistory(mic, window = "1D") {
   const upper = String(mic ?? "").trim().toUpperCase();
   const w = normalizeLiquidityHistoryWindow(window);
   return coalesceInflight(`market-liquidity-history:${upper}:${w}`, async () => {
     const { data } = await api.get(`/api/markets/${encodeURIComponent(upper)}/liquidity/history`, {
       params: { window: w },
-      timeout: 6e4
+      timeout: 1e4
     });
     const norm = normalizeLiquidityHistory(data, upper, w);
     if (!norm) throw new Error(`liquidity history unavailable for ${upper} (no live feed)`);

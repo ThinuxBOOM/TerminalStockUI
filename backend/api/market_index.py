@@ -64,6 +64,16 @@ BENCHMARKS: dict[str, dict] = {
 TIMEFRAME_LIMITS = {"1d": 90, "1wk": 52, "1mo": 36}
 VALID_TIMEFRAMES = ("1d", "1wk", "1mo")
 
+#: Index perf: one benchmark = one get_bars (DB + possible live fetch).
+#: Cache assembled points so six homepage index cards + retries don't refetch
+#: the same SPY/QQQ/000001.SS bars within a minute. TTL 60s mirrors the
+#: quote cache; keyed mic+timeframe only (no user/tier dimension server-side).
+_INDEX_TTL_S = 60
+
+
+def _index_cache_key(mic: str, timeframe: str) -> str:
+    return f"markets:index:{mic}:{timeframe}"
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -123,6 +133,19 @@ def market_index(
     tf = (timeframe or "1d").strip()
     if tf not in VALID_TIMEFRAMES:
         raise HTTPException(status_code=422, detail=f"timeframe must be one of {list(VALID_TIMEFRAMES)}")
+    # Result cache: repeats within TTL skip the bars fan-out.
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _ick = _index_cache_key(upper, tf)
+        try:
+            _icached = _get_cache().get(_ick)
+            if isinstance(_icached, dict) and isinstance(_icached.get("points"), list):
+                return _icached
+        except Exception:
+            _ick = None
+    except Exception:
+        _ick = None
     limit = TIMEFRAME_LIMITS[tf]
     candidates = [{"symbol": cfg["index_symbol"], "is_proxy": False}] + [
         {"symbol": p, "is_proxy": True} for p in (cfg.get("proxies") or [])
@@ -154,7 +177,7 @@ def market_index(
             last_error = f"bars for {sym} missing provenance envelope"
             saw_empty = True
             continue
-        return {
+        out = {
             "mic": upper,
             "label": f"{cfg['venue']} — {cfg['label']}",
             "symbol": payload.get("symbol", sym) if isinstance(payload, dict) else sym,
@@ -171,6 +194,14 @@ def market_index(
             "disclosure": DISCLOSURE,
             "provenance": prov,
         }
+        try:
+            if _ick:
+                from backend.cache import get_cache as _get_cache2
+
+                _get_cache2().set(_ick, out, ttl_s=_INDEX_TTL_S)
+        except Exception:
+            pass
+        return out
     raise HTTPException(
         status_code=502,
         detail=last_error

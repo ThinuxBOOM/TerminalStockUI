@@ -44,7 +44,8 @@ function useMarketDetail(mic, enabled) {
 }
 
 // Per-market liquidity history (future GET /api/markets/{mic}/liquidity/history).
-// No auth required; on missing backend returns an empty placeholder (never fakes).
+// Backend not deployed yet: fail fast with no retry so cards render their
+// placeholder instead of hanging. Callers must pass expanded-only `enabled`.
 function useMarketLiquidityHistory(mic, window = "1D", enabled = true) {
   const upper = String(mic ?? "").trim().toUpperCase();
   const w = normalizeLiquidityHistoryWindow(window);
@@ -55,7 +56,7 @@ function useMarketLiquidityHistory(mic, window = "1D", enabled = true) {
     enabled: on,
     staleTime: 120000,
     gcTime: 600000,
-    retry: 1,
+    retry: false,
   });
 }
 

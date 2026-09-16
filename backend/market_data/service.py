@@ -25,14 +25,6 @@ from ..instruments.calendars import expected_delay_minutes
 from ..instruments.registry import InstrumentRegistry
 from .providers.yfinance import YFinanceProvider
 
-try:  # canonical absolute import; fallback to relative for alt layouts
-    from backend.market_data.providers.akshare import AKShareProvider
-except ImportError:  # pragma: no cover
-    try:
-        from .providers.akshare import AKShareProvider  # type: ignore[no-redef]
-    except ImportError:
-        AKShareProvider = None  # type: ignore[assignment]
-
 try:  # Milestone 0 live-data extension (opt-in; None when unavailable)
     from backend.market_data.providers.alpaca import AlpacaProvider
 except ImportError:  # pragma: no cover
@@ -40,14 +32,6 @@ except ImportError:  # pragma: no cover
         from .providers.alpaca import AlpacaProvider  # type: ignore[no-redef]
     except ImportError:
         AlpacaProvider = None  # type: ignore[assignment]
-
-try:  # Milestone 0 delayed gap-filler (opt-in; None when unavailable)
-    from backend.market_data.providers.stooq import StooqProvider
-except ImportError:  # pragma: no cover
-    try:
-        from .providers.stooq import StooqProvider  # type: ignore[no-redef]
-    except ImportError:
-        StooqProvider = None  # type: ignore[assignment]
 
 try:  # Free-tier real-time US redo (opt-in; None when unavailable)
     from backend.market_data.providers.finnhub_free import FinnhubProvider
@@ -94,16 +78,8 @@ def _to_yahoo_sse_symbol(provider_symbol: str) -> str:
     return text
 
 
-def _to_akshare_code(provider_symbol: str) -> str:
-    """Strip ``.SS`` to the 6-digit AKShare code (``600519.SS`` -> ``600519``)."""
-    text = (provider_symbol or "").strip().upper()
-    if text.endswith(".SS"):
-        text = text[: -len(".SS")]
-    return text.strip()
-
-
 def _is_sse_request(mic: str | None, provider_symbol: str, market: str | None) -> bool:
-    """True when this quote should use the SSE fallback chain."""
+    """True when this quote should use the SSE path (yfinance .SS only)."""
     if (mic or "").upper() == "XSHG":
         return True
     if (market or "").strip().upper() == "XSHG":
@@ -227,36 +203,15 @@ class MarketDataService:
         )
         if getattr(self.provider, "_on_call", None) is None:
             self.provider._on_call = lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
-        # SSE secondary (AKShare). Independent breaker/limiter -> failure isolation.
-        # Default inherits stub_mode from primary so offline/test services stay offline.
-        if akshare_provider is not None:
-            self.akshare_provider = akshare_provider
-        elif AKShareProvider is not None:
-            primary_stub = bool(getattr(self.provider, "stub_mode", False))
-            try:
-                self.akshare_provider = AKShareProvider(
-                    on_call=lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error")),
-                    stub_mode=primary_stub,
-                )
-            except Exception:
-                self.akshare_provider = None
-        else:
-            self.akshare_provider = None
-        if self.akshare_provider is not None and getattr(
-            self.akshare_provider, "_on_call", None
-        ) is None:
-            try:
-                self.akshare_provider._on_call = (  # type: ignore[union-attr]
-                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
-                )
-            except Exception:
-                pass
+        # Dropped providers (akshare/stooq): constructor still accepts the
+        # legacy kwargs so old call sites don't crash, but they are always
+        # ignored — SSE is yfinance-only and the non-SSE chain ends at
+        # twelvedata. Provider modules remain on disk, dormant.
+        self.akshare_provider = None
         # Milestone 0 live-data chain (opt-in, additive — default None keeps
-        # every existing call site on the yfinance/AKShare behavior).
+        # every existing call site on the yfinance behavior).
         # deps.get_market_service() wires real instances; tests pass explicit
-        # stub/live doubles. No auto-create here: auto-creating a networked
-        # Stooq inside every MarketDataService() would turn pure-outage tests
-        # into live-data tests and add network latency to hermetic suites.
+        # stub/live doubles.
         self.alpaca_provider = alpaca_provider
         if self.alpaca_provider is not None and getattr(
             self.alpaca_provider, "_on_call", None
@@ -267,18 +222,9 @@ class MarketDataService:
                 )
             except Exception:
                 pass
-        self.stooq_provider = stooq_provider
-        if self.stooq_provider is not None and getattr(
-            self.stooq_provider, "_on_call", None
-        ) is None:
-            try:
-                self.stooq_provider._on_call = (  # type: ignore[union-attr]
-                    lambda p, ms, ok, **kw: self.health.record(p, ms, ok, status_code=kw.get("status_code"), error=kw.get("error"))
-                )
-            except Exception:
-                pass
+        self.stooq_provider = None
         # Free-tier US redundancy (additive, same pattern): Finnhub +
-        # TwelveData sit between yfinance and stooq in the live chain.
+        # TwelveData sit after yfinance in the live chain.
         # Absent (None) they are skipped, preserving pre-chain behavior.
         self.finnhub_provider = finnhub_provider
         if self.finnhub_provider is not None and getattr(
@@ -305,27 +251,6 @@ class MarketDataService:
         # (set on failure; see _alpaca_bars_wanted). Per-process, GIL-atomic.
         self._alpaca_bars_unavailable_until: float = 0.0
 
-    def _call_akshare(self, ak_code: str) -> dict | None:
-        """Invoke AKShare secondary; None when unavailable. Never raises."""
-        prov = self.akshare_provider
-        if prov is None:
-            return None
-        get_quote = getattr(prov, "get_quote", None)
-        if get_quote is None:
-            return None
-        try:
-            try:
-                return get_quote(ak_code, market="XSHG")
-            except TypeError:
-                return get_quote(ak_code)
-        except Exception as exc:
-            # Preserve empty-symbol contract; otherwise treat as chain miss.
-            from .providers.base import ProviderError
-
-            if isinstance(exc, ProviderError) and "empty symbol" in str(exc).lower():
-                raise
-            return None
-
     @staticmethod
     def _is_alpaca_eligible(mic: str | None, provider_symbol: str) -> bool:
         """Alpaca is US-only: skip SSE + Euronext before any network call."""
@@ -339,20 +264,6 @@ class MarketDataService:
         for suffix in (".SS", ".PA", ".AS", ".BR"):
             if upper.endswith(suffix):
                 return False
-        return True
-
-    @staticmethod
-    def _is_stooq_eligible(mic: str | None, provider_symbol: str) -> bool:
-        """Stooq covers US + Euronext; SSE stays on yfinance/AKShare."""
-        try:
-            upper_mic = (mic or "").strip().upper()
-        except Exception:
-            upper_mic = ""
-        if upper_mic == "XSHG":
-            return False
-        upper = (provider_symbol or "").strip().upper()
-        if upper.endswith(".SS"):
-            return False
         return True
 
     @staticmethod
@@ -476,7 +387,7 @@ class MarketDataService:
     # gating will happen HERE, in one place, keyed off ``tier`` (and
     # ``user_id`` for per-user keys/quotas) — never inside providers.
     # Draft mapping (no behavior today; both params are accepted and
-    # ignored): Free -> keyless only (yfinance/AKShare/Stooq); Silver ->
+    # ignored): Free -> keyless only (yfinance); Silver ->
     # + keyed free tiers (Alpaca/Finnhub/TwelveData shared keys);
     # Gold/Platinum -> + paid providers (SIP, real-time Euronext, full
     # TwelveData markets) with per-user keys. Paid provider slots should
@@ -508,7 +419,7 @@ class MarketDataService:
 
         sse = _is_sse_request(mic, provider_symbol, market)
         if sse:
-            # Canonical SSE forms: yfinance wants .SS, akshare wants 6-digit.
+            # Canonical SSE form: yfinance wants .SS.
             yahoo_symbol = _to_yahoo_sse_symbol(provider_symbol)
             if not yahoo_symbol:
                 # Preserve empty-symbol contract (ProviderError, no fallback).
@@ -538,15 +449,13 @@ class MarketDataService:
                 pass
 
         if sse:
-            # SSE live chain: yfinance(.SS) -> akshare(6-digit), first LIVE
-            # quote wins. Fail-closed: when neither provider serves live data
-            # the request raises instead of serving a synthetic stub — no
-            # fallbacks, no stale snapshots, no fabricated prices.
-            # Each provider has an independent breaker (isolation).
+            # SSE path: yfinance(.SS) only (akshare dropped). Fail-closed:
+            # when yfinance serves no live data the request raises instead
+            # of serving a synthetic stub — no fallbacks, no stale
+            # snapshots, no fabricated prices.
             from .providers.base import ProviderError as _PE
 
             yahoo_symbol = _to_yahoo_sse_symbol(provider_symbol)
-            ak_code = _to_akshare_code(yahoo_symbol)
             quote: dict | None = None
             try:
                 q_yf = self.provider.get_quote(yahoo_symbol)
@@ -556,14 +465,10 @@ class MarketDataService:
                 q_yf = None
             if _quote_is_live(q_yf):
                 quote = q_yf
-            else:
-                q_ak = self._call_akshare(ak_code)
-                if _quote_is_live(q_ak):
-                    quote = q_ak
             if quote is None:
                 raise _PE(
                     getattr(self.provider, "name", "yfinance"),
-                    f"no live quote for {yahoo_symbol} (yfinance+akshare unavailable)",
+                    f"no live quote for {yahoo_symbol} (yfinance unavailable)",
                 )
             assert quote is not None
             # Currency must be CNY for XSHG (never USD), even on yfinance path.
@@ -577,10 +482,9 @@ class MarketDataService:
         else:
             # Non-SSE chain (opt-in, additive): alpaca live (US, delay 0) ->
             # yfinance (delay 15) -> finnhub live (US free, delay 0) ->
-            # twelvedata live (US free, delay 0) -> stooq (delay 15,
-            # US+Euronext) -> snapshot/stub. First live quote wins (alpaca
-            # preferred = freshest) with short-circuit so one live feed
-            # costs one call. When nothing is live the request raises
+            # twelvedata live (US free, delay 0). First live quote wins
+            # (alpaca preferred = freshest) with short-circuit so one live
+            # feed costs one call. When nothing is live the request raises
             # (fail-closed — see below). Absent providers (None) are
             # skipped, so every existing call site without explicit wiring
             # behaves as before.
@@ -588,7 +492,6 @@ class MarketDataService:
             q_yf_chain: dict | None = None
             q_finnhub: dict | None = None
             q_twelvedata: dict | None = None
-            q_stooq: dict | None = None
             quote = None
             if self._is_alpaca_eligible(mic, provider_symbol):
                 # Empty-symbol contract propagates (422, never a stub).
@@ -623,12 +526,6 @@ class MarketDataService:
                 )
                 if _quote_is_live(q_twelvedata):
                     quote = q_twelvedata
-            if quote is None and self._is_stooq_eligible(mic, provider_symbol):
-                q_stooq = self._call_chain_provider(
-                    self.stooq_provider, provider_symbol, mic
-                )
-                if _quote_is_live(q_stooq):
-                    quote = q_stooq
             # Fail-closed: no fallback preference loop, no snapshot cover,
             # no synthetic stub. Either a live quote won above or the
             # request raises — routers map this to 502, never 200+stale.

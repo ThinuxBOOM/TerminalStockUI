@@ -51,6 +51,65 @@ DISCLOSURE = "Not investment advice. For informational purposes only."
 
 ALLOWED_CCY = ("USD", "EUR", "CNY")
 
+#: Overview/liquidity perf: the per-symbol quote+bars fan-out dominates wall
+#: time (same pattern as screener: quotes ~93% of a cold scan). Cache the
+#: assembled envelopes so homepage repeat views + ASPI Top-20 fan-outs don't
+#: rescan on every request. TTL 45s mirrors the screener cache (quote cache
+#: itself is 60s).
+_MARKETS_OVERVIEW_TTL_S = 45
+_MARKETS_LIQUIDITY_TTL_S = 45
+
+
+def _overview_cache_key(target_ccy: str | None) -> str:
+    return f"markets:overview:{(target_ccy or 'ALL').upper()}"
+
+
+def _liquidity_cache_key(mic: str, target_ccy: str | None, limit: int, sort: str) -> str:
+    return f"markets:liquidity:{mic}:{(target_ccy or 'ALL').upper()}:{int(limit)}:{(sort or 'turnover').lower()}"
+
+
+#: Liquidity history: daily aggregates straight from stored 1d price_bars
+#: (DB-only, never a live fetch — so it can't time out like the quote
+#: fan-out). Window -> number of daily points returned (capped 250).
+_HISTORY_WINDOW_DAYS = {"1D": 20, "5D": 30, "1M": 30, "3M": 90, "6M": 125, "1Y": 250}
+_HISTORY_TTL_S = 60
+
+_MIC_CURRENCIES = {
+    "XNYS": "USD",
+    "XNAS": "USD",
+    "XSHG": "CNY",
+    "XPAR": "EUR",
+    "XAMS": "EUR",
+    "XBRU": "EUR",
+}
+
+
+def _normalize_history_window(window: str | None) -> str:
+    w = (window or "1D").strip().upper()
+    return w if w in _HISTORY_WINDOW_DAYS else "1D"
+
+
+def _history_cache_key(mic: str, window: str) -> str:
+    return f"markets:liquidity-history:{mic}:{window}"
+
+
+def _empty_history(mic: str, window: str, currency: str, missing: list[str]) -> dict:
+    try:
+        prov = build_provenance(
+            f"price_bars:{mic}", as_of=_utcnow(), delay_minutes=15,
+            quality_grade="B", fallback_used=False, missing_fields=missing,
+        ).model_dump(mode="json")
+    except Exception:
+        prov = {
+            "source": f"price_bars:{mic}", "as_of": _utcnow().isoformat(),
+            "delay_minutes": 15, "quality_grade": "B",
+            "fallback_used": False, "missing_fields": missing,
+        }
+    return {
+        "mic": mic, "window": window, "currency": currency,
+        "points": [], "provenance": prov, "disclosure": DISCLOSURE,
+    }
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -191,10 +250,29 @@ def _collect_row(inst, svc: MarketDataService) -> dict:
     quote = svc.get_quote(symbol_key, getattr(inst, "exchange_mic", None))
     if not isinstance(quote, dict):
         raise ValueError("quote unavailable")
+    # Perf: bars are only needed for the range_pct fallback. When the quote
+    # already carries a usable high/low, skip the extra get_bars round-trip
+    # (DB + possible live fetch) — this halves per-symbol I/O on overview
+    # scans and is why cold homepage loads timed out.
+    bars = None
     try:
-        bars = svc.get_bars(symbol_key, timeframe="1d", limit=5)
-    except Exception:
-        bars = None
+        q_high = quote.get("high")
+        q_low = quote.get("low")
+        q_high_f = float(q_high) if q_high is not None and not isinstance(q_high, bool) else None
+        q_low_f = float(q_low) if q_low is not None and not isinstance(q_low, bool) else None
+        import math as _math
+
+        quote_has_range = (
+            q_high_f is not None and q_low_f is not None
+            and _math.isfinite(q_high_f) and _math.isfinite(q_low_f)
+        )
+    except (TypeError, ValueError, OverflowError):
+        quote_has_range = False
+    if not quote_has_range:
+        try:
+            bars = svc.get_bars(symbol_key, timeframe="1d", limit=5)
+        except Exception:
+            bars = None
     price = _as_float(quote.get("price"))
     change_pct = _as_float(quote.get("change_pct"))
     raw_vol = quote.get("volume")
@@ -453,6 +531,20 @@ def markets_overview(
 ) -> dict:
     """Per-MIC liquidity + breadth aggregates across all known markets."""
     ccy = _normalize_target_ccy(target_ccy)
+    # Result cache: identical overviews within TTL skip the quote fan-out
+    # (cold scans exceed the 60s frontend timeout; cached repeats are fast).
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _ck = _overview_cache_key(ccy)
+        try:
+            _cached = _get_cache().get(_ck)
+            if isinstance(_cached, dict) and isinstance(_cached.get("markets"), list):
+                return _cached
+        except Exception:
+            _ck = None
+    except Exception:
+        _ck = None
     skipped: list[dict] = []
     markets: list[dict] = []
     all_provenance: list[dict] = []
@@ -481,7 +573,7 @@ def markets_overview(
             markets.append(agg)
             if isinstance(agg.get("provenance"), dict):
                 all_provenance.append(agg["provenance"])
-    return {
+    out = {
         "markets": markets,
         "count": len(markets),
         "target_ccy": ccy,
@@ -490,6 +582,14 @@ def markets_overview(
         "provenance": _combine_provenance(all_provenance),
         "disclosure": DISCLOSURE,
     }
+    try:
+        if _ck:
+            from backend.cache import get_cache as _get_cache2
+
+            _get_cache2().set(_ck, out, ttl_s=_MARKETS_OVERVIEW_TTL_S)
+    except Exception:
+        pass
+    return out
 
 
 @router.get("/{mic}/liquidity")
@@ -513,6 +613,18 @@ def market_liquidity(
     """Single-market liquidity + breadth + per-symbol rows."""
     norm = _validate_mic(mic)
     ccy = _normalize_target_ccy(target_ccy)
+    try:
+        from backend.cache import get_cache as _get_cache3
+
+        _lck = _liquidity_cache_key(norm, ccy, int(limit), str(sort))
+        try:
+            _lcached = _get_cache3().get(_lck)
+            if isinstance(_lcached, dict) and isinstance(_lcached.get("rows"), list):
+                return _lcached
+        except Exception:
+            _lck = None
+    except Exception:
+        _lck = None
     skipped: list[dict] = []
     rows, universe_size = _scan_mic(norm, registry, svc, skipped, limit=limit, sort=sort)
     agg = _aggregate(norm, universe_size, rows, _turnover_note(ccy))
@@ -529,10 +641,234 @@ def market_liquidity(
         }
         for r in rows
     ]
-    return {
+    out = {
         **agg,
         "rows": wire_rows,
         "skipped": skipped,
         "target_ccy": ccy,
         "turnover_note": _turnover_note(ccy),
     }
+    try:
+        if _lck:
+            from backend.cache import get_cache as _get_cache4
+
+            _get_cache4().set(_lck, out, ttl_s=_MARKETS_LIQUIDITY_TTL_S)
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/{mic}/liquidity/history")
+def market_liquidity_history(
+    mic: str,
+    window: str = Query(default="1D", description="History window: 1D|5D|1M|3M|6M|1Y"),
+    registry: InstrumentRegistry = Depends(get_registry),
+) -> dict:
+    """Daily liquidity history from stored 1d bars (DB-only, never live).
+
+    Per trading date: total turnover (sum of native close*volume, no FX),
+    total volume, advancers/decliners/unchanged + avg_change_pct from
+    per-symbol close-vs-prev-close returns. Symbols missing a date simply
+    don't contribute that day — no forward-fill, no synthetic points.
+
+    Fail-closed: thin/empty history returns ``points: []`` with a valid
+    provenance envelope (frontend renders its honest placeholder), never
+    500 and never fabricated points. Unknown MIC -> 422, bad window falls
+    back to 1D (frontend contract).
+    """
+    norm = _validate_mic(mic)
+    w = _normalize_history_window(window)
+    want = _HISTORY_WINDOW_DAYS[w]
+    currency = _MIC_CURRENCIES.get(norm, "USD")
+    try:
+        from backend.cache import get_cache as _get_cache_h
+
+        _hck = _history_cache_key(norm, w)
+        try:
+            _hcached = _get_cache_h().get(_hck)
+            if isinstance(_hcached, dict) and isinstance(_hcached.get("points"), list):
+                return _hcached
+        except Exception:
+            _hck = None
+    except Exception:
+        _hck = None
+    try:
+        universe = [i for i in registry.all() if getattr(i, "exchange_mic", None) == norm]
+    except Exception:
+        return _empty_history(norm, w, currency, ["history", "universe"])
+    if not universe:
+        return _empty_history(norm, w, currency, ["history"])
+    try:
+        from backend.db.models import Instrument as DBInstrument
+        from backend.db.models import PriceBar
+        from backend.db.session import get_session_factory
+    except Exception:
+        return _empty_history(norm, w, currency, ["history"])
+    try:
+        Session = get_session_factory()
+        db = Session()
+        try:
+            per_symbol_cap = max(1, int(want) * 2)
+            row_limit = max(100, min(20000, len(universe) * per_symbol_cap))
+            pairs = (
+                db.query(PriceBar, DBInstrument)
+                .join(DBInstrument, PriceBar.instrument_id == DBInstrument.instrument_id)
+                .filter(DBInstrument.exchange_mic == norm, PriceBar.timeframe == "1d")
+                .order_by(PriceBar.ts.desc())
+                .limit(row_limit)
+                .all()
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return _empty_history(norm, w, currency, ["history"])
+    if not pairs:
+        return _empty_history(norm, w, currency, ["history"])
+    try:
+        import math as _math
+
+        # Per-symbol sorted bars + per-date turnover/volume buckets.
+        by_symbol: dict[str, list[tuple[str, float | None, float | None]]] = {}
+        turnover_by_day: dict[str, float] = {}
+        volume_by_day: dict[str, float] = {}
+        latest_ts_by_day: dict[str, object] = {}
+        sources: set[str] = set()
+        latest_ts = None
+        for bar, _inst in pairs:
+            try:
+                raw_ts = getattr(bar, "ts", None)
+                if raw_ts is None:
+                    continue
+                day = str(raw_ts)[:10]
+                if len(day) != 10:
+                    continue
+                try:
+                    close = float(getattr(bar, "close", None))  # type: ignore[arg-type]
+                    if not _math.isfinite(close):
+                        close = None  # type: ignore[assignment]
+                except (TypeError, ValueError):
+                    close = None
+                try:
+                    vol_raw = getattr(bar, "volume", None)
+                    vol = float(vol_raw) if vol_raw is not None and not isinstance(vol_raw, bool) else None
+                    if vol is not None and (not _math.isfinite(vol) or vol < 0):
+                        vol = None
+                except (TypeError, ValueError):
+                    vol = None
+                try:
+                    src = str(getattr(bar, "source", "") or "").strip()
+                    if src:
+                        sources.add(src)
+                except Exception:
+                    pass
+                if latest_ts is None:
+                    latest_ts = raw_ts
+                try:
+                    sym = str(getattr(_inst, "provider_symbol", "") or getattr(_inst, "exchange_symbol", "") or "").strip().upper()
+                except Exception:
+                    sym = ""
+                if not sym:
+                    continue
+                by_symbol.setdefault(sym, []).append((day, close, vol))
+                if close is not None and vol is not None:
+                    try:
+                        t = float(close) * float(vol)
+                        if _math.isfinite(t):
+                            turnover_by_day[day] = turnover_by_day.get(day, 0.0) + t
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                if vol is not None:
+                    volume_by_day[day] = volume_by_day.get(day, 0.0) + float(vol)
+                if day not in latest_ts_by_day:
+                    latest_ts_by_day[day] = raw_ts
+            except Exception:
+                continue
+        # Per-symbol daily returns (close vs prev close) for breadth.
+        returns_by_day: dict[str, list[float]] = {}
+        for _sym, rows in by_symbol.items():
+            rows.sort(key=lambda r: r[0])
+            for i in range(1, len(rows)):
+                prev_day, prev_close, _pv = rows[i - 1]
+                day, close, _v = rows[i]
+                if close is None or prev_close is None or prev_close == 0:
+                    continue
+                try:
+                    ret = (float(close) - float(prev_close)) / abs(float(prev_close)) * 100.0
+                    if _math.isfinite(ret):
+                        returns_by_day.setdefault(day, []).append(ret)
+                except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                    continue
+        days = sorted(set(list(turnover_by_day.keys()) + list(volume_by_day.keys()) + list(returns_by_day.keys())))
+        days = days[-want:] if len(days) > want else days
+        points: list[dict] = []
+        for day in days:
+            rets = returns_by_day.get(day, [])
+            adv = sum(1 for r in rets if r > 0)
+            dec = sum(1 for r in rets if r < 0)
+            unch = sum(1 for r in rets if r == 0)
+            try:
+                avg = float(sum(rets) / len(rets)) if rets else None
+                if avg is not None and not _math.isfinite(avg):
+                    avg = None
+            except Exception:
+                avg = None
+            points.append({
+                "t": f"{day}T00:00:00Z",
+                "turnover": turnover_by_day.get(day),
+                "volume": volume_by_day.get(day),
+                "advancers": adv if rets else None,
+                "decliners": dec if rets else None,
+                "unchanged": unch if rets else None,
+                "avg_change_pct": avg,
+            })
+        # Provenance: latest stored bar timestamp, delay 15, graded honestly.
+        try:
+            as_of = latest_ts if latest_ts is not None else _utcnow()
+            if not hasattr(as_of, "tzinfo"):
+                as_of = _utcnow()
+            elif getattr(as_of, "tzinfo", None) is None:
+                as_of = as_of.replace(tzinfo=timezone.utc)
+        except Exception:
+            as_of = _utcnow()
+        try:
+            age_min = max(0.0, (_utcnow() - as_of).total_seconds() / 60)
+        except Exception:
+            age_min = 0.0
+        try:
+            grade, _ = grade_quality(
+                delay_minutes=15, age_minutes=age_min,
+                missing_fields=[] if points else ["history"],
+                fallback_used=False, reconciled=False,
+            )
+        except Exception:
+            grade = "B"
+        try:
+            prov = build_provenance(
+                "+".join(sorted(sources)) or f"price_bars:{norm}", as_of=as_of,
+                delay_minutes=15, quality_grade=grade, fallback_used=False,
+                missing_fields=[] if points else ["history"],
+            ).model_dump(mode="json")
+        except Exception:
+            prov = {
+                "source": "+".join(sorted(sources)) or f"price_bars:{norm}",
+                "as_of": as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of),
+                "delay_minutes": 15, "quality_grade": grade,
+                "fallback_used": False, "missing_fields": [] if points else ["history"],
+            }
+        out = {
+            "mic": norm, "window": w, "currency": currency,
+            "points": points, "provenance": prov, "disclosure": DISCLOSURE,
+        }
+        try:
+            if _hck:
+                from backend.cache import get_cache as _get_cache_h2
+
+                _get_cache_h2().set(_hck, out, ttl_s=_HISTORY_TTL_S)
+        except Exception:
+            pass
+        return out
+    except Exception:
+        return _empty_history(norm, w, currency, ["history"])

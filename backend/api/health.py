@@ -61,7 +61,7 @@ def health(deep: int = Query(default=0, ge=0, le=1, description="1 = live DB/Red
     try:
         from backend.market_data.health import KNOWN_PROVIDERS as _KNOWN
     except Exception:
-        _KNOWN = ("yfinance", "akshare", "alpaca", "stooq", "fx",
+        _KNOWN = ("yfinance", "alpaca", "fx",
                   "gemini", "openai", "anthropic", "xai")
     try:
         for _name in _KNOWN:

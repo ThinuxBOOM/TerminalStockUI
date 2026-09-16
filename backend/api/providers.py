@@ -15,7 +15,7 @@ PROBE_SYMBOL = "AAPL"
 #: Market-data providers probeable via POST /api/providers/health/test.
 #: Unknown names are rejected (422) so arbitrary query values cannot
 #: bloat the health tracker with unbounded provider keys.
-MARKET_DATA_PROBE_PROVIDERS = ("yfinance", "akshare", "alpaca", "stooq")
+MARKET_DATA_PROBE_PROVIDERS = ("yfinance", "alpaca")
 
 #: Additional data providers probeable via the same endpoint (free-tier
 #: gap-fillers + FX single-pair ping). Kept separate so the legacy

@@ -197,15 +197,15 @@ def test_chain_falls_through_to_yfinance(isolated_db, monkeypatch):
 
 
 def test_bar_chain_defaults_and_env(isolated_db, monkeypatch, alpaca_keys):
-    assert bar_chain() == ["alpaca", "yfinance", "stooq"]
+    assert bar_chain() == ["alpaca", "yfinance"]
     monkeypatch.setenv("INGEST_BAR_CHAIN", "stooq,yfinance")
-    assert bar_chain() == ["stooq", "yfinance"]
+    assert bar_chain() == ["yfinance"]
     monkeypatch.setenv("INGEST_BAR_CHAIN", "alpaca,typo!!,yfinance")
     assert bar_chain() == ["alpaca", "yfinance"]
 
 
 def test_bar_chain_without_keys(isolated_db, monkeypatch):
-    assert bar_chain() == ["yfinance", "stooq"]
+    assert bar_chain() == ["yfinance"]
 
 
 def test_chain_skips_alpaca_link_for_non_us_silently(isolated_db, monkeypatch):
@@ -220,7 +220,7 @@ def test_chain_skips_alpaca_link_for_non_us_silently(isolated_db, monkeypatch):
                         lambda symbol, period="2y", interval="1d": list(canned))
     for symbol in ("600519.SS", "MC.PA", "ASML.AS", "UCB.BR"):
         bars, source = fetch_daily_bars_with_fallback(
-            symbol, chain=["alpaca", "yfinance", "stooq"])
+            symbol, chain=["alpaca", "yfinance"])
         assert source == "yfinance" and bars == canned
 
 

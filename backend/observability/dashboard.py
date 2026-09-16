@@ -6,8 +6,8 @@ circuit is open. Alert rule (README): error_rate > 5% over 5 minutes
 (fallback: 1h rate from ProviderHealthTracker) triggers an alert entry.
 
 M8: the dashboard always includes rows for the known providers (market-data:
-yfinance/akshare/alpaca/stooq/finnhub/twelvedata/fx; AI: gemini/openai/anthropic/xai) even before they have
-recorded calls, so GET /health (via build_dashboard) shows FX + AKShare + AI
+yfinance/alpaca/finnhub/twelvedata/fx; AI: gemini/openai/anthropic/xai) even before they have
+recorded calls, so GET /health (via build_dashboard) shows FX + AI
 coverage. Output is JSON-serializable (no datetime objects leak).
 """
 
@@ -28,9 +28,7 @@ from backend.observability.provider_metrics import (
 # Market-data providers first, then FX, then bounded-AI-opinion providers.
 KNOWN_PROVIDERS: tuple[str, ...] = (
     "yfinance",
-    "akshare",
     "alpaca",
-    "stooq",
     "finnhub",
     "twelvedata",
     "fx",
@@ -73,7 +71,7 @@ def _zero_stat(provider: str) -> dict:
     try:
         kind = "ai" if str(provider) in ("gemini", "openai", "anthropic", "xai") else (
             "data" if str(provider) in (
-                "yfinance", "akshare", "alpaca", "stooq", "finnhub", "twelvedata", "fx") else "unknown")
+                "yfinance", "alpaca", "finnhub", "twelvedata", "fx") else "unknown")
     except Exception:
         kind = "unknown"
     return {
@@ -142,8 +140,8 @@ def build_dashboard(
     """Assemble dashboard data. Never raises on an empty/unknown tracker.
 
     Every returned provider row carries p50/p95/error_1h (+ 5m)/circuit and
-    is JSON-serializable. ``known_providers`` (default: KNOWN_PROVIDERS)
-    guarantees FX + AKShare + AI rows even with zero calls; pass ``()`` to
+    is JSON-serializable.     ``known_providers`` (default: KNOWN_PROVIDERS)
+    guarantees FX + AI rows even with zero calls; pass ``()`` to
     disable the guarantee. Shape is consumed by the /health route.
     """
     if tracker is None:
@@ -269,7 +267,7 @@ def build_dashboard(
             except Exception:
                 pass
 
-    # M8 guarantee: FX + AKShare + AI providers always have a (possibly zero) row.
+    # M8 guarantee: FX + AI providers always have a (possibly zero) row.
     if known_providers is None:
         known_providers = KNOWN_PROVIDERS
     for name in known_providers:

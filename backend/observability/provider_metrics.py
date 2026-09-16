@@ -84,7 +84,7 @@ def provider_kind(name: str) -> str:
         return "unknown"
     if key in ("gemini", "openai", "anthropic", "xai"):
         return "ai"
-    if key in ("yfinance", "akshare", "alpaca", "stooq", "finnhub", "twelvedata", "fx"):
+    if key in ("yfinance", "alpaca", "finnhub", "twelvedata", "fx"):
         return "data"
     return "unknown"
 

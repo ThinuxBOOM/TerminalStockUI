@@ -13,10 +13,7 @@ try:  # Milestone 0 live-data chain (opt-in; missing -> skipped, never crash)
 except Exception:  # pragma: no cover
     AlpacaProvider = None  # type: ignore[assignment]
 
-try:
-    from ..market_data.providers.stooq import StooqProvider
-except Exception:  # pragma: no cover
-    StooqProvider = None  # type: ignore[assignment]
+
 
 try:  # Free-tier US redundancy (opt-in; missing -> skipped, never crash)
     from ..market_data.providers.finnhub_free import FinnhubProvider
@@ -73,8 +70,8 @@ def get_market_service() -> MarketDataService:
         hook = _tracker_hook(tracker)
         provider = YFinanceProvider(on_call=hook)
         # Milestone 0 chain: Alpaca live US (keys via env; unconfigured ->
-        # flagged stubs) + Stooq delayed gap-filler (no key). Each has an
-        # independent breaker; failures never take down yfinance/AKShare.
+        # flagged stubs). Each has an independent breaker; failures never
+        # take down yfinance.
         # Free-tier US redundancy: Finnhub (FINNHUB_API_KEY) + TwelveData
         # (TWELVEDATA_API_KEY); unconfigured -> flagged stubs, skipped cost
         # is one stub call each only when yfinance is not live.
@@ -84,12 +81,6 @@ def get_market_service() -> MarketDataService:
                 alpaca = AlpacaProvider(on_call=hook)
             except Exception:
                 alpaca = None
-        stooq = None
-        if StooqProvider is not None:
-            try:
-                stooq = StooqProvider(on_call=hook)
-            except Exception:
-                stooq = None
         finnhub = None
         if FinnhubProvider is not None:
             try:
@@ -104,7 +95,7 @@ def get_market_service() -> MarketDataService:
                 twelvedata = None
         _service = MarketDataService(registry=get_registry(), provider=provider,
                                      health=tracker, cache=get_cache(),
-                                     alpaca_provider=alpaca, stooq_provider=stooq,
+                                     alpaca_provider=alpaca,
                                      finnhub_provider=finnhub,
                                      twelvedata_provider=twelvedata)
     return _service

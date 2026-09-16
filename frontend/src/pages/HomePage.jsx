@@ -19,6 +19,18 @@ function normalizeSymbolInput(v) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
 }
 
+function formatResearchDate(r) {
+  const raw = r?.created_at ?? r?.target_date ?? null;
+  if (typeof raw !== "string" || raw.trim() === "") return "—";
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return "—";
+  try {
+    return new Date(ms).toISOString().slice(0, 10);
+  } catch {
+    return String(raw).slice(0, 10);
+  }
+}
+
 const MAX_HOME_WATCHLIST = 50;
 const MAX_HOME_REPORTS = 20;
 
@@ -276,6 +288,7 @@ function HomePage() {
                     <Link
                       to={`/security/${encodeURIComponent(r.symbol)}`}
                       className="min-w-0 truncate font-bold text-term-green hover:underline"
+                      title={r.created_at ? `researched ${r.created_at}` : undefined}
                     >
                       {r.symbol}
                       {r.horizon_days ? ` · ${r.horizon_days}d` : ""}
@@ -285,7 +298,12 @@ function HomePage() {
                       —{r.horizon_days ? ` · ${r.horizon_days}d` : ""}
                     </span>
                   )}
-                  <span className="term-num shrink-0 text-term-muted">{formatPct1(r.direction_probability)}</span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <span className="term-num text-[11px] text-term-muted" title={r.created_at ?? r.target_date ?? "research date unavailable"}>
+                      {formatResearchDate(r)}
+                    </span>
+                    <span className="term-num text-term-muted">{formatPct1(r.direction_probability)}</span>
+                  </span>
                 </li>
               ))}
             </ul>

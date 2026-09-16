@@ -2,11 +2,12 @@
 
 Covers:
 - Stooq symbol mapping (US/Euronext) + CSV parse + N/D handling
-- Stooq stub_mode / breaker / empty-symbol contract
+  (dormant module: mapping/parse unit tests only, not in the chain)
+- Stooq stub_mode / breaker / empty-symbol contract (dormant module)
 - Alpaca key resolution, US-only guard, snapshot parse, missing-keys fallback
 - Alpaca secrets never leak into quotes
-- Service chain: alpaca live wins (delay 0) -> yfinance -> stooq;
-  full outage preserves yfinance fallback; SSE never touches alpaca/stooq
+- Service chain: alpaca live wins (delay 0) -> yfinance;
+  full outage raises (fail-closed); SSE never touches alpaca
 - Package exports, dashboard rows, probe allow-list
 """
 
@@ -274,14 +275,6 @@ def _live_yf_raw(symbol: str) -> dict:
     }
 
 
-def _live_stooq_raw(symbol: str, market=None) -> dict:
-    return {
-        "symbol": symbol, "price": 232.40, "open": 231.0, "high": 233.8,
-        "low": 230.1, "prev_close": None, "volume": 54_000_000,
-        "currency": "USD", "as_of": _utcnow(),
-    }
-
-
 # -- service chain ------------------------------------------------------------
 
 
@@ -290,9 +283,7 @@ def test_service_alpaca_live_wins_with_delay_zero(isolated_db):
     yf._fetch_raw = _live_yf_raw  # type: ignore[method-assign]
     alpaca = AlpacaProvider(stub_mode=False, api_key="k", api_secret="s")
     alpaca._fetch_raw = _live_alpaca_raw  # type: ignore[method-assign]
-    stooq = StooqProvider(stub_mode=False)
-    stooq._fetch_raw = _live_stooq_raw  # type: ignore[method-assign]
-    svc = MarketDataService(provider=yf, alpaca_provider=alpaca, stooq_provider=stooq)
+    svc = MarketDataService(provider=yf, alpaca_provider=alpaca)
     out = svc.get_quote("AAPL")
     assert out["provenance"]["source"] == "alpaca"
     assert out["provenance"]["fallback_used"] is False
@@ -311,7 +302,6 @@ def test_service_yfinance_live_wins_when_alpaca_unconfigured(isolated_db, monkey
     svc = MarketDataService(
         provider=yf,
         alpaca_provider=AlpacaProvider(stub_mode=False),
-        stooq_provider=StooqProvider(stub_mode=True),
     )
     out = svc.get_quote("AAPL")
     assert out["provenance"]["source"] == "yfinance"
@@ -319,48 +309,39 @@ def test_service_yfinance_live_wins_when_alpaca_unconfigured(isolated_db, monkey
     assert out["provenance"]["delay_minutes"] == 15
 
 
-def test_service_stooq_live_wins_when_yfinance_fails(isolated_db):
+def test_service_yfinance_failure_raises_when_no_chain(isolated_db):
+    """yfinance down with no live chain left (stooq dropped) -> fail-closed."""
     yf = YFinanceProvider(stub_mode=False)
 
     def _yf_boom(symbol: str) -> dict:
         raise ProviderError("yfinance", "down")
 
     yf._fetch_raw = _yf_boom  # type: ignore[method-assign]
-    stooq = StooqProvider(stub_mode=False)
-    stooq._fetch_raw = _live_stooq_raw  # type: ignore[method-assign]
     svc = MarketDataService(
         provider=yf,
         alpaca_provider=AlpacaProvider(stub_mode=True),
-        stooq_provider=stooq,
     )
-    out = svc.get_quote("AAPL")
-    assert out["provenance"]["source"] == "stooq"
-    assert out["provenance"]["fallback_used"] is False
-    assert out["price"] == 232.40
+    with pytest.raises(ProviderError):
+        svc.get_quote("AAPL")
 
 
-def test_service_euronext_skips_alpaca_uses_stooq(isolated_db):
+def test_service_euronext_skips_alpaca_uses_yfinance(isolated_db):
+    """Euronext is yfinance-served; US-only alpaca is skipped."""
     yf = YFinanceProvider(stub_mode=False)
 
-    def _yf_boom(symbol: str) -> dict:
-        raise ProviderError("yfinance", "down")
-
-    yf._fetch_raw = _yf_boom  # type: ignore[method-assign]
-    alpaca = AlpacaProvider(stub_mode=False, api_key="k", api_secret="s")
-    alpaca._fetch_raw = _live_alpaca_raw  # type: ignore[method-assign]
-    stooq = StooqProvider(stub_mode=False)
-
-    def _stooq_euronext(symbol: str, market=None) -> dict:
+    def _live_yf_euronext(symbol: str) -> dict:
         return {
             "symbol": symbol, "price": 715.50, "open": 712.0, "high": 718.2,
-            "low": 710.4, "prev_close": None, "volume": 480_000,
+            "low": 710.4, "prev_close": 711.30, "volume": 480_000,
             "currency": "EUR", "as_of": _utcnow(),
         }
 
-    stooq._fetch_raw = _stooq_euronext  # type: ignore[method-assign]
-    svc = MarketDataService(provider=yf, alpaca_provider=alpaca, stooq_provider=stooq)
+    yf._fetch_raw = _live_yf_euronext  # type: ignore[method-assign]
+    alpaca = AlpacaProvider(stub_mode=False, api_key="k", api_secret="s")
+    alpaca._fetch_raw = _live_alpaca_raw  # type: ignore[method-assign]
+    svc = MarketDataService(provider=yf, alpaca_provider=alpaca)
     out = svc.get_quote("MC.PA")
-    assert out["provenance"]["source"] == "stooq"
+    assert out["provenance"]["source"] == "yfinance"
     assert out["currency"] == "EUR"
     assert out["provenance"]["fallback_used"] is False
 
@@ -370,7 +351,6 @@ def test_service_full_outage_raises_provider_error(isolated_db):
     svc = MarketDataService(
         provider=YFinanceProvider(stub_mode=True),
         alpaca_provider=AlpacaProvider(stub_mode=True),
-        stooq_provider=StooqProvider(stub_mode=True),
     )
     with pytest.raises(ProviderError):
         svc.get_quote("AAPL")
@@ -395,15 +375,14 @@ def test_service_refuses_fallback_flagged_quote_with_price(isolated_db):
     svc = MarketDataService(
         provider=YFinanceProvider(stub_mode=True),
         alpaca_provider=AlpacaProvider(stub_mode=True),
-        stooq_provider=StooqProvider(stub_mode=True),
     )
     with pytest.raises(ProviderError):
         svc.get_quote("AAPL")
 
 
-def test_service_sse_never_touches_alpaca_or_stooq(isolated_db):
-    # SSE chain is yfinance(.SS) -> akshare only; alpaca/stooq are never
-    # called even when live. yfinance serves a live CNY-shaped double.
+def test_service_sse_never_touches_alpaca(isolated_db):
+    # SSE path is yfinance(.SS) only; alpaca is never called even when live.
+    # yfinance serves a live CNY-shaped double.
     yf = YFinanceProvider(stub_mode=False)
 
     def _live_yf_cny(symbol: str) -> dict:
@@ -416,63 +395,53 @@ def test_service_sse_never_touches_alpaca_or_stooq(isolated_db):
     yf._fetch_raw = _live_yf_cny  # type: ignore[method-assign]
     alpaca = AlpacaProvider(stub_mode=False, api_key="k", api_secret="s")
     alpaca._fetch_raw = _live_alpaca_raw  # type: ignore[method-assign]
-    stooq = StooqProvider(stub_mode=False)
-    stooq._fetch_raw = _live_stooq_raw  # type: ignore[method-assign]
     alp_calls: list[str] = []
-    stooq_calls: list[str] = []
     _orig_alp_get = alpaca.get_quote
-    _orig_stooq_get = stooq.get_quote
 
     def _alp_spy(symbol: str, market=None) -> dict:
         alp_calls.append(symbol)
         return _orig_alp_get(symbol)
 
-    def _stooq_spy(symbol: str, market=None) -> dict:
-        stooq_calls.append(symbol)
-        return _orig_stooq_get(symbol)
-
     alpaca.get_quote = _alp_spy  # type: ignore[method-assign]
-    stooq.get_quote = _stooq_spy  # type: ignore[method-assign]
-    svc = MarketDataService(provider=yf, alpaca_provider=alpaca, stooq_provider=stooq)
+    svc = MarketDataService(provider=yf, alpaca_provider=alpaca)
     out = svc.get_quote("600519.SS")
     assert out["currency"] == "CNY"
-    assert out["provenance"]["source"] in ("yfinance", "akshare")
+    assert out["provenance"]["source"] == "yfinance"
     assert out["provenance"]["fallback_used"] is False
     assert alp_calls == []
-    assert stooq_calls == []
 
 
 def test_service_chain_short_circuits_on_first_live(isolated_db):
-    """One live feed costs one call: stooq is never hit when yfinance is live."""
+    """One live feed costs one call: alpaca stub is never hit when yfinance is live."""
+    from backend.market_data.providers.finnhub_free import FinnhubProvider
+
     yf = YFinanceProvider(stub_mode=False)
     yf._fetch_raw = _live_yf_raw  # type: ignore[method-assign]
-    stooq = StooqProvider(stub_mode=False)
+    finnhub = FinnhubProvider(stub_mode=False, api_key="k")
     calls: list[str] = []
 
-    def _stooq_spy(symbol: str, market=None) -> dict:
+    def _fh_spy(symbol: str, market=None) -> dict:
         calls.append(symbol)
-        return _live_stooq_raw(symbol, market)
+        raise ProviderError("finnhub", "must not be called when yfinance is live")
 
-    stooq._fetch_raw = _stooq_spy  # type: ignore[method-assign]
+    finnhub._fetch_raw = _fh_spy  # type: ignore[method-assign]
     svc = MarketDataService(
         provider=yf,
         alpaca_provider=AlpacaProvider(stub_mode=True),
-        stooq_provider=stooq,
+        finnhub_provider=finnhub,
     )
     out = svc.get_quote("AAPL")
     assert out["provenance"]["source"] == "yfinance"
     assert calls == []
 
 
-def test_service_breaker_isolation_across_three_providers():
+def test_service_breaker_isolation_across_two_providers():
     yf = YFinanceProvider(stub_mode=True, breaker=CircuitBreaker(failure_threshold=1))
     alpaca = AlpacaProvider(stub_mode=True, breaker=CircuitBreaker(failure_threshold=1))
-    stooq = StooqProvider(stub_mode=True, breaker=CircuitBreaker(failure_threshold=1))
-    assert yf.breaker is not alpaca.breaker is not stooq.breaker
+    assert yf.breaker is not alpaca.breaker
     yf.breaker.record_failure()
     assert yf.breaker.state == "open"
     assert alpaca.breaker.state == "closed"
-    assert stooq.breaker.state == "closed"
 
 
 # -- wiring --------------------------------------------------------------------
@@ -490,16 +459,16 @@ def test_dashboard_knows_new_providers():
     from backend.observability.dashboard import KNOWN_PROVIDERS, build_dashboard
 
     assert "alpaca" in KNOWN_PROVIDERS
-    assert "stooq" in KNOWN_PROVIDERS
+    assert "stooq" not in KNOWN_PROVIDERS
     body = build_dashboard()
     names = {p["provider"] for p in body["providers"]}
-    assert {"alpaca", "stooq"} <= names
+    assert "alpaca" in names
 
 
 def test_probe_allow_list():
     from backend.api.providers import MARKET_DATA_PROBE_PROVIDERS
 
-    assert set(MARKET_DATA_PROBE_PROVIDERS) == {"yfinance", "akshare", "alpaca", "stooq"}
+    assert set(MARKET_DATA_PROBE_PROVIDERS) == {"yfinance", "alpaca"}
 
 
 def test_probe_rejects_unknown_provider():
