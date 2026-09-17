@@ -450,7 +450,21 @@ def _normalize_symbols(symbols: list[str] | None, single: str | None = None) -> 
 
 
 def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
-    """Capture one compressed snapshot per symbol (batch never 500s)."""
+    """Capture one compressed snapshot per symbol (batch never 500s).
+
+    Fan-out is parallel (ThreadPoolExecutor, one DB session per worker) with
+    a global time budget (~45s, inside Vercel's 60s maxDuration and the
+    Actions curl 55s budget). A full 27-symbol universe fetched SEQUENTIALLY
+    pays one live-vendor round-trip per symbol (up to ~12s each on Yahoo
+    throttle + Alpaca/Stooq legs) and reliably exceeds both budgets — the
+    caller sees curl exit 28 with zero bytes. When the budget runs out the
+    remainder is reported as per-symbol ``skipped: time budget exceeded``
+    errors and the batch still returns HTTP 200 with partial data instead
+    of timing out into nothing.
+    """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
     from backend.db.session import get_session_factory, init_db
     from backend.workers.jobs import capture_snapshot
 
@@ -461,46 +475,105 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
                 "provenance": _cron_provenance(False)}
     try:
         init_db()
-        Session = get_session_factory()
-        db = Session()
     except Exception:
-        logger.warning("snapshot db unavailable symbols=%d", len(wanted))
-        db = None  # type: ignore[assignment]
+        pass
+    try:
+        _Session = get_session_factory()
+    except Exception:
+        _Session = None  # type: ignore[assignment]
+
+    _BUDGET_S = 45.0
+    _WORKERS = 6
+    started = _time.monotonic()
+
+    def _capture_one(raw: str) -> tuple[str, dict | None, str | None]:
+        key = raw.strip().upper()
+        tdb = None
+        try:
+            if _Session is not None:
+                try:
+                    tdb = _Session()
+                except Exception:
+                    tdb = None
+            out = capture_snapshot(raw, timeframe=tf, db=tdb)
+            return key, out, None
+        except Exception as exc:
+            try:
+                if tdb is not None:
+                    tdb.rollback()
+            except Exception:
+                pass
+            return key, None, f"{type(exc).__name__}: {str(exc)[:200]}"
+        finally:
+            try:
+                if tdb is not None:
+                    tdb.close()
+            except Exception:
+                pass
+
     snapshots: dict[str, dict] = {}
     errors: dict[str, str] = {}
-    try:
-        for raw in wanted:
-            key = raw.strip().upper()
+    truncated = False
+
+    def _record(key: str, out: dict | None, err: str | None) -> None:
+        if err is not None or out is None:
+            errors[key] = err or "snapshot failed"
             try:
-                out = capture_snapshot(raw, timeframe=tf, db=db)
-                snapshots[key] = {
-                    "snapshot_id": out.get("snapshot_id"),
-                    "persisted": bool(out.get("persisted")),
-                    "encoding": out.get("encoding"),
-                    "n_bars": out.get("n_bars"),
-                    "size_reduction_pct": out.get("size_reduction_pct"),
-                }
-                if not out.get("ok"):
-                    errors[key] = str((out.get("errors") or {"_batch": "failed"})
-                                      if isinstance(out.get("errors"), dict)
-                                      else out.get("errors"))[:200]
-            except Exception as exc:
-                try:
-                    if db is not None:
-                        db.rollback()
-                except Exception:
-                    pass
-                errors[key] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning("cron snapshot failed")
-    finally:
-        try:
-            if db is not None:
-                db.close()
-        except Exception:
-            pass
-    logger.info("snapshot done captured=%d errors=%d", len(snapshots), len(errors))
-    return {"ok": not errors, "snapshots": snapshots, "errors": errors,
-            "provenance": _cron_provenance(bool(errors))}
+            except Exception:
+                pass
+            return
+        snapshots[key] = {
+            "snapshot_id": out.get("snapshot_id"),
+            "persisted": bool(out.get("persisted")),
+            "encoding": out.get("encoding"),
+            "n_bars": out.get("n_bars"),
+            "size_reduction_pct": out.get("size_reduction_pct"),
+        }
+        if not out.get("ok"):
+            errors[key] = str((out.get("errors") or {"_batch": "failed"})
+                              if isinstance(out.get("errors"), dict)
+                              else out.get("errors"))[:200]
+
+    # Small batches (tests, ?symbol= probes): sequential, deterministic.
+    if len(wanted) <= 3:
+        for raw in wanted:
+            _record(*_capture_one(raw))
+    else:
+        workers = max(1, min(_WORKERS, len(wanted)))
+        with _TPE(max_workers=workers) as pool:
+            futs = {pool.submit(_capture_one, raw): raw.strip().upper()
+                    for raw in wanted}
+            for fut, key in futs.items():
+                remaining = _BUDGET_S - (_time.monotonic() - started)
+                if remaining <= 0:
+                    errors[key] = ("skipped: snapshot time budget exceeded "
+                                   "(retry next tick)")
+                    truncated = True
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
+                    continue
+                try:
+                    _record(*fut.result(timeout=remaining))
+                except Exception as exc:
+                    errors[key] = (f"skipped: {type(exc).__name__} "
+                                   f"({str(exc)[:120]})")
+                    truncated = True
+            for fut, key in futs.items():
+                if not fut.done() and key not in snapshots and key not in errors:
+                    errors[key] = ("skipped: snapshot time budget exceeded "
+                                   "(retry next tick)")
+                    truncated = True
+    logger.info("snapshot done captured=%d errors=%d truncated=%s",
+                len(snapshots), len(errors), truncated)
+    out_payload: dict = {"ok": not errors, "snapshots": snapshots,
+                         "errors": errors,
+                         "provenance": _cron_provenance(bool(errors))}
+    if truncated:
+        out_payload["truncated"] = True
+    return out_payload
 
 
 def _run_score(symbols: list[str]) -> dict:

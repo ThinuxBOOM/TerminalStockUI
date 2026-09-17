@@ -36,13 +36,23 @@ jobs:
           APP_URL="${APP_URL%/}"
           echo "Target host check only (secret never printed):"
           printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
-          code=$(curl -s --max-time 55 -o /tmp/snap.json -w "%{http_code}" \
+          # NOTE: curl exit 28 = operation timeout (backend did not respond
+          # within --max-time). The endpoint fans out over ~27 symbols, so a
+          # cold DB / vendor throttle can exceed the budget; the backend now
+          # caps itself at ~45s and returns partial 200 instead of hanging.
+          # `|| true` keeps `bash -e` from swallowing the diagnostics below.
+          code=$(curl -s --max-time 55 --connect-timeout 10 -o /tmp/snap.json -w "%{http_code}" \
             -H "Authorization: Bearer $CRON_SECRET" \
-            "$APP_URL/api/cron/snapshot")
-          echo "HTTP status: $code"
-          cat /tmp/snap.json
+            "$APP_URL/api/cron/snapshot") || curl_exit=$?
+          curl_exit=${curl_exit:-0}
+          echo "curl exit: $curl_exit (28 = timeout after 55s)"
+          echo "HTTP status: ${code:-<none>}"
+          if [ -f /tmp/snap.json ]; then cat /tmp/snap.json; else echo "<no response body>"; fi
           echo ""
-          test "$code" = "200"
+          if [ "$curl_exit" = "28" ]; then
+            echo "Snapshot request timed out: backend still slower than 55s (cold start / vendor throttle). Check Vercel function logs for /api/cron/snapshot duration."
+          fi
+          test "$curl_exit" = "0" && test "$code" = "200"
         env:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
