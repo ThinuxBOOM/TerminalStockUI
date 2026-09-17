@@ -29,12 +29,15 @@ export default defineConfig({
   server: {
     // Local-dev only: `vite dev` proxies /api to FastAPI.
     // Production/Vercel builds ignore `server` entirely.
+    // Point at a remote/local backend without editing code:
+    //   VITE_PROXY_TARGET=http://192.168.1.20:8000 npm run dev
+    // (BACKEND_URL is accepted as an alias; default stays localhost:8000.)
     port: 5173,
     proxy: {
       // Object form (not string shorthand) so the Host header is rewritten
       // for FastAPI and connection failures surface fast instead of hanging.
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.VITE_PROXY_TARGET || process.env.BACKEND_URL || 'http://localhost:8000',
         changeOrigin: true,
         timeout: 10000,
       },

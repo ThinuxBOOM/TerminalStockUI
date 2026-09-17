@@ -1,0 +1,27 @@
+# Local-machine crontab — localhost replacement for .github/workflows/*.yml.
+# Install:  chmod +x scripts/cron/*.sh
+#           crontab -e   # paste the lines below (adjust REPO + BACKEND_URL)
+#
+# GitHub-hosted runners cannot reach your localhost, so the cloud schedules
+# stay pointed at Vercel while THESE lines drive your local backend. If both
+# ever point at the same database, disable one side (endpoints are idempotent,
+# but two writers waste vendor quota).
+#
+# Cadences mirror the cloud workflows (UTC):
+#   evaluate  every 15 min  (alerts.yml)      | snapshot hourly :07 (snapshots.yml)
+#   ingest    05:30 daily   (vercel.json)     | sp500    06:00 daily (sp500-ingest.yml)
+#   calibrate 06:30 daily   (vercel.json)     | score    07:00 daily (score.yml)
+#   health    08:00 daily   (health.yml)      | retention Sun 03:00 (retention.yml)
+
+# REPO=/path/to/TerminalStockUI
+# BACKEND_URL=http://127.0.0.1:8000
+# CRON_SECRET=your-local-cron-secret
+
+# */15 * * * *  BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh evaluate >> /var/log/onemarket-cron.log 2>&1
+# 7 * * * *    BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh snapshot >> /var/log/onemarket-cron.log 2>&1
+# 30 5 * * *  BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh ingest >> /var/log/onemarket-cron.log 2>&1
+# 0 6 * * *   BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh sp500 >> /var/log/onemarket-cron.log 2>&1
+# 30 6 * * *  BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh calibrate >> /var/log/onemarket-cron.log 2>&1
+# 0 7 * * *   BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh score >> /var/log/onemarket-cron.log 2>&1
+# 0 8 * * *   BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh health >> /var/log/onemarket-cron.log 2>&1
+# 0 3 * * 0   BACKEND_URL=http://127.0.0.1:8000 CRON_SECRET=xxx /path/to/TerminalStockUI/scripts/cron/local-cron.sh retention >> /var/log/onemarket-cron.log 2>&1

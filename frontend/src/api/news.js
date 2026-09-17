@@ -1,16 +1,9 @@
 import axios from "axios";
+import { resolveApiBaseUrl } from "./baseUrl";
 
 function resolveBaseUrl() {
-  const raw = import.meta.env?.VITE_API_BASE_URL;
-  const configured = (raw ?? "").trim().replace(/\/+$/, "");
-  if (configured) return configured;
-  if (typeof window !== "undefined") {
-    const { protocol, hostname } = window.location;
-    if (protocol === "https:") return "";
-    if (hostname && hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "[::1]")
-      return "";
-  }
-  return "http://localhost:8000";
+  // Shared chain (?api= > localStorage > public/config.js > build > default).
+  return resolveApiBaseUrl();
 }
 
 const api = axios.create({

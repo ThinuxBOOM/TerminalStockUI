@@ -71,17 +71,13 @@ const HealthSchema = z.object({
   ).optional(),
   provenance: ProvenanceSchema.optional()
 });
+import { resolveApiBaseUrl } from "./baseUrl";
+export { API_BASE_OVERRIDE_KEY, clearApiBaseUrlOverride, resolveApiBaseUrl, resolveApiBaseUrlWithSource, setApiBaseUrlOverride } from "./baseUrl";
 function resolveBaseUrl() {
-  const raw = import.meta.env?.VITE_API_BASE_URL;
-  const configured = (raw ?? "").trim().replace(/\/+$/, "");
-  if (configured) return configured;
-  if (typeof window !== "undefined") {
-    const { protocol, hostname } = window.location;
-    if (protocol === "https:") return "";
-    if (hostname && hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "[::1]")
-      return "";
-  }
-  return "http://localhost:8000";
+  // Thin wrapper kept for backwards compatibility — the real priority chain
+  // (?api= > localStorage > public/config.js > VITE_API_BASE_URL > default)
+  // lives in ./baseUrl so every api module resolves identically.
+  return resolveApiBaseUrl();
 }
 const BASE_URL = resolveBaseUrl();
 const api = axios.create({

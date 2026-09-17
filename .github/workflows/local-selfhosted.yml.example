@@ -1,0 +1,88 @@
+# OneMarket Analyzer — LOCAL backend triggers (self-hosted runner example)
+#
+# DISABLED BY DEFAULT: GitHub only runs `.yml` files, so this `.example`
+# does nothing until you rename it to `local-selfhosted.yml`.
+#
+# WHEN TO USE THIS: you host the backend on your own machine and want the
+# GitHub schedules to drive it. That requires a SELF-HOSTED runner on that
+# machine (Settings -> Actions -> Runners -> New self-hosted runner), because
+# GitHub-hosted runners cannot reach your localhost.
+#
+# Setup:
+#   1. Install the self-hosted runner on the backend machine (runs as a
+#      service so schedules fire while you are away).
+#   2. Rename this file to `.github/workflows/local-selfhosted.yml`.
+#   3. Set repo variables/secrets:
+#        vars.LOCAL_APP_URL  e.g. http://127.0.0.1:8000 (or your LAN URL)
+#        secrets.LOCAL_CRON_SECRET  (must match the backend's CRON_SECRET)
+#   4. DISABLE the cloud counterparts (or accept double runs — endpoints are
+#      idempotent but two writers waste vendor quota):
+#        alerts/snapshots/score/health/retention/sp500-ingest.yml, and if the
+#        backend is fully local, the Vercel crons in vercel.json too.
+#   5. ALTERNATIVE without any runner: skip this file and schedule
+#      scripts/cron/local-cron.* directly on the machine (Task Scheduler on
+#      Windows via install-windows-tasks.ps1, cron on Linux via
+#      crontab.local.example). Same jobs, fewer moving parts.
+#
+# Manual runs: Actions tab -> "Local backend triggers" -> Run workflow
+# (optional single-job input).
+
+name: Local backend triggers (self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Single job (empty = all)"
+        required: false
+        default: ""
+  # Uncomment once the runner is proven (keep ONE scheduler per database):
+  # schedule:
+  #   - cron: "*/15 * * * *"   # evaluate (alerts)
+  #   - cron: "7 * * * *"      # snapshot
+  #   - cron: "30 5 * * *"     # ingest
+  #   - cron: "30 6 * * *"     # calibrate
+  #   - cron: "0 7 * * *"      # score
+  #   - cron: "0 8 * * *"      # health
+
+env:
+  APP_URL: ${{ vars.LOCAL_APP_URL }}
+  CRON_SECRET: ${{ secrets.LOCAL_CRON_SECRET }}
+
+jobs:
+  local-jobs:
+    name: trigger local cron endpoints
+    runs-on: [self-hosted]
+    steps:
+      - name: Trigger jobs
+        shell: bash
+        run: |
+          : "${APP_URL:?vars.LOCAL_APP_URL not set (repo Settings -> Secrets and variables -> Actions -> Variables)}"
+          : "${CRON_SECRET:?secrets.LOCAL_CRON_SECRET not set (must match backend CRON_SECRET)}"
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          ONLY="${{ inputs.job }}"
+          hit() { # $1 = label, $2 = path, $3 = method, $4 = body
+            if [ -n "$ONLY" ] && [ "$ONLY" != "$1" ]; then echo "skip $1 (only=$ONLY)"; return 0; fi
+            if [ "$3" = "POST" ]; then
+              code=$(curl -s --max-time 55 --connect-timeout 10 -o /tmp/local.json -w "%{http_code}" \
+                -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $CRON_SECRET" \
+                -d "$4" "$APP_URL$2")
+            else
+              code=$(curl -s --max-time 55 --connect-timeout 10 -o /tmp/local.json -w "%{http_code}" \
+                -H "Authorization: Bearer $CRON_SECRET" \
+                "$APP_URL$2")
+            fi
+            echo "[$1] HTTP $code"; head -c 1000 /tmp/local.json; echo ""
+            test "$code" = "200"
+          }
+          hit ingest /api/cron/ingest GET
+          hit calibrate /api/cron/calibrate GET
+          hit snapshot /api/cron/snapshot GET
+          hit evaluate /api/cron/evaluate GET
+          hit score /api/cron/score GET
+          hit health /api/cron/health GET
+          # retention is weekly + destructive-adjacent: manual-only here
+          if [ "$ONLY" = "retention" ]; then
+            hit retention /api/cron/retention POST '{"apply": true}'
+          fi
