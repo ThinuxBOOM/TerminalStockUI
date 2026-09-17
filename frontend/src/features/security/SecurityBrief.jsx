@@ -113,16 +113,21 @@ function SecurityBrief({ symbol }) {
   // Single-call chart: live quote + bars stitched with that exact quote
   // (GET /api/market_data/chart), so the header price and the chart's last
   // print are the same number from the same call — no quote-vs-bars skew.
+  // retry: 1 — a cold first view warms the backend (live vendor fetch +
+  // DB upsert); the retry then serves warm cache instead of surfacing
+  // "Quote unavailable / timed out (cold start)". No coalesce for these
+  // keys (client.js bypasses in-flight dedupe for chart/forecast), so the
+  // retry is a genuine second request.
   const quote = useQuery({
     queryKey: ["chart", symbol, preset.timeframe, preset.limit],
     queryFn: ({ signal }) => getChart(symbol, preset.timeframe, preset.limit, { signal }),
-    retry: false,
+    retry: 1,
     staleTime: 30000,
   });
   const forecastQ = useQuery({
     queryKey: ["forecast", symbol, forecastHorizon],
     queryFn: ({ signal }) => getForecast(symbol, forecastHorizon, { signal }),
-    retry: false,
+    retry: 1,
     staleTime: 60000,
   });
   const analyticsQ = useQuery({

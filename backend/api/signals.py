@@ -98,11 +98,27 @@ def _fetch_news_map(symbols: list[str]) -> dict[str, float]:
     return out
 
 
-def _score_one(inst, svc: MarketDataService, horizon: int, news_map: dict) -> tuple[dict | None, dict | None]:
+#: Minimum cached 1d bars to score a symbol (mirrors the get_bars serve
+#: gate): uncached symbols skip fast with an honest reason instead of each
+#: paying a live vendor fetch inside the fan-out. Single-symbol views still
+#: fetch on demand — this gate is scan-only.
+_SIGNALS_MIN_WARM_BARS = 100
+
+
+def _score_one(inst, svc: MarketDataService, horizon: int, news_map: dict,
+               warm: dict | None = None) -> tuple[dict | None, dict | None]:
     try:
         key = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
     except Exception:
         return None, {"symbol": "UNKNOWN", "reason": "bad registry entry"}
+    if isinstance(warm, dict):
+        try:
+            have = int(warm.get(str(key).upper(), 0))
+        except Exception:
+            have = 0
+        if have < _SIGNALS_MIN_WARM_BARS:
+            return None, {"symbol": str(key),
+                          "reason": "no cached bars yet (daily warming covers it)"}
     try:
         quote = svc.get_quote(key, getattr(inst, "exchange_mic", None))
         fc = ForecastService(market_service=svc).forecast(key, horizon)
@@ -168,6 +184,24 @@ def top_signals(
         universe = [i for i in registry.all() if getattr(i, "sector", "") not in ("ETF", "Index")]
     except Exception as exc:
         raise HTTPException(status_code=502, detail="signals universe failed") from exc
+    # Cost guard: the 500-symbol S&P 500 bulk would blow the serverless
+    # budget on a full quote+forecast fan-out (8 workers x ~2s x 500 >> 60s).
+    # Seeds (incl. SP500 names like AAPL/TSLA) still scan; SP500-only bulk
+    # belongs to the paginated screener (?market=SP500), and any single
+    # ticker resolves on demand with the same blended signal math.
+    try:
+        from backend.instruments.registry import SEED_INSTRUMENTS as _SEEDS
+        from backend.instruments.sp500 import SP500_SYMBOLS as _SP
+
+        _seed_syms = {str(getattr(s, "provider_symbol", "") or "").upper()
+                      for s in _SEEDS}
+        _sp_only = frozenset(s for s in (str(x).upper() for x in _SP)
+                             if s and s not in _seed_syms)
+        if _sp_only:
+            universe = [i for i in universe
+                        if str(getattr(i, "provider_symbol", "") or "").upper() not in _sp_only]
+    except Exception:
+        pass
     # Group by MIC.
     by_mic: dict[str, list] = {}
     for inst in universe:
@@ -189,11 +223,21 @@ def top_signals(
     news_map = _fetch_news_map(us_syms) if us_syms else {}
     markets: dict = {}
     skipped: list[dict] = []
+    # Warm-bars gate (one cheap COUNT query, no network); DB unreachable
+    # (None) fails open to the legacy per-symbol path.
+    try:
+        _all_insts = [i for insts in by_mic.values() for i in insts]
+        _keys = [str(getattr(i, "provider_symbol", None)
+                     or getattr(i, "exchange_symbol", "") or "")
+                 for i in _all_insts]
+        warm = svc.warm_bar_counts(_keys, timeframe="1d")
+    except Exception:
+        warm = None
     for mic, insts in sorted(by_mic.items()):
         rows: list[dict] = []
         workers = max(1, min(_MAX_WORKERS, len(insts)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = {pool.submit(_score_one, inst, svc, horizon_int, news_map): inst for inst in insts}
+            futs = {pool.submit(_score_one, inst, svc, horizon_int, news_map, warm): inst for inst in insts}
             for fut in concurrent.futures.as_completed(futs):
                 try:
                     row, skip = fut.result(timeout=60)

@@ -95,8 +95,12 @@ def test_resolve_new_blue_chips_both_forms():
 
 def test_resolve_wrong_market_returns_none():
     reg = _registry()
+    # Scoped resolve must never leak across venues: "MC" in XNAS scope may
+    # fuzzy-match a Nasdaq name (e.g. MCHP prefix) now the S&P 500 bulk is
+    # seeded, but it must never return Euronext's MC.
     inst, _c, _a = reg.resolve("MC", market="XNAS")
-    assert inst is None
+    assert inst is None or inst.exchange_mic == "XNAS"
+    assert inst is None or inst.exchange_symbol != "MC" or inst.exchange_mic != "XPAR"
     inst2, _c2, _a2 = reg.resolve("MC.PA", market="XAMS")
     assert inst2 is None
 

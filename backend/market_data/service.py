@@ -662,6 +662,74 @@ class MarketDataService:
             n = 30
         return f"bars:{sym}:{(timeframe or '1d')}:{n}"
 
+    def warm_bar_counts(
+        self, symbols: list[str] | tuple[str, ...] | None, timeframe: str = "1d"
+    ) -> dict[str, int] | None:
+        """Cached-bar row counts per provider symbol, one query, no network.
+
+        Batch gate for fan-out endpoints (screener/signals): scanning 500
+        symbols must not pay one live vendor fetch per uncached symbol
+        (minutes past maxDuration). Returns {PROVIDER_SYMBOL: count};
+        None when the DB is unreachable (callers then fail OPEN to the
+        legacy per-symbol path instead of skipping the whole scan).
+        """
+        try:
+            wanted: dict[str, tuple[str, str]] = {}
+            for raw in symbols or []:
+                try:
+                    inst, _, _ = self.registry.resolve(str(raw or "").strip())
+                except Exception:
+                    inst = None
+                if inst is None:
+                    continue
+                try:
+                    key = str(getattr(inst, "provider_symbol", None)
+                              or getattr(inst, "exchange_symbol", "") or "").upper()
+                    mic = str(getattr(inst, "exchange_mic", "") or "").upper()
+                    sym = str(getattr(inst, "exchange_symbol", "") or "").upper()
+                except Exception:
+                    continue
+                if key and mic and sym:
+                    wanted[key] = (mic, sym)
+            if not wanted:
+                return {}
+            from sqlalchemy import func as _func
+
+            from backend.db.models import Instrument as _DBI
+            from backend.db.models import PriceBar as _PB
+            from backend.db.session import get_session_factory as _gsf
+
+            session = _gsf()()
+            try:
+                rows = (
+                    session.query(
+                        _DBI.exchange_mic, _DBI.exchange_symbol,
+                        _func.count(),
+                    )
+                    .join(_PB, _PB.instrument_id == _DBI.instrument_id)
+                    .filter(
+                        _PB.timeframe == (timeframe or "1d"),
+                        _DBI.exchange_symbol.in_(
+                            sorted({s for _, s in wanted.values()})),
+                    )
+                    .group_by(_DBI.exchange_mic, _DBI.exchange_symbol)
+                    .all()
+                )
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            by_pair: dict[tuple[str, str], int] = {}
+            for mic, sym, n in rows or []:
+                try:
+                    by_pair[(str(mic).upper(), str(sym).upper())] = int(n)
+                except Exception:
+                    continue
+            return {k: int(by_pair.get(pair, 0)) for k, pair in wanted.items()}
+        except Exception:
+            return None
+
     def get_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
         """Serve daily bars from ``price_bars`` when coverage is sufficient.
 
@@ -1086,19 +1154,56 @@ class MarketDataService:
             symbol_text = str(symbol or "").strip()
         except Exception:
             symbol_text = ""
-        bars_payload = self.get_bars(symbol_text, timeframe, limit)
+        # Bars + quote are independent fetches: run them concurrently so a
+        # cold view pays max(bars, quote) instead of bars+quote (~12s + ~10s
+        # sequential previously blew the frontend 30s chart timeout, surfacing
+        # as "Quote unavailable / timed out (cold start)" on first view of
+        # any uncached ticker). Bars failure still raises; quote failure
+        # still degrades to quote=None (bars served).
+        import concurrent.futures as _cf
+
+        bars_payload: dict | None = None
+        bars_exc: Exception | None = None
+        quote: dict | None = None
+
+        def _fetch_bars() -> dict:
+            return self.get_bars(symbol_text, timeframe, limit)
+
+        def _fetch_quote() -> dict | None:
+            try:
+                return self.get_quote(symbol_text, None)
+            except Exception:
+                return None
+
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
+                _fb = _pool.submit(_fetch_bars)
+                _fq = _pool.submit(_fetch_quote) if (timeframe or "1d") == "1d" else None
+                try:
+                    bars_payload = _fb.result(timeout=55)
+                except Exception as exc:
+                    bars_exc = exc
+                if _fq is not None:
+                    # Quote budget sits inside the bars budget: a cold quote
+                    # chain (~10-21s) must not be cut early — a null quote
+                    # blanks the brief header. The frontend's 30s chart
+                    # timeout + auto-retry covers the residual cold tail.
+                    try:
+                        quote = _fq.result(timeout=25)
+                    except Exception:
+                        quote = None
+        except Exception as exc:
+            bars_exc = exc
+        if bars_exc is not None or not isinstance(bars_payload, dict):
+            if isinstance(bars_exc, Exception):
+                raise bars_exc
+            raise ValueError(f"no bars for {symbol_text!r}")
         bars = bars_payload.get("bars", []) if isinstance(bars_payload, dict) else []
         try:
             instrument, _, _ = self.registry.resolve(symbol_text)
             mic = getattr(instrument, "exchange_mic", None) if instrument else None
         except Exception:
             mic = None
-        quote: dict | None = None
-        if (timeframe or "1d") == "1d":
-            try:
-                quote = self.get_quote(symbol_text, None)
-            except Exception:
-                quote = None
         stitched, reason, forming = False, "quote-missing", False
         if quote is not None and (timeframe or "1d") == "1d":
             bars, stitched, reason, forming = self._stitch_quote_into_bars(

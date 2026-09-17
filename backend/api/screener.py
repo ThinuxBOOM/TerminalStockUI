@@ -44,6 +44,10 @@ router = APIRouter(prefix="/api/screener", tags=["screener"])
 
 _BUILTIN_MARKETS = frozenset({"XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"})
 
+#: Index universes (not venues): pseudo-markets grouping registry symbols
+#: across MICs. S&P 500 spans XNYS+XNAS so it can never be a MIC market.
+_BUILTIN_UNIVERSES = frozenset({"SP500"})
+
 
 def _known_markets() -> frozenset:
     """Canonical venue set: config/markets.yaml union built-ins (never empty).
@@ -70,8 +74,20 @@ DISCLOSURE = "Not investment advice. For informational purposes only."
 #: slider drags / repeats don't rescan. TTL 45s balances freshness (quote
 #: cache itself is 60s) with repeat-view speed.
 _SCREENER_CACHE_TTL_S = 45
+#: SP500 envelopes cache longer: same-day repeats skip the 500-quote
+#: fan-out entirely (forecasts are data-version keyed per day anyway).
+_SCREENER_CACHE_TTL_SP500_S = 300
 _SCREENER_MAX_WORKERS = 8
+#: Large universes (SP500) fan out wider: quotes dominate and are
+#: I/O-bound, so 16 workers halves a 500-quote scan vs 8.
+_SCREENER_MAX_WORKERS_LARGE = 16
+_LARGE_UNIVERSE_CUTOVER = 100
 _PER_SYMBOL_TIMEOUT_S = 60
+#: Global scan budget: a cold 500-symbol SP500 scan at ~2s/symbol over
+#: 8 workers (~125s) would otherwise hit the Vercel 60s kill with zero
+#: bytes. When the budget runs out the scan ranks what finished and marks
+#: the rest skipped — partial 200 beats a timeout into nothing.
+_SCAN_BUDGET_S = 50
 
 #: Quality signal inputs: no statement feed in this phase, so the shared
 #: EMPTY mapping mirrors backend/api/analytics_api.py (modules return
@@ -155,13 +171,50 @@ def _normalize_market(market: str | None) -> str | None:
     mic = (market or "").strip().upper()
     if not mic or mic == "ALL":
         return None
+    if mic in _BUILTIN_UNIVERSES:
+        return mic
     if mic not in _known_markets():
         raise HTTPException(
             status_code=422,
             detail=f"unknown market {market!r}: expected one of "
-            f"{sorted(_known_markets())} or ALL",
+            f"{sorted(_known_markets())} or ALL or {sorted(_BUILTIN_UNIVERSES)}",
         )
     return mic
+
+
+def _universe_for(mic: str | None, registry: InstrumentRegistry) -> list:
+    """Registry rows for a MIC scope, ALL, or an index universe (SP500)."""
+    try:
+        universe = registry.all()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("screener universe failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="screener universe failed") from exc
+    if mic is None:
+        return universe
+    if mic == "SP500":
+        try:
+            from backend.instruments.sp500 import SP500_SYMBOLS as _sp
+
+            wanted = {str(s).upper() for s in _sp}
+        except Exception as exc:
+            log.warning("screener sp500 universe failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="screener universe failed") from exc
+
+        def _key(inst) -> str:
+            try:
+                return str(getattr(inst, "provider_symbol", None)
+                           or getattr(inst, "exchange_symbol", "") or "").upper()
+            except Exception:
+                return ""
+
+        return [i for i in universe if _key(i) in wanted]
+    try:
+        return [i for i in universe if getattr(i, "exchange_mic", None) == mic]
+    except Exception as exc:
+        log.warning("screener filter failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="screener filter failed") from exc
 
 
 def _screener_cache_key(mic: str | None, horizon: int, min_direction: float, limit: int, offset: int) -> str:
@@ -172,12 +225,30 @@ def _screener_cache_key(mic: str | None, horizon: int, min_direction: float, lim
     return f"screener:{mic or 'ALL'}:{int(horizon)}:{min_dir:.4f}:{int(limit)}:{int(offset)}"
 
 
-def _scan_one(inst, svc: MarketDataService, horizon: int, quality: dict) -> tuple[dict | None, dict | None]:
+#: Minimum cached 1d bars for a symbol to enter a scan (mirrors the
+#: get_bars serve gate min(limit,100)): below this the scan would pay a live
+#: vendor fetch per symbol. Uncached symbols degrade to skipped with an
+#: honest reason (daily cron warming covers them) instead of stalling the
+#: batch past maxDuration. Single-symbol views (brief/forecast/backtest)
+#: still fetch on demand — this gate is scan-only.
+_SCAN_MIN_WARM_BARS = 100
+
+
+def _scan_one(inst, svc: MarketDataService, horizon: int, quality: dict,
+              warm: dict | None = None) -> tuple[dict | None, dict | None]:
     """Fetch quote + forecast for one instrument. Returns (row, skipped)."""
     try:
         symbol_key = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
     except Exception:
         return None, {"symbol": "UNKNOWN", "reason": "bad registry entry"}
+    if isinstance(warm, dict):
+        try:
+            have = int(warm.get(str(symbol_key).upper(), 0))
+        except Exception:
+            have = 0
+        if have < _SCAN_MIN_WARM_BARS:
+            return None, {"symbol": str(symbol_key),
+                          "reason": "no cached bars yet (daily warming covers it)"}
     try:
         quote = svc.get_quote(symbol_key, getattr(inst, "exchange_mic", None))
         if not isinstance(quote, dict):
@@ -218,7 +289,7 @@ def _scan_one(inst, svc: MarketDataService, horizon: int, quality: dict) -> tupl
 
 @router.get("")
 def screen(
-    market: str | None = Query(default=None, description="MIC scope or ALL"),
+    market: str | None = Query(default=None, description="MIC scope, ALL, or SP500"),
     min_direction: float = Query(
         default=0.5, ge=0.0, le=1.0,
         description="Minimum direction_probability to include",
@@ -255,34 +326,47 @@ def screen(
         pass
 
     try:
-        universe = registry.all()
+        universe = _universe_for(mic, registry)
     except HTTPException:
         raise
-    except Exception as exc:
-        log.warning("screener universe failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=502, detail="screener universe failed") from exc
-    if mic is not None:
-        try:
-            universe = [i for i in universe if getattr(i, "exchange_mic", None) == mic]
-        except Exception as exc:
-            log.warning("screener filter failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=502, detail="screener filter failed") from exc
     universe_size = len(universe)
 
     quality = _quality_signal()
 
+    # Warm-bars gate (one cheap COUNT query, no network): symbols without
+    # cached history skip fast instead of each paying a live vendor fetch.
+    # DB unreachable (None) fails open to the legacy per-symbol path.
+    try:
+        _keys = [str(getattr(i, "provider_symbol", None)
+                     or getattr(i, "exchange_symbol", "") or "")
+                 for i in universe]
+        warm = svc.warm_bar_counts(_keys, timeframe="1d")
+    except Exception:
+        warm = None
+
     results: list[dict] = []
     skipped: list[dict] = []
+    truncated = False
     if universe:
-        workers = max(1, min(_SCREENER_MAX_WORKERS, len(universe)))
+        import time as _time
+
+        _workers_cap = (_SCREENER_MAX_WORKERS_LARGE
+                        if len(universe) > _LARGE_UNIVERSE_CUTOVER
+                        else _SCREENER_MAX_WORKERS)
+        workers = max(1, min(_workers_cap, len(universe)))
+        _scan_start = _time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             future_map = {
-                pool.submit(_scan_one, inst, svc, horizon, quality): inst
+                pool.submit(_scan_one, inst, svc, horizon, quality, warm): inst
                 for inst in universe
             }
             for fut in concurrent.futures.as_completed(future_map):
+                remaining = _SCAN_BUDGET_S - (_time.monotonic() - _scan_start)
+                if remaining <= 0:
+                    truncated = True
+                    break
                 try:
-                    row, skip = fut.result(timeout=_PER_SYMBOL_TIMEOUT_S)
+                    row, skip = fut.result(timeout=min(_PER_SYMBOL_TIMEOUT_S, remaining))
                 except concurrent.futures.TimeoutError:
                     inst = future_map[fut]
                     try:
@@ -298,6 +382,20 @@ def screen(
                     results.append(row)
                 elif skip is not None:
                     skipped.append(skip)
+            if truncated:
+                for fut, inst in future_map.items():
+                    if fut.done():
+                        continue
+                    try:
+                        sym = getattr(inst, "provider_symbol", None) or getattr(inst, "exchange_symbol", None) or "UNKNOWN"
+                    except Exception:
+                        sym = "UNKNOWN"
+                    if not any(s.get("symbol") == sym for s in skipped):
+                        skipped.append({"symbol": sym, "reason": "skipped: scan budget exceeded (retry warm)"})
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
 
     ranked = sorted(results, key=lambda r: r["direction_probability"], reverse=True)
     filtered = [r for r in ranked if r["direction_probability"] >= float(min_direction)]
@@ -312,13 +410,16 @@ def screen(
         "offset": start,
         "skipped": skipped,
         "horizon": horizon,
+        "truncated": truncated,
         "provenance": _combine_provenance(
             [r["provenance"] for r in page if isinstance(r.get("provenance"), dict)]
         ),
         "disclosure": DISCLOSURE,
     }
     try:
-        get_cache().set(cache_key, response, ttl_s=_SCREENER_CACHE_TTL_S)
+        get_cache().set(cache_key, response,
+                         ttl_s=(_SCREENER_CACHE_TTL_SP500_S if mic == "SP500"
+                                else _SCREENER_CACHE_TTL_S))
     except Exception:
         pass
     return response

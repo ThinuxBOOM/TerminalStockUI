@@ -8,6 +8,13 @@ connection pooler (contains ``pgbouncer`` or port ``:6543``) or
 (``pool_size=5, max_overflow=5``) is used. ``pool_pre_ping=True`` is always
 set for Postgres so stale pooled connections are recycled transparently.
 SQLite fallback is unchanged (file ``./onemarket.db`` or ``:memory:``).
+
+Long-lived note (Oracle Cloud / Docker / Render): a persistent uvicorn
+process SHOULD reuse connections. Set ``DB_POOL_MODE=queue`` to force
+``QueuePool`` even when the URL looks pooled (e.g. Supabase :6543 in
+session mode, or APP_ENV=production on a VM). ``DB_POOL_MODE=null`` forces
+``NullPool``; ``auto`` (default) keeps the serverless detection below, so
+Vercel behavior is unchanged.
 """
 
 from __future__ import annotations
@@ -51,7 +58,21 @@ def database_url() -> str:
 
 
 def _is_serverless_postgres(url: str) -> bool:
-    """True when the URL should use NullPool (Supabase pooler / Vercel prod)."""
+    """True when the URL should use NullPool (Supabase pooler / Vercel prod).
+
+    ``DB_POOL_MODE`` overrides the auto-detection for long-lived hosts
+    (Oracle Cloud): ``queue`` forces False (QueuePool), ``null`` forces
+    True (NullPool). Unset/``auto`` keeps legacy behavior — Vercel is
+    unaffected unless the operator opts in.
+    """
+    try:
+        mode = (os.getenv("DB_POOL_MODE", "") or "").strip().lower()
+    except Exception:
+        mode = ""
+    if mode in ("queue", "pooled", "shared"):
+        return False
+    if mode in ("null", "nullpool", "serverless"):
+        return True
     lowered = (url or "").lower()
     if "pgbouncer" in lowered or ":6543" in lowered:
         return True
@@ -84,10 +105,15 @@ def _create_engine(url: str):
     # Delegate pooled-endpoint detection to the supabase helper when
     # available (single source of truth for :6543/?pgbouncer); fall back to
     # the local check so a broken helper never breaks engine creation.
+    # DB_POOL_MODE=queue (long-lived host, e.g. Oracle Cloud) opts OUT of
+    # the NullPool branch even for pooled endpoints — _is_serverless_postgres
+    # is the single decision point so the override always wins.
     try:
         from backend.db.supabase import create_supabase_engine, is_supabase_pooled
 
-        if is_supabase_pooled(url) or _is_serverless_postgres(url):
+        if _is_serverless_postgres(url) and (
+            is_supabase_pooled(url) or "://" in (url or "")
+        ):
             return create_supabase_engine(url)
     except Exception:
         pass
@@ -110,6 +136,16 @@ def _create_engine(url: str):
         kwargs.update(
             pool_size=5, max_overflow=5, pool_timeout=10, pool_recycle=300
         )
+        # QueuePool over a transaction-mode pooler (Oracle + Supabase :6543
+        # with DB_POOL_MODE=queue): server-side prepares still cannot
+        # survive a server-side connection switch, so keep them off.
+        try:
+            from backend.db.supabase import is_supabase_pooled as _is_pooled
+
+            if _is_pooled(url):
+                kwargs["connect_args"] = {"prepare_threshold": None}
+        except Exception:
+            pass
     return create_engine(url, **kwargs)
 
 

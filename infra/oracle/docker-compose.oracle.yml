@@ -1,0 +1,30 @@
+# Oracle Cloud backend-only stack.
+# Usage (from the repo root on the Oracle VM):
+#   cp infra/oracle/backend.env.example infra/oracle/backend.env  # then fill in
+#   docker compose -f infra/oracle/docker-compose.oracle.yml up -d --build
+#
+# No local Postgres/Redis: data stays on Supabase, cache on Upstash
+# (see infra/oracle/README.md for why). Vercel + local docker-compose.yml
+# are untouched by this file.
+
+services:
+  backend:
+    build: ../../backend
+    container_name: onemarket-backend-oracle
+    restart: unless-stopped
+    env_file:
+      - path: ./backend.env
+        required: true
+    environment:
+      # Bake-time safety: the image CMD already runs uvicorn on :8000.
+      APP_ENV: ${APP_ENV:-production}
+      DB_POOL_MODE: ${DB_POOL_MODE:-queue}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      # Same bounded probe as the root compose: 3s socket timeout, HTTP 200.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s

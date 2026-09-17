@@ -1,0 +1,19 @@
+[Unit]
+Description=OneMarket Analyzer backend (Oracle Cloud, Docker)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Repo checkout lives at /opt/onemarket (repo root = folder with vercel.json).
+WorkingDirectory=/opt/onemarket
+# Pull latest code, rebuild only if backend/ changed, then follow logs.
+ExecStart=/usr/bin/docker compose -f infra/oracle/docker-compose.oracle.yml up -d --build
+ExecStop=/usr/bin/docker compose -f infra/oracle/docker-compose.oracle.yml stop
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

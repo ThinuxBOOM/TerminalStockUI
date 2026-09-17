@@ -81,13 +81,28 @@ from backend.api.signals import router as signals_router
 
 
 def _cors_origins() -> list[str]:
-    """Explicit allow-list from CORS_ORIGINS (comma-separated).
+    """Explicit allow-list from CORS_ORIGINS (comma-separated) + FRONTEND_URL.
 
     Defaults cover local Vite dev + Vercel previews. Production should set
     CORS_ORIGINS to the exact frontend origin(s) — never "*".
+
+    Split-deploy note (frontend on Vercel, backend on Oracle Cloud): the
+    browser origin is the Vercel app, so the Oracle backend must allow it —
+    set ``CORS_ORIGINS=https://<your-app>.vercel.app`` (or the simpler
+    single-origin ``FRONTEND_URL`` alias below) on the backend host. Same-
+    origin Vercel monorepo deploys need no CORS setting at all.
     """
     raw = os.getenv("CORS_ORIGINS", "") or ""
-    configured = [part.strip() for part in raw.split(",") if part.strip()]
+    single = (os.getenv("FRONTEND_URL", "") or "").strip()
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if single:
+        parts.append(single)
+    configured = []
+    for origin in parts:
+        # Origins never carry a path: trailing slashes break matching.
+        normalized = origin.rstrip("/")
+        if normalized and normalized not in configured:
+            configured.append(normalized)
     if configured:
         return configured
     return [

@@ -112,8 +112,8 @@ SEED_INSTRUMENTS: list[Instrument] = [
 class InstrumentRegistry:
     """In-memory canonical registry (DB-backed later; same interface).
 
-    Seed list + ``EXTRA_SYMBOLS`` env additions (dedupe by
-    (exchange_mic, exchange_symbol); seeds win on collision).
+    Seed list + S&P 500 constituents + ``EXTRA_SYMBOLS`` env additions
+    (dedupe by (exchange_mic, exchange_symbol); seeds win on collision).
     """
 
     def __init__(self, instruments: list[Instrument] | None = None) -> None:
@@ -121,6 +121,31 @@ class InstrumentRegistry:
             seed = list(instruments)
         else:
             seed = list(SEED_INSTRUMENTS)
+            # S&P 500 constituents (index universe, not a venue): appended
+            # after seeds so hand-curated seeds (with ISINs) win collisions
+            # (AAPL/MSFT/TSLA/... are in both lists).
+            try:
+                from backend.instruments.sp500 import SP500_MEMBERS as _sp500
+
+                _have = {(s.exchange_mic.upper(), s.exchange_symbol.upper())
+                         for s in seed}
+                for _sym, _name, _sector, _mic in _sp500:
+                    try:
+                        _key = (str(_mic).upper(), str(_sym).upper())
+                    except Exception:
+                        continue
+                    if _key in _have:
+                        continue
+                    try:
+                        seed.append(_inst(
+                            _mic, _sym, _name, "USD", "US",
+                            "America/New_York", sector=_sector,
+                        ))
+                        _have.add(_key)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
             try:
                 from backend.instruments.config import extra_instruments as _extras
 

@@ -1,0 +1,15 @@
+# Caddy reverse proxy (TLS automatic) — example for the Oracle VM.
+# Install: sudo apt install caddy   (Ubuntu: enable the Caddy repo first)
+# DNS: point api.<your-domain> at the VM's public IP, then:
+#   sudo cp infra/oracle/Caddyfile.example /etc/caddy/Caddyfile  (edit host first)
+#   sudo systemctl reload caddy
+# Oracle Cloud: ALSO open ports 80/443 in the subnet Security List AND
+# on the VM (iptables/firewalld) — Caddy can't get certs otherwise.
+# The backend itself stays on 127.0.0.1:8000 (never expose :8000 publicly).
+
+api.<your-domain> {
+	reverse_proxy 127.0.0.1:8000
+
+	# Cache-friendly: API responses carry their own cache headers; just
+	# make sure Caddy doesn't buffer the 60s+ forecast/streaming calls.
+}

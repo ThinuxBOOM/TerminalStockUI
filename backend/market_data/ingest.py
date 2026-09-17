@@ -157,6 +157,41 @@ def default_universe() -> list[str]:
     return list(DEFAULT_UNIVERSE)
 
 
+def sp500_universe() -> list[str]:
+    """S&P 500 provider symbols, sorted (index universe, not a venue).
+
+    Falls back to [] when the seed module is unavailable — callers then
+    report per-symbol errors, never crash. CBOE is excluded upstream
+    (XCBO has no venue in EXCHANGE_META; still fetchable on demand via
+    the provisional-instrument path).
+    """
+    try:
+        from backend.instruments.sp500 import SP500_MEMBERS as _members
+
+        out = sorted({str(sym).upper() for sym, _, _, _ in _members if str(sym).strip()})
+        return [s for s in out if s]
+    except Exception:
+        return []
+
+
+def shard_symbols(symbols: list[str], shard: int, shards: int) -> list[str]:
+    """Deterministic slice shard/total of a sorted symbol list (1-based shard).
+
+    Lets a 500-symbol universe warm in N serverless-safe ticks (each tick
+    stays inside maxDuration) instead of one doomed full-universe request.
+    Out-of-range inputs return the full list (fail-open to whole batch).
+    """
+    try:
+        total = max(1, int(shards))
+        idx = int(shard)
+    except (TypeError, ValueError):
+        return list(symbols or [])
+    if idx < 1 or idx > total or total == 1:
+        return list(symbols or [])
+    ordered = sorted({str(s).strip().upper() for s in (symbols or []) if str(s).strip()})
+    return [s for pos, s in enumerate(ordered) if pos % total == (idx - 1)]
+
+
 def bar_chain() -> list[str]:
     """Ordered fetch fallbacks for daily bars (env ``INGEST_BAR_CHAIN``).
 
@@ -713,6 +748,7 @@ def ingest_symbols(
     registry=None,
     fetch_fn=None,
     timeframe: str = DEFAULT_TIMEFRAME,
+    budget_s: float | None = None,
 ) -> tuple[dict[str, int], dict[str, str]]:
     """Ingest daily bars for ``symbols`` into ``price_bars`` (upsert).
 
@@ -721,6 +757,12 @@ def ingest_symbols(
     input symbol to a short failure reason. Never raises for per-symbol
     problems (unknown instrument, fetch failure, row failure) or for an
     unreachable DB (all symbols then land in ``errors``).
+
+    ``budget_s`` caps the parallel fetch phase (for sharded 50-symbol
+    serverless ticks): unresolved symbols land in ``errors`` as
+    "fetch budget exceeded" instead of the legacy sequential fallback,
+    which could run minutes past maxDuration on a cold batch. None keeps
+    the legacy fallback (small default-universe ticks).
     """
     if registry is None:
         from backend.instruments.registry import InstrumentRegistry
@@ -822,9 +864,15 @@ def ingest_symbols(
 
             workers = max(1, min(4, len(resolved)))
             try:
+                pool_timeout = 55.0
+                if budget_s is not None:
+                    try:
+                        pool_timeout = max(5.0, min(55.0, float(budget_s)))
+                    except (TypeError, ValueError):
+                        pool_timeout = 55.0
                 with _TPE(max_workers=workers) as _pool:
                     _futs = { _pool.submit(_do_fetch, r): r for r in resolved }
-                    for _fut in _done(_futs, timeout=55):
+                    for _fut in _done(_futs, timeout=pool_timeout):
                         try:
                             item_raw, provider_symbol, bars, bar_source, reason = _fut.result(timeout=2)
                         except Exception as exc:
@@ -840,22 +888,31 @@ def ingest_symbols(
                             continue
                         fetched[item_raw] = (provider_symbol, bars, bar_source)
             except Exception:
-                # Pool-level timeout/failure: fall back to sequential fetch
-                # for any unresolved symbols so the batch still progresses.
-                for r in resolved:
-                    if r in fetched or r in errors:
-                        continue
-                    try:
-                        _, provider_symbol, bars, bar_source, reason = _do_fetch(r)
-                        if reason is not None:
-                            errors[r] = reason
-                        else:
-                            fetched[r] = (provider_symbol, bars, bar_source)
-                    except Exception as exc:
+                if budget_s is not None:
+                    # Serverless tick: mark the remainder for the next shard
+                    # run instead of the legacy sequential fallback (minutes
+                    # past maxDuration on a cold batch -> killed with nothing).
+                    remaining = [r for r in resolved if r not in fetched and r not in errors]
+                    for r in remaining:
+                        errors[r] = "fetch budget exceeded (retry next tick)"
+                    logger.warning("ingest fetch budget exceeded symbols=%d", len(remaining))
+                else:
+                    # Pool-level timeout/failure: fall back to sequential fetch
+                    # for any unresolved symbols so the batch still progresses.
+                    for r in resolved:
+                        if r in fetched or r in errors:
+                            continue
                         try:
-                            errors[r] = _sanerr(exc)[:200]
-                        except Exception:
-                            errors[r] = "fetch failed"
+                            _, provider_symbol, bars, bar_source, reason = _do_fetch(r)
+                            if reason is not None:
+                                errors[r] = reason
+                            else:
+                                fetched[r] = (provider_symbol, bars, bar_source)
+                        except Exception as exc:
+                            try:
+                                errors[r] = _sanerr(exc)[:200]
+                            except Exception:
+                                errors[r] = "fetch failed"
 
         # Phase 2: persist sequentially on this thread's session.
         for raw in wanted:

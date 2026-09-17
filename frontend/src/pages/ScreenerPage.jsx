@@ -12,6 +12,7 @@ import Skeleton from "../components/Skeleton";
 // (disabled probe slot — see markets.js MARKET_LABELS which still lists it).
 const MARKET_OPTIONS = [
   { label: "All", value: "" },
+  { label: "S&P 500 (US index)", value: "SP500" },
   { label: "NYSE", value: "XNYS" },
   { label: "NASDAQ", value: "XNAS" },
   { label: "SSE", value: "XSHG" },
@@ -39,7 +40,7 @@ const MAX_SKIPPED_SHOWN = 10;
 function screenerErrorDetail(error) {
   const message = error instanceof Error ? error.message : "Backend unreachable. Check VITE_API_BASE_URL.";
   if (error?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(message)) {
-    return "Full-universe scan timed out (takes ~30s cold: 17 quotes + forecasts). Retry \u2014 warm quotes/cache make repeats faster.";
+    return "Scan timed out cold (large universes fetch many live quotes). Retry \u2014 warm quotes/cache make repeats faster; partial scans list the rest under skipped.";
   }
   return message;
 }

@@ -1,0 +1,18 @@
+# Oracle VM crontab — REPLACES Vercel crons + the GitHub workflow pings
+# AFTER cutover (see infra/oracle/README.md). Install with:
+#   chmod +x /opt/onemarket/infra/oracle/cron-call.sh
+#   crontab -e   # then paste the lines below (paths are examples)
+#
+# IMPORTANT: enable these only when the Oracle backend is live AND the
+# Vercel crons are removed from vercel.json. Two ingest writers
+# (Vercel cron + Oracle cron) against one Supabase DB waste quota and can
+# interleave partial writes. Single writer at a time.
+#
+# Schedules mirror vercel.json (UTC):
+#   ingest   05:30 daily  |  calibrate 06:30 daily
+# S&P 500 shards are covered by the ingest universe flag server-side, so one
+# ingest line suffices; keep the GitHub sp500-ingest.yml workflow DISABLED
+# after cutover (or repoint its APP_URL at Oracle and drop this line — not both).
+
+# 30 5 * * * /opt/onemarket/infra/oracle/cron-call.sh /api/cron/ingest >> /var/log/onemarket-cron.log 2>&1
+# 30 6 * * * /opt/onemarket/infra/oracle/cron-call.sh /api/cron/calibrate >> /var/log/onemarket-cron.log 2>&1

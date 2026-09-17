@@ -586,11 +586,17 @@ payload; locally it hits FastAPI directly.
 
 ### New surface 1: screener — `GET /api/screener` (`backend/api/screener.py:69-142`)
 
-Request params: `market` (MIC in `{XNYS, XNAS, XSHG, XPAR, XAMS, XBRU}` or `ALL`/omitted;
+Request params: `market` (MIC in `{XNYS, XNAS, XSHG, XPAR, XAMS, XBRU}`, index
+universe `SP500`, or `ALL`/omitted;
 `backend/api/screener.py:36,56-66`), `min_direction` (float `0.0–1.0`, default `0.5`),
 `horizon` (`1|7|14|21`, default `21`), `limit` (`1–50`, default `20`).
+`SP500` is an index universe, not a venue (constituents span XNYS+XNAS;
+`backend/instruments/sp500.py`, 500 symbols; CBOE excluded — XCBO has no
+venue). Large cold scans truncate to a partial 200 under a 50s scan budget
+(`truncated: true`, remainder in `skipped`) instead of hitting serverless
+kill with zero bytes.
 Errors: bad `horizon` → `422 {"detail": "horizon must be one of [1, 7, 14, 21], got ..."}`;
-unknown `market` → `422 {"detail": "unknown market ...: expected one of [...] or ALL"}`.
+unknown `market` → `422 {"detail": "unknown market ...: expected one of [...] or ALL or ['SP500']"}`.
 Per-symbol failures degrade to `skipped: [{symbol, reason}]`, never a batch 500.
 
 ```json

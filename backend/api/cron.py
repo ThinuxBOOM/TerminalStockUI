@@ -115,9 +115,49 @@ def _cron_provenance(has_errors: bool) -> dict:
     ).model_dump(mode="json")
 
 
-def _run_ingest(symbols: list[str], registry: InstrumentRegistry) -> dict:
+def _resolve_ingest_symbols(
+    symbols: list[str] | None,
+    single: str | None = None,
+    universe: str | None = None,
+    shard: int | None = None,
+    shards: int | None = None,
+) -> tuple[list[str], dict]:
+    """Universe selection for ingest ticks: explicit symbols win, else the
+    named universe (default = legacy default_universe, sp500 = S&P 500
+    constituents), optionally sliced to one deterministic shard
+    (?shard=2&shards=10) so a 500-symbol universe warms in N
+    serverless-safe ticks. Returns (symbols, meta) with the resolved
+    universe/shard echo for the response envelope."""
+    if single and single.strip():
+        return [single.strip()[:32]], {"universe": "single", "shard": None, "shards": None}
+    if symbols:
+        return _normalize_symbols(symbols), {"universe": "explicit", "shard": None, "shards": None}
+    name = (universe or "default").strip().lower()
+    if name == "sp500":
+        from backend.market_data import ingest as _ing
+
+        base = _ing.sp500_universe()
+        meta_universe = "sp500"
+    else:
+        base = ingest_module.default_universe()
+        meta_universe = "default"
+    try:
+        sh = int(shard) if shard is not None else 1  # type: ignore[arg-type]
+        tot = int(shards) if shards is not None else 1  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        sh, tot = 1, 1
+    if tot > 1:
+        from backend.market_data import ingest as _ing
+
+        base = _ing.shard_symbols(base, sh, tot)
+    return base, {"universe": meta_universe, "shard": sh if tot > 1 else None,
+                  "shards": tot if tot > 1 else None}
+
+
+def _run_ingest(symbols: list[str], registry: InstrumentRegistry,
+                budget_s: float | None = None) -> dict:
     ingested, errors = ingest_module.ingest_symbols(
-        symbols, registry=registry, fetch_fn=_fetch_override
+        symbols, registry=registry, fetch_fn=_fetch_override, budget_s=budget_s,
     )
     return {
         "ok": not errors,
@@ -133,15 +173,30 @@ def cron_ingest_get(
     symbol: str | None = Query(
         default=None, description="Single symbol; default is the ingest universe"
     ),
+    universe: str | None = Query(
+        default=None, description="Universe when no symbol: default|sp500"
+    ),
+    shard: int | None = Query(
+        default=None, description="1-based shard slice (requires shards>1)"
+    ),
+    shards: int | None = Query(
+        default=None, description="Total shards for universe slicing"
+    ),
     registry: InstrumentRegistry = Depends(get_registry),
 ) -> dict:
-    """Vercel Cron entry: ``GET /api/cron/ingest[?symbol=AAPL]``."""
+    """Vercel Cron entry: ``GET /api/cron/ingest[?symbol=AAPL]``.
+
+    Sharded full-index warming: ``?universe=sp500&shard=2&shards=10``
+    ingests one deterministic ~50-symbol slice (each tick stays inside
+    maxDuration; shards run as parallel workflow jobs or sequential ticks).
+    """
     _check_cron_auth(request)
-    symbols = (
-        [symbol] if (symbol or "").strip() else ingest_module.default_universe()
-    )
+    symbols, meta = _resolve_ingest_symbols(None, single=symbol, universe=universe,
+                                            shard=shard, shards=shards)
     try:
-        return _run_ingest(symbols, registry)
+        out = _run_ingest(symbols, registry,
+                          budget_s=50.0 if (meta.get("shards") or 1) > 1 or len(symbols) > 25 else None)
+        return {**out, **meta}
     except HTTPException:
         raise
     except Exception:
@@ -151,20 +206,37 @@ def cron_ingest_get(
             "ingested": {},
             "errors": {"_batch": "ingest failed"},
             "provenance": _cron_provenance(True),
+            **meta,
         }
+
+
+class ShardedIngestRequest(BaseModel):
+    symbols: list[str] | None = Field(default=None, max_length=100)
+    universe: str | None = Field(default=None, max_length=16)
+    shard: int | None = Field(default=None)
+    shards: int | None = Field(default=None)
 
 
 @router.post("/ingest")
 def cron_ingest_post(
     request: Request,
-    body: IngestRequest,
+    body: ShardedIngestRequest,
     registry: InstrumentRegistry = Depends(get_registry),
 ) -> dict:
-    """Manual run: ``POST /api/cron/ingest`` with JSON ``{symbols: [...]}``."""
+    """Manual run: ``POST /api/cron/ingest`` with JSON ``{symbols: [...]}``
+    or ``{universe: "sp500", shard: 2, shards: 10}``."""
     _check_cron_auth(request)
-    symbols = body.symbols if body.symbols else ingest_module.default_universe()
     try:
-        return _run_ingest(symbols, registry)
+        uni = getattr(body, "universe", None)
+    except Exception:
+        uni = None
+    symbols, meta = _resolve_ingest_symbols(
+        getattr(body, "symbols", None), universe=uni,
+        shard=getattr(body, "shard", None), shards=getattr(body, "shards", None))
+    try:
+        out = _run_ingest(symbols, registry,
+                          budget_s=50.0 if (meta.get("shards") or 1) > 1 or len(symbols) > 25 else None)
+        return {**out, **meta}
     except HTTPException:
         raise
     except Exception:
@@ -174,6 +246,7 @@ def cron_ingest_post(
             "ingested": {},
             "errors": {"_batch": "ingest failed"},
             "provenance": _cron_provenance(True),
+            **meta,
         }
 
 

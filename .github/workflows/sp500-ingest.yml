@@ -1,0 +1,52 @@
+# OneMarket Analyzer — S&P 500 bars warm schedule (GitHub Actions)
+#
+# Why sharded: 500 symbols x ~2-12s live fetch each can never fit one
+# serverless tick (Vercel maxDuration 60s). Ten parallel jobs x ~50 symbols
+# stay inside the budget once warm; cold ticks truncate to partial 200
+# ("fetch budget exceeded" per-symbol errors) and the next daily tick warms
+# the rest — bars persist per symbol, so progress accumulates.
+# Cadence: daily 06:00 UTC (after the default-universe ingest 05:30 UTC).
+# Manual: workflow_dispatch, optionally one shard via inputs.
+# Setup (once): same APP_URL + CRON_SECRET secrets as snapshots.yml.
+
+name: Warm S&P 500 bars
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      shard:
+        description: "Single 1-based shard to run (empty = all 10)"
+        required: false
+        default: ""
+
+jobs:
+  warm:
+    name: ingest sp500 shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - name: Trigger shard ingest
+        if: ${{ inputs.shard == '' || format('{0}', matrix.shard) == inputs.shard }}
+        run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
+          code=$(curl -s --max-time 58 --connect-timeout 10 -o /tmp/sp500.json -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/cron/ingest?universe=sp500&shard=${{ matrix.shard }}&shards=10") || curl_exit=$?
+          curl_exit=${curl_exit:-0}
+          echo "curl exit: $curl_exit shard: ${{ matrix.shard }}"
+          echo "HTTP status: ${code:-<none>}"
+          if [ -f /tmp/sp500.json ]; then head -c 2000 /tmp/sp500.json; echo ""; else echo "<no response body>"; fi
+          test "$curl_exit" = "0" && test "$code" = "200"
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

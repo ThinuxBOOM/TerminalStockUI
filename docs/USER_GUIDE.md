@@ -42,7 +42,9 @@ market activity/liquidity, latest research, and data health (green = working).
    (`OPEN/CLOSED/LUNCH/DELAYED/STALE`; `lunch` = XSHG 11:30–13:00 Asia/Shanghai only),
    price chart, events timeline, analytics snapshot, and the deterministic forecast card
    (probability, confidence, data quality, bull/bear drivers) — each with its
-   `ProvenanceBadge`.
+   `ProvenanceBadge`. All 500 S&P 500 tickers resolve (seeded index universe);
+   any other ticker resolves on demand (bars+quote fetched live, then cached —
+   a first cold view may take one auto-retry).
 
 Backend equivalents: `GET /api/instruments/search?q=Moutai&market=XSHG`,
 `GET /api/market_data/quote?symbol=600519.SS&market=XSHG`. Full shapes:
@@ -144,13 +146,18 @@ The Screener scans the registry universe and ranks by deterministic forecast
 client `getScreener`, `frontend/src/api/client.ts:1373-1387`, own 60s timeout
 `SCREENER_TIMEOUT_MS`). Params: `market` (MIC `XNYS|XNAS|XSHG|XPAR|XAMS|XBRU`, omit/`ALL`
 for all), `min_direction` (default `0.5`), `horizon` (`1|7|14|21`, default `21`),
-`limit` (`1–50`, default `20`). Bad `horizon`/`market` → `422`
+`limit` (`1–50`, default `20`). `market=SP500` ranks the 500-stock S&P 500
+index universe (constituents span NYSE+Nasdaq, so it is an index group, not
+a venue; warmed daily in 10 shards — `.github/workflows/sp500-ingest.yml`).
+Bad `horizon`/`market` → `422`
 (`backend/api/screener.py:60-65,82-86`). Per-symbol failures appear in `skipped`,
-never a batch 500.
+never a batch 500. Cold 500-symbol scans return partial results
+(`truncated: true`) inside the serverless budget — retry warm.
 
 ```powershell
 curl "http://localhost:8000/api/screener?horizon=21&min_direction=0.55&limit=10"
 curl "http://localhost:8000/api/screener?market=XPAR&horizon=21&limit=10"
+curl "http://localhost:8000/api/screener?market=SP500&horizon=21&limit=20"
 ```
 
 ## 7. Alerts (price / direction rules + scheduled evaluation)
