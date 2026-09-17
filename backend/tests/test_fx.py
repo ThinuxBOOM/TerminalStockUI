@@ -214,6 +214,29 @@ def test_provenance_grades_live_and_manual_fallback():
     assert prov.provenance_for(stub_like).fallback_used is True
 
 
+def test_daily_fix_grades_against_fix_cadence():
+    """Daily reference fixes grade against the 24h fix cadence, not the
+    15-minute poll interval (regression: every same-day midnight fix graded C
+    after ~00:30 UTC, permanently gating cross-market ranking on weekdays)."""
+    from backend.market_data.fx.provider import FX_FIX_DELAY_MINUTES  # noqa: PLC0415
+
+    assert FX_FIX_DELAY_MINUTES == 1440
+    prov = FXProvider(stub_mode=False)
+    midnight = _utcnow().replace(hour=0, minute=5, second=0, microsecond=0)
+    if midnight > _utcnow():
+        midnight -= timedelta(days=1)
+    payload = {
+        "pair": "EUR/USD", "rate": 1.08, "as_of": midnight,
+        "source": "frankfurter", "missing_fields": [], "fallback_used": False,
+    }
+    graded = prov.provenance_for(payload)
+    assert graded.delay_minutes == FX_FIX_DELAY_MINUTES
+    assert graded.quality_grade in ("A", "B")
+    # Genuinely old fixes (>~48h) still grade C and keep the gate closed.
+    old = dict(payload, as_of=_utcnow() - timedelta(hours=60))
+    assert prov.provenance_for(old).quality_grade == "C"
+
+
 # -- offline resilience (fail-closed: raise, never fallback) -------------------
 
 

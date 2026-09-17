@@ -439,9 +439,9 @@ function HomePage() {
               return (
                 <li key={p.name} className="flex justify-between gap-1.5 border-b border-term-border py-2">
                   <span className="min-w-0 truncate">{p.name}</span>
-                  <span className={`term-num ${bad ? "text-term-red" : "text-term-green"}`}>
+                  <span className={`term-num ${bad ? "text-term-red" : "text-term-green"}`} title="Provider health: working = last call ok; circuit closed = connection healthy (not market state), open = requests paused">
                     {bad ? "● needs attention" : "● working"}
-                    {p.circuit ? ` · ${p.circuit}` : ""}
+                    {p.circuit ? ` · circuit ${p.circuit}` : ""}
                     {latency !== void 0 && latency !== null ? ` · ${latency}ms` : noSamples ? " · no data yet" : ""}
                   </span>
                 </li>

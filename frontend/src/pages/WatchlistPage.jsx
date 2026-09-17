@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import useWatchlist from "../hooks/useWatchlist";
-import { TARGET_CURRENCIES, getQuote, isFreshFxProvenance, normalizeTargetCcy, rankCrossMarket } from "../api/client";
+import { TARGET_CURRENCIES, extractFxGateProvenance, getQuote, isFreshFxProvenance, normalizeTargetCcy, rankCrossMarket } from "../api/client";
 import CurrencyValue from "../components/CurrencyValue";
 import ErrorState from "../components/ErrorState";
 import FXProvenanceBanner from "../components/FXProvenanceBanner";
@@ -62,8 +62,11 @@ function WatchlistPage() {
     placeholderData: keepPreviousData,
     retry: false
   });
-  const fxProvenance = rankQuery.data?.fx_provenance ?? null;
-  const fxFresh = rankQuery.data ? isFreshFxProvenance(fxProvenance) : false;
+  // The 423 gate body carries the combined envelope (error.provenance) —
+  // surface it so the banner shows the real as_of/grade, not "missing".
+  const errGateProvenance = extractFxGateProvenance(rankQuery.error);
+  const fxProvenance = rankQuery.data?.fx_provenance ?? errGateProvenance ?? null;
+  const fxFresh = isFreshFxProvenance(fxProvenance);
   const rankLoading = rankQuery.isLoading && !rankQuery.data;
   const gated = !rankLoading && (rankQuery.isError || !rankQuery.data || !fxFresh);
   const visibleSymbols = useMemo(
@@ -149,7 +152,7 @@ function WatchlistPage() {
       role: "alert"
     },
     GATE_MESSAGE,
-    rankQuery.error ? /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-xs text-term-muted" }, rankQuery.error instanceof Error ? rankQuery.error.message : "FX rank endpoint unreachable.", " ", "Showing native-currency quotes only; no conversion applied.") : /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-xs text-term-muted" }, "Ranked conversion needs fresh FX (grade A/B, delay \u2264 30m, no fallback). Showing native-currency quotes only; no conversion applied.")
+    rankQuery.error ? /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-xs text-term-muted" }, rankQuery.error instanceof Error ? rankQuery.error.message : "FX rank endpoint unreachable.", " ", "Showing native-currency quotes only; no conversion applied.") : /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-xs text-term-muted" }, "Ranked conversion needs fresh FX (grade A/B, current daily fix, no fallback). Showing native-currency quotes only; no conversion applied.")
   ), /* @__PURE__ */ React.createElement("div", { className: "mt-4" }, renderNativeQuotes())) : /* @__PURE__ */ React.createElement("div", null, renderRanked()));
   function renderNativeQuotes() {
     if (quotesQuery.isLoading) return /* @__PURE__ */ React.createElement(Loading, { label: "loading watchlist quotes\u2026" });

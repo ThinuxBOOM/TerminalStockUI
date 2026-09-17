@@ -119,6 +119,7 @@ def _combine_provenance(entries: list[dict]) -> dict:
             missing_fields=["rates"],
         ).model_dump(mode="json")
     stamps: list[datetime] = []
+    bad_stamps = 0
     for entry in entries:
         try:
             raw = entry.get("as_of") if isinstance(entry, dict) else None
@@ -130,6 +131,11 @@ def _combine_provenance(entries: list[dict]) -> dict:
                 stamp = stamp.replace(tzinfo=timezone.utc)
             stamps.append(stamp)
         except Exception:
+            # Fail-closed: a rate whose reference date is unparseable must
+            # never substitute "now" silently and look freshly observed.
+            # Keep a placeholder for the min() below, but cap the grade at C
+            # and mark as_of missing so freshness gates refuse it honestly.
+            bad_stamps += 1
             stamps.append(_utcnow())
     oldest = min(stamps)
     if oldest.tzinfo is None:
@@ -147,6 +153,9 @@ def _combine_provenance(entries: list[dict]) -> dict:
             fallback_used=fallback,
             reconciled=False,
         )
+        if bad_stamps:
+            missing = sorted(set(missing) | {"as_of"})
+            grade = "C"
     except Exception:
         sources, fallback, missing, max_delay, grade = ["fx"], True, [], 15, "C"
     return {

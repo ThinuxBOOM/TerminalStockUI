@@ -28,7 +28,8 @@ function FXProvenanceBanner({
       ccy,
       gateError ? " \xB7 backend gate: FX_PROVENANCE_MISSING" : "",
       " \u2014 ",
-      "Cross-market comparison unavailable \u2014 FX provenance missing."
+      "Cross-market comparison unavailable \u2014 FX provenance missing.",
+      !gateError && error ? /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-[11px] text-term-muted" }, error instanceof Error ? error.message : "FX rank endpoint unreachable.", " ", "Showing native-currency quotes only; no conversion applied.") : null
     );
   }
   const fresh = isFreshFxProvenance(provenance);
@@ -44,7 +45,8 @@ function FXProvenanceBanner({
       },
       /* @__PURE__ */ React.createElement("b", null, "Cross-market comparison unavailable"),
       " \u2014 ",
-      "FX unavailable."
+      "FX unavailable.",
+      /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-[11px] text-term-muted" }, "src ", provenance.source, " \xB7 as of ", fmtTime(provenance.as_of), " \xB7 delay ", provenance.delay_minutes, "m \xB7 grade ", provenance.quality_grade, gateError ? " \xB7 backend gate: FX_PROVENANCE_MISSING \x2014 refresh FX and retry" : " \xB7 showing native-currency quotes only; no conversion applied.")
     );
   }
   const missing = provenance.missing_fields ?? [];

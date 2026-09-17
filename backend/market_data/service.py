@@ -18,6 +18,8 @@ from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
+from sqlalchemy.exc import IntegrityError
+
 from .health import ProviderHealthTracker, market_state
 from .provenance import Provenance, build_provenance
 from .quality import grade_quality
@@ -1543,8 +1545,102 @@ class MarketDataService:
                 Session = get_session_factory()
                 db = Session()
                 try:
-                    db.merge(QuoteSnapshot(**kwargs))
-                    db.commit()
+                    # Atomic upsert path (Postgres): single INSERT ...
+                    # ON CONFLICT DO UPDATE, so two concurrent get_quote()
+                    # calls can no longer both miss then both INSERT
+                    # (23505 duplicate-key spam). SQLite/tests fall back
+                    # to the legacy merge path below.
+                    use_pg_upsert = True
+                    try:
+                        bind = None
+                        try:
+                            bind = db.get_bind()  # type: ignore[attr-defined]
+                        except Exception:
+                            bind = getattr(db, "bind", None)
+                        if bind is not None and getattr(
+                            getattr(bind, "dialect", None), "name", ""
+                        ) == "sqlite":
+                            use_pg_upsert = False
+                    except Exception:
+                        use_pg_upsert = True
+                    if use_pg_upsert:
+                        try:
+                            from sqlalchemy.dialects.postgresql import (
+                                insert as pg_insert,
+                            )
+
+                            update_cols = {
+                                k: v for k, v in kwargs.items() if k != "symbol"
+                            }
+                            stmt = pg_insert(
+                                QuoteSnapshot
+                            ).values(**kwargs).on_conflict_do_update(
+                                index_elements=["symbol"], set_=update_cols
+                            )
+                            db.execute(stmt)
+                            db.commit()
+                        except ImportError:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            db.merge(QuoteSnapshot(**kwargs))
+                            db.commit()
+                        except IntegrityError:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            # Leftover race: row now exists -> plain UPDATE once.
+                            update_cols = {
+                                k: v for k, v in kwargs.items() if k != "symbol"
+                            }
+                            db.query(QuoteSnapshot).filter(
+                                QuoteSnapshot.symbol == provider_symbol
+                            ).update(update_cols, synchronize_session=False)
+                            db.commit()
+                        except Exception:
+                            # Non-Postgres dialect (SQLite/tests) or other
+                            # pg-specific compile error -> merge fallback.
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            try:
+                                db.merge(QuoteSnapshot(**kwargs))
+                                db.commit()
+                            except IntegrityError:
+                                try:
+                                    db.rollback()
+                                except Exception:
+                                    pass
+                                update_cols = {
+                                    k: v
+                                    for k, v in kwargs.items()
+                                    if k != "symbol"
+                                }
+                                db.query(QuoteSnapshot).filter(
+                                    QuoteSnapshot.symbol == provider_symbol
+                                ).update(
+                                    update_cols, synchronize_session=False
+                                )
+                                db.commit()
+                    else:
+                        try:
+                            db.merge(QuoteSnapshot(**kwargs))
+                            db.commit()
+                        except IntegrityError:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            update_cols = {
+                                k: v for k, v in kwargs.items() if k != "symbol"
+                            }
+                            db.query(QuoteSnapshot).filter(
+                                QuoteSnapshot.symbol == provider_symbol
+                            ).update(update_cols, synchronize_session=False)
+                            db.commit()
                 except Exception:
                     try:
                         db.rollback()

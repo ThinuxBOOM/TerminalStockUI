@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AI_TIMEOUT_MS, BACKTEST_TIMEOUT_MS, FORECAST_HORIZONS, MARKET_STATES, RANK_TIMEOUT_MS, SCREENER_TIMEOUT_MS, api, deriveMarketState, displaySymbol, freshnessOf, friendlyAIError, isFreshFxProvenance, isFxProvenanceMissingError, normalizeHealthProviders, normalizeMarketState, normalizeTargetCcy } from "./client";
+import { AI_TIMEOUT_MS, BACKTEST_TIMEOUT_MS, FORECAST_HORIZONS, MARKET_STATES, RANK_TIMEOUT_MS, SCREENER_TIMEOUT_MS, api, deriveMarketState, displaySymbol, extractFxGateProvenance, freshnessOf, friendlyAIError, isFreshFxProvenance, isFxProvenanceMissingError, normalizeHealthProviders, normalizeMarketState, normalizeTargetCcy } from "./client";
 const TS = "2026-01-15T12:00:00.000Z";
 function prov(over = {}) {
   return {
@@ -141,6 +141,31 @@ describe("isFreshFxProvenance (fresh-FX gate)", () => {
     expect(isFreshFxProvenance(prov({ delay_minutes: 5, quality_grade: "U" }))).toBe(false);
     expect(isFreshFxProvenance(null)).toBe(false);
     expect(isFreshFxProvenance(void 0)).toBe(false);
+  });
+});
+describe("isFreshFxProvenance (daily FX fixes)", () => {
+  it("accepts a current daily-fix envelope (delay 1440, grade A/B)", () => {
+    expect(isFreshFxProvenance(prov({ source: "frankfurter", delay_minutes: 1440, quality_grade: "B" }))).toBe(true);
+    expect(isFreshFxProvenance(prov({ source: "frankfurter+yfinance", delay_minutes: 1440, quality_grade: "A" }))).toBe(true);
+  });
+  it("still refuses C grades, fallback, unknown sources, and >1440 delays", () => {
+    expect(isFreshFxProvenance(prov({ source: "frankfurter", delay_minutes: 1440, quality_grade: "C" }))).toBe(false);
+    expect(isFreshFxProvenance(prov({ source: "frankfurter", delay_minutes: 1440, quality_grade: "B", fallback_used: true }))).toBe(false);
+    expect(isFreshFxProvenance(prov({ source: "mystery", delay_minutes: 1440, quality_grade: "B" }))).toBe(false);
+    expect(isFreshFxProvenance(prov({ source: "frankfurter", delay_minutes: 1500, quality_grade: "B" }))).toBe(false);
+  });
+});
+describe("extractFxGateProvenance (423 envelope)", () => {
+  it("surfaces the combined envelope carried by the gate error", () => {
+    const gate = prov({ source: "frankfurter", delay_minutes: 1440, quality_grade: "C" });
+    expect(
+      extractFxGateProvenance({ response: { data: { error: { code: "FX_PROVENANCE_MISSING", provenance: gate } } } })
+    ).toEqual(gate);
+  });
+  it("returns null for anything else", () => {
+    expect(extractFxGateProvenance({})).toBeNull();
+    expect(extractFxGateProvenance(null)).toBeNull();
+    expect(extractFxGateProvenance({ response: { data: { error: { code: "NOPE" } } } })).toBeNull();
   });
 });
 describe("isFxProvenanceMissingError", () => {

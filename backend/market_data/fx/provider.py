@@ -61,6 +61,15 @@ ECB_TTL_S = 3600
 RECONCILE_TOLERANCE = 0.005
 DEFAULT_DELAY_MINUTES = 15
 CACHE_TTL_S = 15 * 60
+#: Expected refresh cadence of the daily FX reference fix (minutes). FX rates
+#: are daily fixes (Frankfurter/ECB reference date, yfinance daily bar), NOT
+#: intraday ticks: grading a same-day fix against the 15-minute poll interval
+#: marks every fix older than ~30 min "stale" (grade C) and permanently gates
+#: cross-market ranking after ~00:30 UTC. Grade daily-fix envelopes against
+#: the daily cadence so a current fix grades A/B; fixes older than ~48h still
+#: grade C and keep the gate closed. ``delay_minutes`` (poll interval) is
+#: unchanged and still describes retrieval, not the fix itself.
+FX_FIX_DELAY_MINUTES = 1440
 
 SUPPORTED_CURRENCIES = ("USD", "EUR", "CNY")
 
@@ -476,7 +485,9 @@ class FXProvider:
             "inverse": 1.0 / rate,
             "as_of": raw.get("as_of") or _utcnow(),
             "source": raw.get("source", LIVE_SOURCE),
-            "delay_minutes": self.delay_minutes,
+            # Daily-fix cadence (see FX_FIX_DELAY_MINUTES): this envelope
+            # describes a reference fix that refreshes ~daily, not a poll.
+            "delay_minutes": FX_FIX_DELAY_MINUTES,
             "missing_fields": [],
             "fallback_used": False,
         }
@@ -495,6 +506,11 @@ class FXProvider:
         with its own ``"reconciled"`` flag, which is honored when the caller
         does not pass the keyword (so the unchanged ``/api/fx`` router flows
         agree->A through). An explicit keyword ORs with the payload flag.
+
+        Daily-fix grading: the envelope is graded against
+        ``FX_FIX_DELAY_MINUTES`` (24h reference-fix cadence), never the
+        15-minute poll interval — ``as_of`` is the fix reference date
+        (midnight), so intraday windows would grade every same-day fix C.
         """
         as_of = payload.get("as_of") or _utcnow()
         if isinstance(as_of, str):
@@ -510,7 +526,7 @@ class FXProvider:
         fallback = bool(payload.get("fallback_used", False))
         flag = bool(reconciled or payload.get("reconciled", False))
         grade, _reasons = grade_quality(
-            delay_minutes=self.delay_minutes,
+            delay_minutes=FX_FIX_DELAY_MINUTES,
             age_minutes=age_min,
             missing_fields=payload.get("missing_fields", []),
             fallback_used=fallback,
@@ -519,7 +535,7 @@ class FXProvider:
         return build_provenance(
             payload.get("source", self.name),
             as_of=as_of,
-            delay_minutes=self.delay_minutes,
+            delay_minutes=FX_FIX_DELAY_MINUTES,
             quality_grade=grade,
             fallback_used=fallback,
             missing_fields=payload.get("missing_fields", []),
