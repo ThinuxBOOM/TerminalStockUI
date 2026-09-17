@@ -20,46 +20,60 @@ TerminalStockUI/
   docker-compose.yml        # postgres:16, redis:7, backend, frontend
   backend/                  # FastAPI: api/, analytics/, forecasting/, ai/,
                             #   instruments/, market_data/, security/,
-                            #   db/, observability/, workers/, auth/, tests/ (44 files)
-                            #   api/ adds market_index.py (GET /api/markets/{mic}/index),
-                            #   liquidation_proxy.py (GET .../liquidation-proxy)
+                            #   db/, observability/, workers/, auth/, tests/ (52 files,
+                            #   ~710 tests — rerun `pytest --collect-only` to confirm)
+                            #   api/ (14 router prefixes, ~60 operations): ai, alerts,
+                            #   analytics_api, audit, backtest, cron, forecast, fx,
+                            #   instruments, market_data (+ securities_router),
+                            #   markets, market_index (GET /api/markets/{mic}/index),
+                            #   liquidation_proxy (GET .../liquidation-proxy),
+                            #   providers, screener, news, signals, health
                             #   market_data/providers/: yfinance, stooq, akshare (SSE),
-                            #   alpaca, finnhub_free, twelvedata_free (free tiers)
+                            #   alpaca, finnhub_free, twelvedata_free (free tiers) + base
                             #   market_data/snapshot_store.py (gzip+zlib+zstd snapshots)
                             #   forecasting/accuracy.py + walk_forward + calibration/metrics
                             #   db/writers.py (ai_token_ledger, provider_health_history,
                             #   indicator_cache INSERT paths)
     Dockerfile
-    requirements.txt        # + ai/sse/fx fragment requirements
-  frontend/                 # React 18 + Vite + Tailwind (plain JSX)
-    src/pages/              # Home, Welcome (stub), LoginStub (stub), Search,
+    requirements.txt        # root pins (numpy/pandas/sklearn/pytest);
+                            # backend/requirements.txt is the image build
+                            # (fastapi/uvicorn/sqlalchemy/yfinance/...)
+  frontend/                 # React 18 + Vite + Tailwind (plain JSX, no TS)
+    src/pages/              # 11 pages: Home, Welcome (stub), LoginStub (stub), Search,
                             #   Screener, SecurityBrief, ForecastDetails,
                             #   ProviderSettings, BacktestLab, Watchlist, NotFound
-    src/components/         # ProvenanceBadge, MarketStateBadge, CurrencyValue,
-                            #   FXProvenanceBanner, CalibrationChart, AspiChart
-                            #   (per-market index + Top-20 + disabled CSE card),
-                            #   LiquidationPanel (per-market PROXY), ResearchSection, ...
-    src/features/           # security/ (PriceChart ≤1000 bars + 10 indicators),
-                            #   search/, forecast/, providers/, portfolio/ (placeholder)
+    src/components/         # 23 components: ProvenanceBadge, MarketStateBadge,
+                            #   CurrencyValue, FXProvenanceBanner, CalibrationChart,
+                            #   AspiChart (per-market index + Top-20 + disabled CSE card),
+                            #   LiquidationPanel (per-market PROXY), ResearchSection,
+                            #   AIOpinionCard, NewsPanel, MarketGraphs, ... (all .jsx)
+    src/features/           # security/ (SecurityBrief + PriceChart ≤1000 bars +
+                            #   10 indicators), search/ (SearchBox), forecast/
+                            #   (ForecastDetails), providers/ (ProviderSettings),
+                            #   portfolio/ (PortfolioPlaceholder — v1 non-goal)
     src/api/                # client.js (zod-validated), markets.js, aspi.js
                             #   (benchmark registry + Top-20 + cap-weighted),
                             #   liquidation.js (PROXY fetcher), authStub.js
                             #   (guest/tier stub), calibrationHistory.js,
-                            #   backtestHistory.js
+                            #   backtestHistory.js, news.js, signals.js
+                            #   7 vitest files (*.test.js, node env, no DOM)
     src/hooks/              # useWatchlist.js, useMarketLiquidity.js
                             #   (+ useMarketLiquidationProxy), useCurrentUserStub.js
   api/index.py              # Vercel serverless entry (from backend.api.main import app)
   api/requirements.txt
   infra/docker/.env.example # copy to infra/docker/.env, fill secrets (never commit .env)
   infra/migrations/         # 0001_initial … 0005_quote_snapshots + 0006_revamp.sql
-                            # (+ 0006_snapshots.sql draft, superseded) + alembic.ini stub
+                            # + 0007_horizons.sql (+ 0006_snapshots.sql draft,
+                            # superseded) + alembic.ini stub
   infra/scripts/            # verify_audit.py (alias), backup.sh, restore.sh
   scripts/                  # verify_v1.py (DoD checker), deploy_check.py, backfill_bars.py
-  supabase/                 # migrations 0001-0006 (mirrors infra/ + RLS) + seed.sql
-  docs/                     # API_CONTRACT, DATA_QUALITY, DB_SCHEMA (revamp normative),
+  supabase/                 # migrations 0001_onemarket … 0007_horizons (7 files,
+                            # mirrors infra/ + RLS; note 0001 naming differs) + seed.sql
+  docs/                     # 14 docs: API_CONTRACT, DATA_QUALITY, DB_SCHEMA (revamp normative),
                             #   DATA_SOURCES_FREE, AI_PROVIDERS, USER_GUIDE,
                             #   OPERATIONS, V1_CHECKLIST, SSE_NOTES, EURONEXT_NOTES,
-                            #   SECURITY, TESTING, DEPLOY_VERCEL_SUPABASE
+                            #   SECURITY, TESTING, DEPLOY_VERCEL_SUPABASE,
+                            #   FAIL_CLOSED_CONTRACT (normative, fail-closed)
   vercel.json / render.yaml # hosted deploy (Vite dist + api/index.py / split Render)
 ```
 
@@ -76,7 +90,7 @@ docker compose up --build
 - Backend: http://localhost:8000 (`/health`, `/api/...` per `docs/API_CONTRACT.md`)
 - Postgres: localhost:5432 · Redis: localhost:6379
 
-Apply the schema (rerun is safe — 6 migrations, Postgres):
+Apply the schema (rerun is safe — 7 migrations, Postgres):
 
 ```powershell
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0001_initial.sql
@@ -85,6 +99,7 @@ psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0004_provider_secrets.sql
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0005_quote_snapshots.sql
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0006_revamp.sql
+psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0007_horizons.sql
 # — or inside compose:
 # docker compose exec postgres psql -U onemarket -d onemarket -f /docker-entrypoint-initdb.d/0001_initial.sql
 ```
@@ -113,8 +128,8 @@ uvicorn backend.app:app --reload --port 8000
 cd frontend
 npm install
 npm run dev   # VITE_API_BASE_URL=http://localhost:8000
-npm test      # vitest run — 128 tests, 7 files (client, bars, aspi,
-              #   markets/liquidity, liquidation, authStub)
+npm test      # vitest run — 7 test files (client, client.schemas, bars, aspi,
+              #   markets/liquidity, liquidation, authStub; rerun to confirm count)
 npm run build # vite production build (must stay green)
 ```
 
@@ -129,17 +144,21 @@ The app must run fully with AI keys empty (AI disabled path, §7 item 7).
   presets) · `/forecast/:symbol` · `/providers` · `/backtest` Backtest Lab ·
   `/watchlist` (FX-gated) · `*` NotFound. Portfolio remains an explicit
   placeholder (non-goal).
-- **API (54 routes):** `GET /health` · `/api/instruments/search|resolve|{id}` ·
-  `/api/market_data/quote|bars|indicators` + `/api/securities/{id}/quote|bars` ·
-  `GET /api/forecast/{symbol}?horizon=1|7|14|21` + `/calibration/history` ·
+- **API (~60 operations across 14 router prefixes + `/health` + `/`):** `GET /health` · `/api/instruments/search|resolve|{id}` ·
+  `/api/market_data/quote|bars|chart|indicators` + `/api/securities/{id}/quote|bars` ·
+  `GET /api/forecast/{symbol}?horizon=1|7|14|21` + `/{symbol}/calibration/history` ·
   `GET /api/analytics/{symbol}` · `POST /api/backtest/run` + `GET /api/backtest/{symbol}` ·
   `POST /api/ai/insight` + `POST /api/ai/forecast_opinion` +
   `POST /api/ai/deep_research_job` + `GET /api/ai/jobs/{id}` (poll-job, no SSE) +
   `GET /api/ai/providers/performance` · `GET /api/audit/forecasts|ai_decisions` ·
-  `/api/screener` · `/api/alerts` CRUD + evaluate · `/api/providers/health|keys|budget` ·
-  `/api/cron/ingest|calibrate|evaluate|snapshot|score` · `/api/fx/pairs|rate|convert|rank` ·
-  `/api/markets/overview|{mic}/liquidity|{mic}/index|{mic}/liquidation-proxy`.
+  `/api/screener` · `/api/news` + `/api/news/symbol/{symbol}` · `/api/signals/top` ·
+  `/api/alerts` CRUD + evaluate · `/api/providers/health|keys|budget` ·
+  `/api/cron/ingest|calibrate|evaluate|snapshot|score|retention|health` (GET+POST each) ·
+  `/api/fx/pairs|rate|convert|rank` ·
+  `/api/markets|overview|{mic}/liquidity|{mic}/liquidity/history|{mic}/index|{mic}/liquidation-proxy`.
   Full contract: `docs/API_CONTRACT.md` (+ M9 proposal appendix for native index).
+  Machine truth: `python scripts/verify_v1.py` checks the 14 prefixes;
+  count decorators with a search for `@router.get|post|...` in `backend/api/`.
 - **Price charts:** backend serves `limit ≤ 1000`; presets
   `1D:5 / 1W:7 / 1M:30 / 3M:90 / 1Y:250 / 2Y:500 / 5Y:1000`; chart decimates to
   500 display candles (bucket-merge, extremes preserved) + 10 indicator
@@ -225,12 +244,14 @@ Deterministic forecasting works with AI keys empty. AI adds bounded opinions onl
 
 ```powershell
 cd "C:\Users\thinu\OneDrive\Pictures\Documents\STOCK ANALYSIS MAIN\TerminalStockUI"
-# 1. schema (forecasts + calibration + alerts + secrets + snapshots; rerun is safe)
+# 1. schema (forecasts + calibration + alerts + secrets + snapshots + revamp + horizons; rerun is safe)
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0001_initial.sql
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0002_calibration.sql
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0003_alerts.sql
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0004_provider_secrets.sql
 psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0005_quote_snapshots.sql
+psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0006_revamp.sql
+psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0007_horizons.sql
 
 # 2. routers are wired in backend/api/main.py (create_app) — no manual include needed
 
@@ -288,13 +309,13 @@ Provider latency/error dashboard data: `GET /api/providers/health`
 ## Hosted deploy (Vercel + Supabase, or Render split)
 
 - **Vercel (monorepo primary):** `vercel.json` builds `frontend/dist`, serves
-  `api/index.py` (`maxDuration 60`, crons `/api/cron/ingest 0 1 * * *`,
-  `/api/cron/calibrate 0 2 * * *`), same-origin API (`VITE_API_BASE_URL` empty).
+  `api/index.py` (`maxDuration 60`, crons `/api/cron/ingest 30 5 * * *`,
+  `/api/cron/calibrate 30 6 * * *`), same-origin API (`VITE_API_BASE_URL` empty).
 - **Render (split):** `render.yaml` — `onemarket-backend` (`uvicorn api.main:app`,
   `/health`) + `onemarket-frontend` static `dist` with `VITE_API_BASE_URL=<backend-url>`.
 - **Supabase:** pooled `:6543` → `DATABASE_URL` (`NullPool`, `prepare_threshold=None`);
-  direct `:5432` for DDL; apply `supabase/migrations/0001-0005`, seed `seed.sql`
-  (`AAPL`, `600519.SS`, `MC.PA`). RLS enabled, no anon policies.
+  direct `:5432` for DDL; apply `supabase/migrations/0001_onemarket` … `0007_horizons.sql`,
+  seed `seed.sql` (`AAPL`, `600519.SS`, `MC.PA`). RLS enabled, no anon policies.
 - Details: `docs/DEPLOY_VERCEL_SUPABASE.md` · preflight: `python scripts/deploy_check.py`.
 
 ## Docs (v1)
@@ -308,14 +329,14 @@ Provider latency/error dashboard data: `GET /api/providers/health`
 - **Deploy** (Vercel + Supabase): `docs/DEPLOY_VERCEL_SUPABASE.md`
 - **v1 Definition-of-Done checklist** (9 items with evidence + honest PARTIALs, non-goals,
   known limits): `docs/V1_CHECKLIST.md`
-- Contract/quality/AI/venues: `docs/API_CONTRACT.md` · `docs/DATA_QUALITY.md` ·
-  `docs/AI_PROVIDERS.md` · `docs/SSE_NOTES.md` · `docs/EURONEXT_NOTES.md`
-- Machine-check: `python scripts/verify_v1.py` (stdlib-only; exit 1 on any FAIL) ·
-  `python -m py_compile scripts/verify_v1.py`
-- Note: `verify_v1.py` still asserts old `.ts/.tsx` paths (`client.ts`,
-  `WatchlistPage.tsx`, …) so its GATES/DoD 2–6,8 FAIL on the current `.jsx` tree
-  while functionality is unaffected — code truth is `.jsx` (`frontend/src/api/client.js`,
-  `frontend/src/pages/WatchlistPage.jsx`).
+- Contract/quality/AI/venues/fail-closed: `docs/API_CONTRACT.md` · `docs/DATA_QUALITY.md` ·
+  `docs/DB_SCHEMA.md` (revamp normative) · `docs/DATA_SOURCES_FREE.md` ·
+  `docs/AI_PROVIDERS.md` · `docs/SSE_NOTES.md` · `docs/EURONEXT_NOTES.md` ·
+  `docs/FAIL_CLOSED_CONTRACT.md` (normative)
+- Machine-checks (rerun to confirm current tree):
+  `python scripts/verify_v1.py` (stdlib-only; exit 1 on any FAIL — currently
+  16 PASS, 2 PARTIAL, 0 FAIL) · `python scripts/deploy_check.py` (currently
+  9 PASS, 0 FAIL) · `python -m py_compile scripts/verify_v1.py`
 
 ## Fail-closed contract (NO FALLBACKS — V1 lock-in)
 
@@ -330,13 +351,17 @@ Provider latency/error dashboard data: `GET /api/providers/health`
 
 ## v1 status summary (M8 docs verification)
 
-- Backend suite at sign-off: `python -m pytest backend/tests -q` → **243 passed**
-  (38 `test_*.py` files; rerun to confirm current tree).
-- DoD: **6 PASS** (items 1, 2, 3, 5, 6, 7) · **3 PARTIAL** (items 4, 8, 9) · **0 FAIL**.
+- Backend suite: `python -m pytest backend/tests --collect-only -q -p no:cacheprovider`
+  → **712 tests collected across 52 `test_*.py` files** at last audit (rerun
+  `python -m pytest backend/tests -q -p no:cacheprovider` to confirm green).
+  `docs/V1_CHECKLIST.md` still cites the older 243-passed sign-off — treat the
+  live `pytest` / `verify_v1.py` output as truth.
+- DoD per `python scripts/verify_v1.py`: **16 PASS · 2 PARTIAL · 0 FAIL**
+  (PARTIALs: DoD 4 contract-code strings docs-only; DoD 8 holiday-calendar stubs).
   PARTIALs in one line: docs-only contract codes (`400/409/AI_*` drafts vs code `422/423`);
   holiday-calendar stubs (licensed calendars required for production);
   sqlite stub without `audit_logs` (use `infra/scripts/verify_audit.py` against Postgres).
-  Resolved since first draft: UI fetcher path drift, rank-refusal `423-vs-409` doc drift,
+  Resolved: UI fetcher path drift, rank-refusal `423-vs-409` doc drift,
   missing `infra/scripts/verify_audit.py` alias (now exists).
 - Non-goals hold (spec §1): no trading, no portfolio construction (placeholder only), no
   agents, no DL, no full OpenBB, no large backtest suite.
@@ -360,8 +385,8 @@ Backend revamp (all IMPLEMENTED unless noted):
   pass) + accurate (confidence, walk-forward, calibration metrics). DCF/peer
   valuation + gradient-boost remain intentional stubs.
 - Snapshots + scoring + DB: 15min/60min snapshot cron, accuracy scoring cron,
-  `market_snapshots` + `forecast_accuracy` tables, `0006_revamp.sql` additive
-  migration; compression `gzip+json` + `delta-q100+gzip` + `zstd` (optional dep,
+  `market_snapshots` + `forecast_accuracy` tables, `0006_revamp.sql` + `0007_horizons.sql`
+  additive migrations; compression `gzip+json` + `delta-q100+gzip` + `zstd` (optional dep,
   gzip fallback). `lz4` not vendored (`zlib` covers that role); `zstd` in the
   DB CHECK. Retention: raw 30d / compressed 365d / accuracy 3y per `docs/DB_SCHEMA.md`
   (normative; `docs/DATA_QUALITY.md` still carries the older Redis-assumed spec).
@@ -373,7 +398,7 @@ Backend revamp (all IMPLEMENTED unless noted):
 - Healthchecks: 11-provider tracker + read-only endpoints + dashboard + 5% alerter.
   PARTIAL: Redis backing documented-not-wired (in-memory + cron mirror into
   `provider_health_history` only); `record()` has no live DB write-through.
-- DB revamp: ORM covers 0001–0006, supabase pooled wiring (`:6543`, NullPool +
+- DB revamp: ORM covers 0001–0007, supabase pooled wiring (`:6543`, NullPool +
   `prepare_threshold: None`, pool_pre_ping), writers for
   ledger/health-history/indicator-cache. PARTIAL: indicator-cache
   writers have no callers yet; no `alembic/versions/` (rollout is raw
@@ -385,14 +410,18 @@ endpoint + 6 markets DONE, CSE/XCOL disabled probe-ready card (honest 422, never
 data) · F5 Top-20 turnover + cap-weighted toggle DONE (cap mode falls back to
 equal until `market_cap` is exposed) · Welcome/Login/tier stubs (no gating) DONE.
 
-Verification at lock-in (final commit — all green, no failures):
+Verification at lock-in (rerun to confirm — commands, not frozen counts):
 
-- Frontend: `npm run test -- --run` → **129 passed (7 files)**; `npm run build`
-  → clean (`vite build`, 196 modules).
-- Backend: `python -m pytest backend/tests -q -p no:cacheprovider` → **627 passed, 0 failed**
-  (45 test files incl. hardening; fail-closed contract: 502/423/422, never stub 200).
-- Full-route check: 54 `@router` endpoints in `backend/api/`; 6 migrations apply
-  (`0006_revamp.sql` last).
+- Frontend: `npm run test -- --run` → 7 test files green at audit; `npm run build`
+  → clean (`vite build`). Frontend is plain `.js`/`.jsx` (no TS); `npm run typecheck`
+  is an intentional no-op echo.
+- Backend: `python -m pytest backend/tests --collect-only -q -p no:cacheprovider`
+  → 712 tests / 52 files at audit; full run `python -m pytest backend/tests -q
+  -p no:cacheprovider` is the green gate (fail-closed contract: 502/423/422, never stub 200).
+- Machine gates: `python scripts/verify_v1.py` → 16 PASS, 2 PARTIAL, 0 FAIL;
+  `python scripts/deploy_check.py` → 9 PASS, 0 FAIL.
+- Routes/migrations: ~60 `@router` operations in `backend/api/` across 14 prefixes;
+  7 migrations apply (`0007_horizons.sql` last; `0006_snapshots.sql` is a superseded draft).
 
 V2 starts here. Candidates (not promises): confirm CSE vendor symbol + enable
 XCOL; expose `market_cap` for true cap-weighted Top-20; live health write-through;
