@@ -61,10 +61,10 @@ def reset_backtest_history() -> None:  # test hook
 
 class BacktestRunRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=32, description="e.g. AAPL")
-    horizons: list[int] = Field(default_factory=lambda: [5, 21, 63], max_length=3)
+    horizons: list[int] = Field(default_factory=lambda: [1, 7, 14, 21], max_length=4)
     train_size: int = Field(default=100, ge=20, le=1000)
     test_size: int = Field(default=21, ge=1, le=500)
-    gap: int = Field(default=63, ge=0, le=500)
+    gap: int = Field(default=21, ge=0, le=500)
     n_bins: int = Field(default=10, ge=2, le=20)
     limit: int = Field(default=250, ge=100, le=250)
 
@@ -326,7 +326,7 @@ def _evaluate_horizon(
 
 
 def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
-    # Purge guard: default gap=5 leaks for h=21/63. Fail fast with 422
+    # Purge guard: gap must be >= max(horizons) (V2: max 21). Fail fast with 422
     # instead of silently scoring leaky folds.
     try:
         req.validate_gap()

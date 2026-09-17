@@ -247,7 +247,7 @@ def test_forecast_horizon_contract_and_ai_weight_cap(tmp_path):
     Session = _fresh_db(tmp_path)
     with Session() as db:
         inst = _seed_instrument(db, symbol="MSFT")
-        for horizon in (5, 21, 63):
+        for horizon in (1, 7, 14, 21):
             db.add(Forecast(
                 instrument_id=inst.instrument_id, horizon_days=horizon,
                 target_date=date(2026, 10, 3) + timedelta(days=horizon),
@@ -256,5 +256,5 @@ def test_forecast_horizon_contract_and_ai_weight_cap(tmp_path):
             ))
         db.commit()
         rows = db.execute(select(Forecast)).scalars().all()
-        assert {r.horizon_days for r in rows} == {5, 21, 63}
+        assert {r.horizon_days for r in rows} == {1, 7, 14, 21}
         assert all(float(r.ai_weight) <= 0.20 for r in rows)

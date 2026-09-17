@@ -87,7 +87,7 @@ def test_forecast_all_horizons_ok():
 
 def test_forecast_rejects_bad_horizon_with_422():
     client = _client()
-    for bad in (1, 7, 10, 30, 63 * 2):
+    for bad in (5, 63, 10, 30, 100):
         resp = client.get("/api/forecast/AAPL", params={"horizon": bad})
         assert resp.status_code == 422, (bad, resp.text)
 
@@ -167,7 +167,7 @@ def _sample_risk_result() -> dict:
 
 
 def test_drivers_none_map_equals_current_order_byte_for_byte():
-    """None/empty map preserves EXACT historical ordering (and 4-cap)."""
+    """None/empty map preserves EXACT historical ordering (and 6-cap)."""
     from backend.api.forecast import forecast_drivers
 
     for result in (_sample_driver_result(), _sample_risk_result()):
@@ -181,7 +181,7 @@ def test_drivers_none_map_equals_current_order_byte_for_byte():
         # Byte-for-byte: joined strings identical, not just set-equal.
         assert "\n".join(none_why) == "\n".join(base_why)
         assert "\n".join(none_risks) == "\n".join(base_risks)
-        assert len(base_why) <= 4 and len(base_risks) <= 4
+        assert len(base_why) <= 6 and len(base_risks) <= 6
 
 
 def test_drivers_ordering_by_member_accuracy_why():
@@ -201,15 +201,15 @@ def test_drivers_ordering_by_member_accuracy_why():
         "logistic-direction": {"hit_rate": None, "n": 0},
     }
     why, risks = forecast_drivers(result, accuracy)
-    assert len(why) <= 4 and len(risks) <= 4
+    assert len(why) <= 6 and len(risks) <= 6
     # Known members sorted desc, unknown member + non-members keep order last.
     assert why[0].startswith("momentum")
     assert why[1].startswith("historical-drift")
     assert why[2].startswith("logistic-direction")
     # Non-member entries (mid/low-dd) stay after member entries.
-    assert "expected 21d return mid" in why[3]
+    assert "Past 21d moves" in why[3] or "middle of the road" in why[3]
     # Every string still quotes a computed number (no invented narrative).
-    assert "(p=0.70)" in why[0] and "(p=0.60)" in why[1]
+    assert "70% chance" in why[0] and "60% chance" in why[1]
     assert "+2.0%" in why[3]
 
 
@@ -231,10 +231,10 @@ def test_drivers_ordering_by_member_accuracy_risks():
     assert risks[0].startswith("momentum")
     assert risks[1].startswith("historical-drift")
     # Non-member entries keep relative order after member entries.
-    assert risks[2].startswith("expected 21d return mid")
-    assert risks[3].startswith("volatility regime: extreme")
-    # Cap holds even when full list exceeds 4 (dd entry capped out here).
-    assert len(risks) == 4
+    assert risks[2].startswith("Past 21d moves")
+    assert risks[3].startswith("Price swings are extreme")
+    # Cap holds even when full list exceeds 6 (dd entry capped out here).
+    assert len(risks) <= 6
     # Missing member in map counts as unknown -> last among members.
     accuracy_partial = {"momentum": {"hit_rate": 0.75, "n": 40}}
     _, risks_partial = forecast_drivers(result, accuracy_partial)

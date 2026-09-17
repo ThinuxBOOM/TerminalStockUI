@@ -396,7 +396,7 @@ const TIER_FEATURES = {
   "Quick Insight": { minTier: "Free", lockedIcon: "🔒" },
   "Forecast Assist": { minTier: "Free", lockedIcon: "🔒" }
 };
-const FORECAST_HORIZONS = [5, 21, 63];
+const FORECAST_HORIZONS = [1, 7, 14, 21];
 function normalizeProvenance(raw, sourceFallback) {
   const r = raw ?? {};
   const nested = r.meta?.provenance;

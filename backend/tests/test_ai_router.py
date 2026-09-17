@@ -223,12 +223,12 @@ def test_api_forecast_opinion_with_blend_preview(empty_store, monkeypatch):
     monkeypatch.setattr(_ai_api, "_build_packet", lambda symbol: _packet(symbol))
     disabled = client.post(
         "/api/ai/forecast_opinion",
-        json={"symbol": "AAPL", "horizon": 5, "quant_prob": 0.64, "ai_enabled": False},
+        json={"symbol": "AAPL", "horizon": 7, "quant_prob": 0.64, "ai_enabled": False},
     )
     assert disabled.status_code == 200, disabled.text
     assert disabled.json()["blend"]["blended_prob"] == pytest.approx(0.64)
     assert disabled.json()["blend"]["ai_applied"] is False
-    # Invalid horizon rejected (only 5/21/63).
+    # Invalid horizon rejected (only 1/7/14/21).
     bad = client.post("/api/ai/forecast_opinion", json={"symbol": "AAPL", "horizon": 30})
     assert bad.status_code == 422
     bad_profile = client.post("/api/ai/insight", json={"symbol": "AAPL", "profile": "nope"})

@@ -34,13 +34,13 @@ Statuses below match `verify_v1.py` output; every PARTIAL names its gap honestly
 
 ### 4. Deterministic forecast + calibrated confidence — PARTIAL
 - Present and tested: `ForecastService` ensemble, `backend/forecasting/calibration/`
-  (Brier/ECE/reliability), horizons 5/21/63 enforced, versioned rows + disclosure,
+  (Brier/ECE/reliability), horizons 1/7/14/21 enforced, versioned rows + disclosure,
   `ForecastDetails` inputs/evidence/versions/calibration/limitations views.
 - Evidence (command): `python -m pytest backend/tests/test_forecast.py backend/tests/test_forecast_api.py backend/tests/test_backtest_api.py -q`
 - Gaps (honest, re-verified Phase 4a): (a) STILL OPEN (docs-side only) — contract codes
   `400 INVALID_HORIZON` / `409 FORECAST_BLOCKED` (`docs/API_CONTRACT.md` pre-4a) are
-  docs-only: code raises `422 {"detail": "horizon must be one of [5, 21, 63], got ..."}`
-  (`backend/api/forecast.py:170-174`; `FORECAST_HORIZONS = (5, 21, 63)` in
+  docs-only: code raises `422 {"detail": "horizon must be one of [1, 7, 14, 21], got ..."}`
+  (`backend/api/forecast.py:170-174`; `FORECAST_HORIZONS = (1, 7, 14, 21)` in
   `backend/forecasting/common.py:13`; identical 422 in `backend/api/screener.py:82-86`)
   and no test asserts the draft strings (grep over `backend/` finds neither
   `INVALID_HORIZON` nor `FORECAST_BLOCKED`); Phase 4a marks them docs-only in

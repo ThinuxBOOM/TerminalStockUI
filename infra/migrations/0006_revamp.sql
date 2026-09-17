@@ -2,7 +2,7 @@
 -- AI token ledger, health history, future auth/tiers).
 --
 -- ADDITIVE-ONLY: no existing table/column is renamed, removed, or retyped.
--- Preserved intact: forecasts.horizon_days IN (5,21,63), ai_weight<=0.20,
+-- Preserved intact: forecasts.horizon_days IN (1, 7, 14, 21), ai_weight<=0.20,
 -- alerts/alert horizon+condition CHECKs, calibration horizon CHECK,
 -- audit_logs append-only hash chain (untouched by this file).
 --

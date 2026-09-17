@@ -22,7 +22,7 @@ class Instrument(BaseModel):
     )
     isin: str | None = Field(default=None)
     company_name: str = ""
-    currency: str = Field(default="USD", min_length=3, max_length=3)
+    currency: str = Field(default="USD", min_length=3, max_length=4)
     country: str | None = Field(default=None)
     sector: str | None = Field(default=None)
     timezone: str = "UTC"

@@ -12,6 +12,17 @@ All money shows source, timestamp, delay/freshness, and quality grade
 reason — never zero-filled. Identity is always `(exchange_mic, symbol)`; the UI
 displays the provider (Yahoo-style) form: `AAPL`, `600519.SS`, `MC.PA`.
 
+## 0. Homepage (start here — no trading knowledge needed)
+
+The homepage (`/`) is the beginner entry point: a 30-second hero ("Type any
+company — we show the price, whether models lean up or down, and why in plain
+words"), the market open/closed strip, then **What should I look at today?**
+(`GET /api/signals/top?horizon=1|7|14|21` — Top-5 research-further + Top-5
+be-careful per market, 80% ensemble math + 20% Alpaca news mood, never orders),
+**My List** (watchlist, separate from ideas), **Market news** (Alpaca News with
+mood badges), and collapsible deep-dives: market indexes (ASPI & friends),
+market activity/liquidity, latest research, and data health (green = working).
+
 ## 1. Search → Security Brief
 
 1. Open **Search**, type a ticker, name, or provider symbol, optionally narrow with the
@@ -39,7 +50,7 @@ Backend equivalents: `GET /api/instruments/search?q=Moutai&market=XSHG`,
 
 ## 2. Forecast details (deterministic core)
 
-Open **FORECAST DETAILS →** (`/forecast/:symbol`). Horizons are trading days `5 / 21 / 63`
+Open **FORECAST DETAILS →** (`/forecast/:symbol`). Horizons are trading days `1 / 7 / 14 / 21`
 only — any other value is rejected. The page shows direction probability, expected-return
 interval (low/mid/high), volatility regime, drawdown probability, model/feature/data
 versions, evidence IDs, calibration history (reliability table), limitations, and the
@@ -52,14 +63,14 @@ Backend (same routes the UI now calls path-first — `getForecast` at
 # deterministic ensemble forecast (symbol is a path segment, horizon is a query param)
 curl "http://localhost:8000/api/forecast/AAPL?horizon=21"
 curl "http://localhost:8000/api/forecast/600519.SS?horizon=21"
-curl "http://localhost:8000/api/forecast/MC.PA?horizon=63"
+curl "http://localhost:8000/api/forecast/MC.PA?horizon=14"
 # analytics snapshot + lightweight walk-forward backtest
 curl "http://localhost:8000/api/analytics/AAPL"
 curl -X POST "http://localhost:8000/api/backtest/run" -H "Content-Type: application/json" `
   -d '{"symbol":"AAPL","horizons":[21]}'
 ```
 
-Bad horizons are rejected with `422 {"detail": "horizon must be one of [5, 21, 63], got ..."}`
+Bad horizons are rejected with `422 {"detail": "horizon must be one of [1, 7, 14, 21], got ..."}`
 (`backend/api/forecast.py:170-174`).
 
 Grade-D inputs block forecasts instead of emitting uncalibrated numbers. Every forecast
@@ -132,7 +143,7 @@ The Screener scans the registry universe and ranks by deterministic forecast
 `direction_probability` descending (`GET /api/screener`, `backend/api/screener.py:69-80`;
 client `getScreener`, `frontend/src/api/client.ts:1373-1387`, own 60s timeout
 `SCREENER_TIMEOUT_MS`). Params: `market` (MIC `XNYS|XNAS|XSHG|XPAR|XAMS|XBRU`, omit/`ALL`
-for all), `min_direction` (default `0.5`), `horizon` (`5|21|63`, default `21`),
+for all), `min_direction` (default `0.5`), `horizon` (`1|7|14|21`, default `21`),
 `limit` (`1–50`, default `20`). Bad `horizon`/`market` → `422`
 (`backend/api/screener.py:60-65,82-86`). Per-symbol failures appear in `skipped`,
 never a batch 500.
@@ -156,7 +167,7 @@ curl -X DELETE "http://localhost:8000/api/alerts/<alert_id>"
 ```
 
 `condition ∈ {price_above, price_below, direction_above, direction_below, change_pct_below}`;
-`horizon_days ∈ {5,21,63}` (direction_* only); unknown symbol → `422`
+`horizon_days ∈ {1, 7, 14, 21}` (direction_* only); unknown symbol → `422`
 (`backend/api/alerts.py:261-265`); non-finite threshold → `422`
 (`backend/api/alerts.py:184-186`); unknown id → `404` (`backend/api/alerts.py:134-155`).
 Evaluation runs every 15 min via GitHub Actions → `GET /api/cron/evaluate`

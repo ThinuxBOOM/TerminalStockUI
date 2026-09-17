@@ -123,7 +123,7 @@ def build_stub_opinion(
     reason: str = "no API key configured",
 ) -> AIOpinion:
     """Clearly marked offline opinion. Always validates; never crashes."""
-    horizon_value = horizon if horizon in (5, 21, 63) else 21
+    horizon_value = horizon if horizon in (1, 7, 14, 21) else 21
     evidence_ids = list(packet.evidence_ids) or ["packet:empty-stub"]
     catalysts = [item.label for item in packet.top_bullish[:2]]
     risks = [item.label for item in packet.top_risks[:2]]
@@ -265,7 +265,7 @@ class BaseProvider(ABC):
 
     def _coerce_strict(self, raw: str | bytes | dict, *, horizon: int | None) -> AIOpinion:
         opinion = parse_opinion_strict(raw)
-        if horizon in (5, 21, 63):
+        if horizon in (1, 7, 14, 21):
             opinion.time_horizon_days = horizon
         return self._stamp(opinion)
 

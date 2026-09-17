@@ -1,6 +1,6 @@
 """Baseline 3: regularized logistic-regression direction model (v3, ensemble-v2).
 
-One L2-regularized LogisticRegression per horizon (5/21/63d) on the v2
+One L2-regularized LogisticRegression per horizon (1/7/14/21d) on the v2
 extended feature frame (v1 7 cols + v2 7 cols: mom_63/vol_63/trail_dd_63/
 range_ma_21/volume_z63/ret_skew_21/rsi_lag5). Fixed hyperparameters (C=1.0)
 and random_state=0 make fits bit-deterministic for identical inputs. Labels

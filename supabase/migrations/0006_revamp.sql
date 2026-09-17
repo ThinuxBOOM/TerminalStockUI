@@ -16,7 +16,7 @@
 -- Idempotent: every statement uses IF NOT EXISTS / re-runnable forms.
 -- Safe to apply twice. DO NOT apply to production yourself.
 -- ADDITIVE-ONLY: no existing table/column renamed or removed; ai_weight<=0.20
--- and horizon 5/21/63 CHECKs preserved; audit_logs hash chain untouched.
+-- and horizon 1/7/14/21 CHECKs preserved; audit_logs hash chain untouched.
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 

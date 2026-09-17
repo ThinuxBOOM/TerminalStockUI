@@ -771,10 +771,113 @@ class MarketDataService:
                             pass
             except Exception:
                 total = 0
+            # V2 resilience: DB thin (e.g. fresh deploy holds 1 TSLA row) but
+            # the live chain may still serve. Try one direct live fetch here
+            # (bypassing the 300s miss-cache) and serve it immediately so
+            # charts never 422 for large caps with deep vendor history.
+            # Best-effort DB upsert keeps the next view on the fast path.
             if total > 0 and total < needed:
+                try:
+                    from backend.market_data.ingest import fetch_daily_bars_with_fallback as _live_fetch
+                    from backend.market_data.ingest import _get_or_create_db_instrument as _get_inst
+                    from backend.market_data.ingest import _upsert_bars as _upsert
+                    from backend.db.session import get_session_factory as _GSF2
+                    from backend.db.session import init_db as _init2
+
+                    _live_bars, _live_src = _live_fetch(symbol_text)
+                    # Yahoo throttle fallback: Stooq CSV is delayed but far
+                    # better than a 422 for large caps (TSLA/MSFT) with deep
+                    # vendor history. Mirrors _fetch_and_store_bars.
+                    if not _live_bars or len(_live_bars) < min(int(limit or 30), 30):
+                        try:
+                            from backend.market_data.ingest import fetch_stooq_daily_bars as _stooq_fetch
+
+                            _stooq_bars = _stooq_fetch(symbol_text)
+                            if _stooq_bars and len(_stooq_bars) >= min(int(limit or 30), 30):
+                                _live_bars, _live_src = _stooq_bars, "stooq"
+                        except Exception:
+                            pass
+                    if _live_bars and len(_live_bars) >= min(int(limit or 30), 30):
+                        try:
+                            _init2()
+                            _S2 = _GSF2()()
+                            try:
+                                if instrument is not None:
+                                    _dbi = _get_inst(_S2, instrument)
+                                    _upsert(_S2, _dbi, _live_bars, timeframe=(timeframe or "1d"), source=str(_live_src or "yfinance"))
+                                    _S2.commit()
+                            finally:
+                                try:
+                                    _S2.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        # Build the wire payload directly from live bars
+                        # (same shape as _bars_response_from_rows, live grade).
+                        try:
+                            _cut = max(1, min(int(limit or 30), 1000))
+                        except Exception:
+                            _cut = 30
+                        _tail = _live_bars[-_cut:]
+                        _rows = []
+                        for _b in _tail:
+                            try:
+                                _ts = _b.get("ts")
+                                _ts_iso = _ts.isoformat() if isinstance(_ts, datetime) else str(_ts)
+                            except Exception:
+                                continue
+                            _rows.append({
+                                "ts": _ts_iso,
+                                "open": _b.get("open"),
+                                "high": _b.get("high"),
+                                "low": _b.get("low"),
+                                "close": _b.get("close"),
+                                "volume": _b.get("volume"),
+                                "missing_fields": [],
+                            })
+                        if _rows:
+                            try:
+                                _mic = str(getattr(instrument, "exchange_mic", None) or "XNAS")
+                            except Exception:
+                                _mic = "XNAS"
+                            try:
+                                _exp = expected_delay_minutes(_mic)
+                            except Exception:
+                                _exp = 15
+                            try:
+                                _prov = build_provenance(
+                                    str(_live_src or "yfinance"), as_of=_utcnow(),
+                                    delay_minutes=_exp, quality_grade="C",
+                                    fallback_used=False,
+                                    missing_fields=[f"live-serve-db-thin-{int(total)}-rows"],
+                                ).model_dump(mode="json")
+                            except Exception:
+                                _prov = {}
+                            _payload = {
+                                "symbol": symbol_text.upper(),
+                                "instrument_id": getattr(instrument, "instrument_id", None) if instrument is not None else None,
+                                "timeframe": (timeframe or "1d"),
+                                "bars": _rows,
+                                "provenance": _prov,
+                            }
+                            if self.cache is not None and cache_key is not None:
+                                try:
+                                    self.cache.set(cache_key, _payload, ttl_s=120)
+                                except Exception:
+                                    pass
+                            try:
+                                if self.cache is not None:
+                                    self.cache.delete(f"barsfetch:{symbol_text.upper()}")
+                            except Exception:
+                                pass
+                            return _payload
+                except Exception:
+                    pass
                 raise ValueError(
                     f"insufficient history for {symbol!r}: "
-                    f"only {int(total)} of {limit} bars available"
+                    f"only {int(total)} of {limit} bars available "
+                    f"(live refresh missed — retry; cron ingest backfills daily)"
                 )
         except ValueError:
             raise
@@ -1142,7 +1245,31 @@ class MarketDataService:
                 expected = last_completed_trading_day(mic)
             except Exception:
                 return True
-            return latest >= expected
+            if latest >= expected:
+                return True
+            # Vendor-settle tolerance: Yahoo often publishes yesterday's bar
+            # a day late (fetch at 00:00 UTC before US close settles, or
+            # delayed vendor feed). If latest is the trading day immediately
+            # before expected, serve as fresh instead of 502ing every view
+            # until the vendor catches up. >1 day behind stays stale.
+            try:
+                from datetime import timedelta as _td
+
+                from backend.instruments.calendars import is_trading_day as _is_td
+
+                prev = expected - _td(days=1)
+                for _ in range(7):
+                    try:
+                        if _is_td(prev, mic):
+                            break
+                    except Exception:
+                        break
+                    prev -= _td(days=1)
+                if latest >= prev:
+                    return True
+            except Exception:
+                pass
+            return False
         except Exception:
             return True
 
@@ -1407,7 +1534,9 @@ class MarketDataService:
             mic = getattr(instrument, "exchange_mic", None)
         except Exception:
             mic = None
+        alpaca_attempted = False
         if self._alpaca_bars_wanted(mic, provider_symbol):
+            alpaca_attempted = True
             try:
                 from backend.market_data.ingest import fetch_alpaca_daily_bars
 
@@ -1435,15 +1564,42 @@ class MarketDataService:
                     pass
                 bars = None
         if bars is None:
+            # V2: use the ordered chain (alpaca→yfinance when keys present,
+            # else yfinance) then Stooq CSV as a last-resort gap-filler so a
+            # single-provider Yahoo throttle never leaves TSLA/MSFT with
+            # "only 1 of 90 bars available". Stooq daily CSV is delayed but
+            # far better than a 422 for large caps with deep history.
+            # When the direct Alpaca leg above already failed, skip Alpaca in
+            # the chain (single-attempt contract — one slow view per outage).
+            # Same when the cooldown is active (direct was skipped): the
+            # default chain would otherwise retry Alpaca via its own link.
             try:
-                bars = fetch_daily_bars(provider_symbol)
-                bars_source = "yfinance"
+                from backend.market_data.ingest import fetch_daily_bars_with_fallback as _chain_fetch
+
+                try:
+                    _cooling = time.monotonic() < float(
+                        getattr(self, "_alpaca_bars_unavailable_until", 0.0) or 0.0
+                    )
+                except Exception:
+                    _cooling = False
+                if alpaca_attempted or _cooling:
+                    bars, bars_source = _chain_fetch(provider_symbol, chain=["yfinance"])
+                else:
+                    bars, bars_source = _chain_fetch(provider_symbol)
             except Exception:
+                bars, bars_source = None, "yfinance"
+            if not bars:
+                try:
+                    from backend.market_data.ingest import fetch_stooq_daily_bars as _stooq_fetch
+
+                    bars = _stooq_fetch(provider_symbol)
+                    bars_source = "stooq"
+                except Exception:
+                    self._remember_fetch_miss(miss_key)
+                    return False
+            if not bars:
                 self._remember_fetch_miss(miss_key)
                 return False
-        if not bars:
-            self._remember_fetch_miss(miss_key)
-            return False
         try:
             init_db()
             Session = get_session_factory()

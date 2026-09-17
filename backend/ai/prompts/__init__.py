@@ -3,7 +3,7 @@
 Every prompt instructs the model to:
 - return STRICT JSON matching the AIOpinion schema and nothing else,
 - ground every catalyst/risk in the supplied evidence_ids,
-- stay within direction/probability/horizon bounds (5/21/63 days only),
+- stay within direction/probability/horizon bounds (1/7/14/21 days only),
 - state limitations, and
 - include the "not investment advice" disclosure.
 
@@ -82,7 +82,7 @@ def render_prompt(
         # get_prompt already raised; keep mypy happy.
         key = "quick_insight"
     effective_horizon = horizon
-    if effective_horizon not in (5, 21, 63):
+    if effective_horizon not in (1, 7, 14, 21):
         effective_horizon = _PROFILE_HORIZON_HINT.get(key) or 21
     budget = int(max_tokens or MAX_PROMPT_TOKENS_BY_PROFILE.get(key, 600))
     try:

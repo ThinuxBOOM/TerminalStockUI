@@ -131,7 +131,7 @@ The app must run fully with AI keys empty (AI disabled path, §7 item 7).
   placeholder (non-goal).
 - **API (54 routes):** `GET /health` · `/api/instruments/search|resolve|{id}` ·
   `/api/market_data/quote|bars|indicators` + `/api/securities/{id}/quote|bars` ·
-  `GET /api/forecast/{symbol}?horizon=5|21|63` + `/calibration/history` ·
+  `GET /api/forecast/{symbol}?horizon=1|7|14|21` + `/calibration/history` ·
   `GET /api/analytics/{symbol}` · `POST /api/backtest/run` + `GET /api/backtest/{symbol}` ·
   `POST /api/ai/insight` + `POST /api/ai/forecast_opinion` +
   `POST /api/ai/deep_research_job` + `GET /api/ai/jobs/{id}` (poll-job, no SSE) +
@@ -256,7 +256,7 @@ Provider latency/error dashboard data: `GET /api/providers/health`
 
 ## M3/M4 acceptance checklist (spec §7 items 4–6, 9)
 
-- [x] Deterministic forecast + calibrated confidence served (`GET /api/forecast/{symbol}?horizon=5|21|63`, horizons 5/21/63 only; `422` on bad horizon).
+- [x] Deterministic forecast + calibrated confidence served (`GET /api/forecast/{symbol}?horizon=1|7|14|21`, horizons 1/7/14/21 only; `422` on bad horizon).
 - [x] Every forecast stores `model_version + feature_version + data_version + timestamp` (versioned log at `GET /api/audit/forecasts?symbol=`).
 - [x] AI explanation + bounded opinion on explicit request only (`POST /api/ai/insight`, `POST /api/ai/forecast_opinion`); malformed opinions fail validation safely (422/stub degrade).
 - [x] AI weight capped at 20%, server-enforced; disabling AI leaves forecasting intact (`ai_weight=0`, forecast intact with keys empty).

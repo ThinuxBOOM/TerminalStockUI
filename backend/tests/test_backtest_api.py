@@ -21,7 +21,7 @@ def test_backtest_run_shape_and_history():
     client = _client()
     resp = client.post(
         "/api/backtest/run",
-        json={"symbol": "AAPL", "horizons": [5, 21],
+        json={"symbol": "AAPL", "horizons": [7, 21],
               "train_size": 100, "test_size": 21, "gap": 21},
     )
     assert resp.status_code == 200, resp.text
@@ -30,7 +30,7 @@ def test_backtest_run_shape_and_history():
     assert body["as_of"]
     assert body["provenance"]
     assert body["model_version"] and body["feature_version"] and body["data_version"]
-    assert set(body["results"]) == {"5", "21"}
+    assert set(body["results"]) == {"7", "21"}
     for horizon, metrics in body["results"].items():
         assert metrics["n_points"] > 0
         assert metrics["n_folds"] >= 1
@@ -50,8 +50,8 @@ def test_backtest_run_shape_and_history():
     assert hbody["provenance"]
     assert len(hbody["runs"]) == 1
     summary = hbody["runs"][0]
-    assert summary["metrics"]["5"]["brier"] == pytest.approx(body["results"]["5"]["brier"])
-    assert "reliability" not in summary["metrics"]["5"]  # lightweight
+    assert summary["metrics"]["7"]["brier"] == pytest.approx(body["results"]["7"]["brier"])
+    assert "reliability" not in summary["metrics"]["7"]  # lightweight
 
 
 def test_backtest_rejects_bad_horizon_with_422():
@@ -67,7 +67,7 @@ def test_backtest_rejects_leaky_gap_with_422():
     client = _client()
     resp = client.post(
         "/api/backtest/run",
-        json={"symbol": "AAPL", "horizons": [5, 21],
+        json={"symbol": "AAPL", "horizons": [7, 21],
               "train_size": 100, "test_size": 21, "gap": 5},
     )
     assert resp.status_code == 422, resp.text
@@ -76,14 +76,14 @@ def test_backtest_rejects_leaky_gap_with_422():
 
 def test_backtest_deterministic():
     client = _client()
-    payload = {"symbol": "MSFT", "horizons": [5],
-               "train_size": 100, "test_size": 21, "gap": 5}
+    payload = {"symbol": "MSFT", "horizons": [7],
+               "train_size": 100, "test_size": 21, "gap": 7}
     first = client.post("/api/backtest/run", json=payload).json()
     reset_backtest_history()
     # Rebuild a fresh client without clearing the deterministic bars seed.
     second = client.post("/api/backtest/run", json=payload).json()
-    assert first["results"]["5"]["brier"] == pytest.approx(second["results"]["5"]["brier"])
-    assert first["results"]["5"]["ece"] == pytest.approx(second["results"]["5"]["ece"])
+    assert first["results"]["7"]["brier"] == pytest.approx(second["results"]["7"]["brier"])
+    assert first["results"]["7"]["ece"] == pytest.approx(second["results"]["7"]["ece"])
 
 
 def test_backtest_leakage_guard():

@@ -5,7 +5,7 @@ Synthetic bars only, no network, no AI. Covers:
   * Past-invariance (no leakage) + gap-proxy recomputation
   * Eux drift winsorization at +/-15% + z=1.15 band
   * Service routing (.PA/.AS/.BR suffix or XPAR/XAMS/XBRU MIC) -> blend
-  * Horizons 5/21/63 only + determinism
+  * Horizons 1/7/14/21 only + determinism
   * US + SSE paths exactly preserved + registry exposes all three models
 """
 
@@ -262,7 +262,7 @@ def test_eux_routing_all_venues_suffix_and_mic():
 def test_eux_horizons_only_and_deterministic():
     svc = ForecastService(market_service=_FakeMarket(make_eux_bars()))
     all_h = svc.forecast_all("MC.PA", as_of=FIXED_AS_OF)
-    assert set(all_h) == set(FORECAST_HORIZONS) == {5, 21, 63}
+    assert set(all_h) == set(FORECAST_HORIZONS) == {1, 7, 14, 21}
     for horizon, res in all_h.items():
         assert res["horizon_days"] == horizon
         assert 0.0 <= res["direction_probability"] <= 1.0
@@ -278,7 +278,7 @@ def test_eux_horizons_only_and_deterministic():
         )
     assert first["model_version"] == second["model_version"]
     with pytest.raises(ValueError):
-        svc.forecast("MC.PA", 7, as_of=FIXED_AS_OF)
+        svc.forecast("MC.PA", 5, as_of=FIXED_AS_OF)
 
 
 def test_us_and_sse_paths_unaffected():

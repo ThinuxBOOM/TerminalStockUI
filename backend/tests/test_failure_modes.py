@@ -230,14 +230,14 @@ def test_fx_outage_maps_502_not_retryable_maps_400():
 def test_invalid_horizon_rejected_with_422():
     client = _client()
     try:
-        for bad in ("7", "7d", "30", "soon"):
+        for bad in ("5", "5d", "30", "soon"):
             resp = client.get("/api/forecast/AAPL", params={"horizon": bad})
             assert resp.status_code == 422, (bad, resp.text)
-        assert client.get("/api/forecast/AAPL", params={"horizon": 7}).status_code == 422
-        resp = client.post("/api/backtest/run", json={"symbol": "AAPL", "horizons": [7]})
+        assert client.get("/api/forecast/AAPL", params={"horizon": 5}).status_code == 422
+        resp = client.post("/api/backtest/run", json={"symbol": "AAPL", "horizons": [5]})
         assert resp.status_code == 422, resp.text
         resp = client.post(
-            "/api/ai/forecast_opinion", json={"symbol": "AAPL", "horizon": 7}
+            "/api/ai/forecast_opinion", json={"symbol": "AAPL", "horizon": 5}
         )
         assert resp.status_code == 422, resp.text
         resp = client.post("/api/ai/insight", json={"symbol": "AAPL", "profile": "nope"})
@@ -256,12 +256,13 @@ def test_malformed_ai_json_fails_safe():
     # Right shape, wrong values -> safe failure, never a partial opinion.
     with pytest.raises(ValueError):
         parse_opinion_strict('{"direction": "bullish", "probability": 9.9}')
-    with pytest.raises(ValueError):
-        AIOpinion.model_validate({
-            "direction": "bullish", "probability": 0.5, "time_horizon_days": 7,
-            "catalysts": [], "risks": [],
-            "evidence_ids": ["ev-1"], "limitations": ["x"],
-        })
+    # Valid opinion validates (empty catalysts/risks with evidence is allowed).
+    valid = AIOpinion.model_validate({
+        "direction": "bullish", "probability": 0.5, "time_horizon_days": 7,
+        "catalysts": [], "risks": [],
+        "evidence_ids": ["ev-1"], "limitations": ["x"],
+    })
+    assert valid.direction == "bullish"
 
 
 # --- FX stale -> rank 423 (fail-closed gate) ----------------------------------

@@ -222,7 +222,7 @@ def refresh_forecast(symbol: str, db: Any = None, **kwargs: Any) -> dict:
             _audit(db, job=job, entity_id=sym,
                    payload={"ok": False, "error": type(exc).__name__})
             return _log_result(result)
-    horizons = [5, 21, 63]
+    horizons = [1, 7, 14, 21]
     ran: dict[int, dict] = {}
     errors: dict[str, str] = {}
     for horizon in horizons:

@@ -447,7 +447,7 @@ class AIRouter:
         self, profile: str, packet: EvidencePacket, horizon: int | None,
         provider: str, model: str,
     ) -> str:
-        horizon_part = str(horizon) if horizon in (5, 21, 63) else "-"
+        horizon_part = str(horizon) if horizon in (1, 7, 14, 21) else "-"
         return f"{profile}:{provider}:{model}:{packet.evidence_hash}:{horizon_part}"
 
     def clear_cache(self) -> None:
@@ -684,7 +684,7 @@ class AIRouter:
             try:
                 horizon_tag = int(opinion.time_horizon_days)
             except (TypeError, ValueError):
-                horizon_tag = horizon if horizon in (5, 21, 63) else 21
+                horizon_tag = horizon if horizon in (1, 7, 14, 21) else 21
             self.performance.record(
                 provider_name, provider.model, exchange, horizon_tag,
                 latency_ms=0.0, stub=True, error="circuit_open",
@@ -787,7 +787,7 @@ class AIRouter:
         try:
             horizon_tag = int(opinion.time_horizon_days)
         except (TypeError, ValueError):
-            horizon_tag = horizon if horizon in (5, 21, 63) else 21
+            horizon_tag = horizon if horizon in (1, 7, 14, 21) else 21
         self.performance.record(
             provider_name, provider.model, exchange, horizon_tag,
             latency_ms=latency_ms, stub=bool(opinion.stub), error=error,

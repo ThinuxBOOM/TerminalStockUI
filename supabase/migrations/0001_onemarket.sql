@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS ix_price_bars_instrument_timeframe_ts
 CREATE TABLE IF NOT EXISTS forecasts (
   forecast_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   instrument_id     UUID NOT NULL REFERENCES instruments(instrument_id) ON DELETE CASCADE,
-  horizon_days      INT NOT NULL CHECK (horizon_days IN (5, 21, 63)),
+  horizon_days      INT NOT NULL CHECK (horizon_days IN (1, 7, 14, 21)),
   target_date       DATE NOT NULL,
   direction_prob    NUMERIC(6,5) CHECK (direction_prob >= 0 AND direction_prob <= 1),
   expected_ret_low  NUMERIC(10,6),

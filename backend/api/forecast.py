@@ -1,10 +1,10 @@
-"""GET /api/forecast/{symbol}?horizon=5|21|63 — validated ensemble forecast.
+"""GET /api/forecast/{symbol}?horizon=1|7|14|21 — validated ensemble forecast.
 
 Ensemble of existing baselines (historical-drift + momentum + logistic);
 quantile bands supply the return range, volatility regime and drawdown
 probability. Deterministic, no AI, no network. Every response carries the
 provenance envelope + model/feature/data versions + timestamp + the
-"Not investment advice" disclosure. Horizons outside {5, 21, 63} -> 422.
+"Not investment advice" disclosure. Horizons outside {1, 7, 14, 21} -> 422.
 """
 
 from __future__ import annotations
@@ -99,10 +99,21 @@ def _order_side_by_accuracy(
     scored: list[tuple[float | None, int, str]] = []
     for idx, entry in enumerate(entries):
         member: str | None = None
-        if " implies " in entry:
-            candidate = entry.split(" implies ", 1)[0]
-            if candidate in components:
-                member = candidate
+        # V2 strings use "<name> points up/down (...)"; legacy used "<name> implies ...".
+        for sep in (" implies ", " points "):
+            if sep in entry:
+                candidate = entry.split(sep, 1)[0].strip()
+                if candidate in components:
+                    member = candidate
+                    break
+        # Fallback: entry starts with "<name> " (member name + space).
+        if member is None:
+            try:
+                first = str(entry).split(" ", 1)[0].strip()
+                if first in components:
+                    member = first
+            except Exception:
+                member = None
         scored.append((_member_hit_rate(member_accuracy, member), idx, entry))
     known = [(r, i, e) for r, i, e in scored if r is not None]
     unknown = [(i, e) for r, i, e in scored if r is None]
@@ -114,28 +125,20 @@ def _order_side_by_accuracy(
 def forecast_drivers(
     result: dict, member_accuracy: dict | None = None
 ) -> tuple[list[str], list[str]]:
-    """Derive bull/bear driver strings from computed ensemble values only.
+    """Derive detailed bull/bear driver strings from computed values only.
 
-    Every string quotes a number already present in the response — no
-    narrative is invented. Cap 4 items per side; empty side renders as
-    "unavailable" in the UI (honest, never zero-filled).
-
-    ensemble-v2: member entries now include weights
-    (``"<name> implies up (p=0.62, w=0.25)"``); spread/disagreement and
-    calibration notes live in limitations (not drivers) to preserve the
-    4-per-side contract.
-
-    When ``member_accuracy`` (``{member: {"hit_rate": float|None, ...}}``)
-    is provided and non-empty, each side is ordered by trailing hit_rate
-    descending (member entries use their member's rate; non-member and
-    unknown-rate entries keep relative order last). When None/empty, the
-    historical ordering is returned byte-for-byte.
+    V2: each bullet is a full sentence quoting the actual numbers (member
+    probability + weight + trailing accuracy, expected-return band, vol
+    regime detail, drawdown, confidence reasons, target price). No narrative
+    is invented — everything quotes fields already in ``result``. Cap 6 per
+    side; empty side renders as "unavailable" in the UI.
     """
     why: list[str] = []
     risks: list[str] = []
     horizon = result.get("horizon_days", "?")
     components = result.get("components") or {}
     weights = result.get("ensemble_weights") or {}
+    formulas = result.get("formulas") or {}
     for name in sorted(components):
         try:
             value = float(components[name])
@@ -143,43 +146,109 @@ def forecast_drivers(
             continue
         try:
             w = weights.get(name)
-            w_txt = f", w={float(w):.2f}" if isinstance(w, (int, float)) and not isinstance(w, bool) else ""
+            w_txt = f" (weight {float(w):.0%} in the ensemble)" if isinstance(w, (int, float)) and not isinstance(w, bool) else ""
         except Exception:
             w_txt = ""
+        try:
+            acc_txt = ""
+            if isinstance(member_accuracy, dict) and name in member_accuracy:
+                entry = member_accuracy[name]
+                hr = entry.get("hit_rate") if isinstance(entry, dict) else entry
+                n = entry.get("n") if isinstance(entry, dict) else None
+                if isinstance(hr, (int, float)) and not isinstance(hr, bool):
+                    acc_txt = f"; got the direction right {float(hr):.0%} of the time"
+                    if isinstance(n, int) and n > 0:
+                        acc_txt += f" over the last {n} checks"
+        except Exception:
+            acc_txt = ""
+        try:
+            formula = str(formulas.get(name) or "").strip()
+            formula_txt = f" — {formula[:160]}" if formula else ""
+        except Exception:
+            formula_txt = ""
+        direction_word = "up" if value > 0.5 else ("down" if value < 0.5 else "flat")
+        pct = f"{value:.0%}"
         if value > 0.5:
-            why.append(f"{name} implies up (p={value:.2f}{w_txt})")
+            why.append(
+                f"{name} points {direction_word} ({pct} chance of rising over {horizon}d){w_txt}{acc_txt}{formula_txt}."
+            )
         elif value < 0.5:
-            risks.append(f"{name} implies down (p={value:.2f}{w_txt})")
+            risks.append(
+                f"{name} points {direction_word} (only {pct} chance of rising over {horizon}d){w_txt}{acc_txt}{formula_txt}."
+            )
     band = result.get("expected_return_range") or {}
-    mid = band.get("mid")
-    if isinstance(mid, bool):
-        mid = None
-    if isinstance(mid, (int, float)):
-        (why if mid >= 0 else risks).append(
-            f"expected {horizon}d return mid {mid:+.1%}"
-        )
+    try:
+        low, mid, high = band.get("low"), band.get("mid"), band.get("high")
+        if isinstance(mid, (int, float)) and not isinstance(mid, bool):
+            lo_txt = f"{float(low):+.1%}" if isinstance(low, (int, float)) and not isinstance(low, bool) else "—"
+            hi_txt = f"{float(high):+.1%}" if isinstance(high, (int, float)) and not isinstance(high, bool) else "—"
+            n_w = band.get("n_windows")
+            n_txt = f" across {int(n_w)} past {horizon}d windows" if isinstance(n_w, int) and n_w > 0 else ""
+            if mid >= 0:
+                why.append(
+                    f"Past {horizon}d moves like this averaged {mid:+.1%} (typical range {lo_txt} to {hi_txt}){n_txt} — the middle of the road is positive."
+                )
+            else:
+                risks.append(
+                    f"Past {horizon}d moves like this averaged {mid:+.1%} (typical range {lo_txt} to {hi_txt}){n_txt} — the middle of the road is negative."
+                )
+    except Exception:
+        pass
     regime = result.get("volatility_regime")
+    try:
+        vdet = result.get("volatility_detail") or {}
+        ann = vdet.get("annualized_vol") or vdet.get("vol") or vdet.get("volatility")
+        ann_txt = f" (yearly swing ≈ {float(ann):.0%})" if isinstance(ann, (int, float)) and not isinstance(ann, bool) else ""
+    except Exception:
+        ann_txt = ""
     if regime in ("high", "elevated", "extreme"):
-        risks.append(f"volatility regime: {regime}")
+        risks.append(f"Price swings are {regime}{ann_txt} — big up AND down days are more likely, so position sizes should be smaller.")
+    elif regime in ("low", "normal", "calm"):
+        why.append(f"Price swings look {regime}{ann_txt} — the ride has been relatively smooth, which supports holding.")
     drawdown = result.get("drawdown_probability")
     if isinstance(drawdown, bool):
         drawdown = None
     if isinstance(drawdown, (int, float)):
         if drawdown >= 0.25:
-            risks.append(f"large-drawdown probability {drawdown:.0%} over {horizon}d")
+            risks.append(f"About a {drawdown:.0%} chance of a sharp fall (10%+ drop) within {horizon}d — have an exit plan before entering.")
         elif drawdown <= 0.10:
-            why.append(f"large-drawdown probability low ({drawdown:.0%})")
+            why.append(f"Only about a {drawdown:.0%} chance of a sharp fall (10%+ drop) within {horizon}d — crash risk looks contained.")
+        else:
+            risks.append(f"Moderate crash risk: about a {drawdown:.0%} chance of a 10%+ drop within {horizon}d.")
+    try:
+        tp = result.get("target_price") or {}
+        last = tp.get("last_close")
+        tmid = tp.get("mid")
+        if isinstance(last, (int, float)) and isinstance(tmid, (int, float)):
+            chg = (float(tmid) / float(last) - 1.0) if float(last) else 0.0
+            if chg >= 0:
+                why.append(f"At {float(last):.2f}, the middle forecast points to ≈{float(tmid):.2f} ({chg:+.1%} over {horizon}d).")
+            else:
+                risks.append(f"At {float(last):.2f}, the middle forecast points to ≈{float(tmid):.2f} ({chg:+.1%} over {horizon}d).")
+    except Exception:
+        pass
+    try:
+        for reason in (result.get("confidence_reasons") or [])[:2]:
+            txt = str(reason).strip()
+            if not txt:
+                continue
+            if any(k in txt.lower() for k in ("disagree", "spread", "uncertain", "stale", "thin", "missing")):
+                risks.append(f"Caution flag: {txt[:220]}")
+            else:
+                why.append(f"Supporting note: {txt[:220]}")
+    except Exception:
+        pass
     if not member_accuracy:
-        return why[:4], risks[:4]
+        return why[:6], risks[:6]
     why = _order_side_by_accuracy(why, components, member_accuracy)
     risks = _order_side_by_accuracy(risks, components, member_accuracy)
-    return why[:4], risks[:4]
+    return why[:6], risks[:6]
 
 
 @router.get("/{symbol}/calibration/history")
 def calibration_history(
     symbol: str,
-    horizon: int = Query(default=21, description="Trading-day horizon: 5, 21 or 63"),
+    horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     limit: int = Query(default=20, ge=1, le=50, description="Max snapshots (cap 50)"),
     svc: ForecastService = Depends(get_forecast_service),
 ) -> dict:
@@ -261,7 +330,7 @@ def calibration_history(
 def get_forecast(
     symbol: str,
     background_tasks: BackgroundTasks,
-    horizon: int = Query(default=21, description="Trading-day horizon: 5, 21 or 63"),
+    horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     svc: ForecastService = Depends(get_forecast_service),
 ) -> dict:
     """Forecast one symbol/horizon (ensemble direction + bands + risk)."""

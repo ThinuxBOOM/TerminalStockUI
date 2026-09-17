@@ -196,7 +196,7 @@ class Alert(Base):
             name="ck_alerts_condition",
         ),
         _sa.CheckConstraint(
-            "horizon_days IN (5, 21, 63)",
+            "horizon_days IN (1, 7, 14, 21)",
             name="ck_alerts_horizon_days",
         ),
     )
@@ -415,7 +415,7 @@ Index("ix_forecast_accuracy_scored", ForecastAccuracy.scored_at.desc())
 # infra/migrations/0006_revamp.sql (Postgres BYTEA/JSONB/BIGSERIAL map to
 # portable LargeBinary/JSON/Integer here so SQLite tests stay green).
 # Additive-only: no existing table/column renamed or removed;
-# ai_weight<=0.20 and horizon 5/21/63 CHECKs untouched; audit_logs hash chain
+# ai_weight<=0.20 and horizon 1/7/14/21 CHECKs untouched; audit_logs hash chain
 # intact. alerts/forecasts gain DB-level user_id+tier stubs in 0006
 # (migration-only, intentionally NOT mapped here to keep this file
 # append-only for concurrent agents). Do NOT redefine market_snapshots /

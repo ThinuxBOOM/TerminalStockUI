@@ -960,21 +960,53 @@ def probe_provider(name: str, tracker=None, *, timeout_s: float = 60.0) -> dict:
                 "error": f"{type(exc).__name__}: {exc}"[:280]}
 
 
-def probe_all_providers(tracker=None, *, timeout_s: float = 60.0, include_ai: bool = True) -> list[dict]:
+def probe_all_providers(tracker=None, *, timeout_s: float = 8.0, include_ai: bool = True) -> list[dict]:
     """Probe every known provider (data + optionally AI). Never raises.
 
-    Sequential and bounded: one lightweight ping per provider (quote/FX/AI
-    model-list). Intended for cron (GET /api/cron/health) and manual
-    POST /api/providers/health/test without a provider arg.
+    Concurrent and bounded: one lightweight ping per provider (quote/FX/AI
+    model-list) in a thread pool with an overall 25s budget so the Vercel
+    cron (GET /api/cron/health) never exceeds maxDuration. Intended for cron
+    and manual POST /api/providers/health/test without a provider arg.
     """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _done
+
     names = list(KNOWN_PROVIDERS) if include_ai else list(DATA_PROVIDERS)
     out: list[dict] = []
-    for name in names:
-        try:
-            out.append(probe_provider(name, tracker, timeout_s=timeout_s))
-        except Exception as exc:
-            out.append({"provider": name, "ok": False, "latency_ms": None,
-                        "error": f"{type(exc).__name__}: {exc}"[:280]})
+    try:
+        per = max(3.0, min(float(timeout_s), 10.0))
+    except (TypeError, ValueError):
+        per = 8.0
+    deadline = _time.monotonic() + 25.0
+    try:
+        with _TPE(max_workers=min(4, len(names) or 1)) as _pool:
+            futs = { _pool.submit(probe_provider, n, tracker, per): n for n in names }
+            for fut in _done(futs, timeout=25):
+                if _time.monotonic() > deadline:
+                    break
+                n = futs[fut]
+                try:
+                    out.append(fut.result(timeout=2))
+                except Exception as exc:
+                    out.append({"provider": n, "ok": False, "latency_ms": None,
+                                "error": f"{type(exc).__name__}: {exc}"[:280]})
+            for fut, n in futs.items():
+                if not fut.done():
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
+                    if not any(r.get("provider") == n for r in out):
+                        out.append({"provider": n, "ok": False, "latency_ms": None,
+                                    "error": "TimeoutError: health budget exceeded"})
+    except Exception:
+        for name in names:
+            if not any(r.get("provider") == name for r in out):
+                try:
+                    out.append(probe_provider(name, tracker, timeout_s=per))
+                except Exception as exc:
+                    out.append({"provider": name, "ok": False, "latency_ms": None,
+                                "error": f"{type(exc).__name__}: {exc}"[:280]})
     return out
 
 

@@ -95,6 +95,9 @@ function SecurityBrief({ symbol }) {
   // 5Y=1000 (chart decimates to 500 for display, extremes preserved).
   const [timeframeId, setTimeframeId] = useState("3M");
   const preset = resolveTimeframePreset(timeframeId);
+  // V2 horizons: 1/7/14/21 trading days (was 5/21/63). Default 21 keeps
+  // continuity; tabs let beginners compare tomorrow vs next month.
+  const [forecastHorizon, setForecastHorizon] = useState(21);
   // Indicator overlays, init'd from the favorites stub (guest namespace until
   // auth lands), persisted on every toggle.
   const [selectedIndicators, setSelectedIndicators] = useState(() =>
@@ -117,8 +120,8 @@ function SecurityBrief({ symbol }) {
     staleTime: 30000,
   });
   const forecastQ = useQuery({
-    queryKey: ["forecast", symbol, 21],
-    queryFn: ({ signal }) => getForecast(symbol, 21, { signal }),
+    queryKey: ["forecast", symbol, forecastHorizon],
+    queryFn: ({ signal }) => getForecast(symbol, forecastHorizon, { signal }),
     retry: false,
     staleTime: 60000,
   });
@@ -142,7 +145,7 @@ function SecurityBrief({ symbol }) {
         <Skeleton label={`loading ${symbol}…`} lines={3} />
         {forecast && (
           <div className="term-panel mt-4 min-w-0 p-4">
-            <ForecastCard price={null} currency="USD" forecast={forecast} symbol={symbol} />
+            <ForecastCard price={null} currency="USD" forecast={forecast} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} />
           </div>
         )}
         <div className="term-panel-hero mt-4 min-w-0 p-4">
@@ -204,7 +207,7 @@ function SecurityBrief({ symbol }) {
         />
         {hasForecastFallback && (
           <div className="term-panel mt-4 min-w-0 p-4">
-            <ForecastCard price={null} currency={null} forecast={forecastQ.data} symbol={symbol} />
+            <ForecastCard price={null} currency={null} forecast={forecastQ.data} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} />
           </div>
         )}
         {hasAnalyticsFallback && (
@@ -269,7 +272,7 @@ function SecurityBrief({ symbol }) {
             <Skeleton label="loading live forecast…" lines={4} />
           </div>
         )}
-        {!forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} />}
+        {!forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} />}
         {!forecastQ.isLoading && !forecast && (
           <ForecastUnavailable detail="live forecast unreachable — no placeholder numbers shown" onRetry={() => void forecastQ.refetch()} />
         )}
@@ -347,38 +350,62 @@ function ForecastUnavailable({ detail, onRetry }) {
   );
 }
 
-// Brief research preview: compact (A) deterministic summary + blended math
-// note + AI-opinion teaser. Full A/B explanation lives on Forecast Details.
-function ForecastCard({ price, currency, forecast: f, symbol }) {
-  const why = (f.why ?? []).slice(0, 4);
-  const risks = (f.risks ?? []).slice(0, 4);
-  const whyText = why.length > 0 ? why.join(" + ") : "unavailable";
-  const riskText = risks.length > 0 ? risks.join(" + ") : "unavailable";
+// Brief research preview: V2 detailed drivers (up to 6 full-sentence
+// bullets per side) + horizon tabs + plain-English summary for beginners.
+function ForecastCard({ price, currency, forecast: f, symbol, horizon, onHorizon }) {
+  const why = (f.why ?? []).slice(0, 6);
+  const risks = (f.risks ?? []).slice(0, 6);
+  const prob = Number(f.probability);
+  const probPct = Number.isFinite(prob) ? `${(prob * 100).toFixed(0)}%` : "—";
+  const plainSummary = (() => {
+    if (!Number.isFinite(prob)) return "Not enough data to form a view right now.";
+    if (prob >= 0.65) return `Leaning up — about a ${probPct} chance of rising over ${f.horizon_days}d. Good to research further, but never a guarantee.`;
+    if (prob >= 0.55) return `Slightly positive — about a ${probPct} chance of rising over ${f.horizon_days}d. Worth watching.`;
+    if (prob > 0.45) return `No clear direction — about ${probPct}. Waiting is a perfectly fine decision.`;
+    if (prob > 0.35) return `Slightly negative — only about a ${probPct} chance of rising over ${f.horizon_days}d. Be extra careful.`;
+    return `Leaning down — only about a ${probPct} chance of rising over ${f.horizon_days}d. Avoid chasing.`;
+  })();
   const quantProb = typeof f.quant_probability === "number" && Number.isFinite(f.quant_probability) ? f.quant_probability : f.probability;
   const versions = f.versions ?? {};
+  const horizons = [1, 7, 14, 21];
   return (
     <div className="mt-3 border-t border-term-border pt-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="term-label">Forecast · deterministic core (AI bounded, capped 20%)</p>
-        <SourceBadge source="SOURCE: DETERMINISTIC" />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="term-label">Forecast · math first (AI capped 20%)</p>
+          <SourceBadge source="SOURCE: DETERMINISTIC" />
+        </div>
+        <div className="flex items-center gap-1" role="group" aria-label="Forecast horizon">
+          {horizons.map((h) => (
+            <button
+              key={h}
+              type="button"
+              onClick={() => onHorizon && onHorizon(h)}
+              aria-pressed={h === (horizon ?? f.horizon_days)}
+              title={h === 1 ? "Tomorrow (1 trading day)" : `${h} trading days ahead`}
+              className={h === (horizon ?? f.horizon_days) ? "term-btn px-2 py-0.5 text-[11px]" : "term-btn-ghost px-2 py-0.5 text-[11px]"}
+            >
+              {h}D
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="mt-1 space-y-1 text-sm">
+      <div className="mt-2 rounded bg-term-panel2 p-3 text-sm text-term-text" role="status">
+        <b>In plain English:</b> {plainSummary}
+      </div>
+      <div className="mt-2 space-y-1 text-sm">
         <p>
           Forecast: <b className="text-term-text">{f.label}, {f.horizon_days} days</b> <FreshnessBadge p={f.provenance} />
         </p>
         <p className="text-2xl font-bold text-term-green">
-          Probability: {Number.isFinite(Number(f.probability)) ? `${(Number(f.probability) * 100).toFixed(0)}%` : "—"} <ProvenanceBadge p={f.provenance} />
+          Chance of rising: {probPct} <ProvenanceBadge p={f.provenance} />
         </p>
-        <p className="text-xs">Confidence: <b>{f.confidence}</b></p>
+        <p className="text-xs">Confidence: <b>{f.confidence}</b> <span className="text-term-muted">(how much the models agree)</span></p>
         <p className="text-xs">Data quality: <b className="text-term-cyan">{f.quality_grade}</b></p>
         <p className="text-xs">
           Model: <b>{versions.model_version ?? versions.model_name ?? f.provider}</b>
           <span className="text-term-muted"> · feature {versions.feature_version ?? "—"} · data {versions.data_version ?? "—"}</span>
         </p>
-        <p className="text-xs">AI provider: <b>{f.provider && f.provider !== "deterministic-engine" ? f.provider : "none — deterministic core"}</b></p>
-        <p className="text-xs text-term-muted">AI opinion: not requested on this page — bounded, capped 20%. Open Full Research for the (B) block.</p>
-        <p className="text-xs">Why: <span className="text-term-muted">{whyText}</span></p>
-        <p className="text-xs">Risks: <span className="text-term-muted">{riskText}</span></p>
       </div>
       <div className="mt-2">
         <BlendedForecastBar quantProb={quantProb} aiProb={f.ai_probability ?? null} aiWeight={f.ai_weight ?? 0} />
@@ -390,21 +417,23 @@ function ForecastCard({ price, currency, forecast: f, symbol }) {
       <div className="mt-1">
         <ProvenanceBadge p={f.provenance} />
       </div>
-      <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
-        <div className="term-panel-nested p-2">
-          <p className="font-bold text-term-green">▲ BULL — why</p>
+      <div className="mt-2 grid gap-2 text-sm md:grid-cols-2">
+        <div className="term-panel-nested p-3">
+          <p className="font-bold text-term-green">▲ Why it could go UP ({why.length})</p>
+          <p className="mt-0.5 text-[11px] text-term-muted">Each point quotes a real number from the models — in full sentences.</p>
           {why.length === 0 ? (
-            <p className="text-term-muted">unavailable</p>
+            <p className="mt-1 text-term-muted">No upward drivers right now.</p>
           ) : (
-            <ul className="list-disc pl-4 text-term-muted">{why.map((b, i) => <li key={`${b}-${i}`}>{b}</li>)}</ul>
+            <ul className="mt-1 list-disc space-y-1 pl-4 text-term-text">{why.map((b, i) => <li key={`${b}-${i}`}>{b}</li>)}</ul>
           )}
         </div>
-        <div className="term-panel-nested p-2">
-          <p className="font-bold text-term-red">▼ BEAR — risks</p>
+        <div className="term-panel-nested p-3">
+          <p className="font-bold text-term-red">▼ Why it could go DOWN ({risks.length})</p>
+          <p className="mt-0.5 text-[11px] text-term-muted">Risks and caution flags — read these before acting.</p>
           {risks.length === 0 ? (
-            <p className="text-term-muted">unavailable</p>
+            <p className="mt-1 text-term-muted">No major risks flagged.</p>
           ) : (
-            <ul className="list-disc pl-4 text-term-muted">{risks.map((b, i) => <li key={`${b}-${i}`}>{b}</li>)}</ul>
+            <ul className="mt-1 list-disc space-y-1 pl-4 text-term-text">{risks.map((b, i) => <li key={`${b}-${i}`}>{b}</li>)}</ul>
           )}
         </div>
       </div>

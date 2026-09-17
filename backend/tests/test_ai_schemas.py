@@ -27,7 +27,7 @@ def _valid_payload(**overrides):
 
 
 def test_valid_opinion_accepts_all_horizons():
-    for horizon in (5, 21, 63):
+    for horizon in (1, 7, 14, 21):
         opinion = AIOpinion.model_validate(_valid_payload(time_horizon_days=horizon))
         assert opinion.time_horizon_days == horizon
         assert 0.0 <= opinion.probability <= 1.0
@@ -40,7 +40,7 @@ def test_invalid_probability_rejected():
 
 
 def test_invalid_horizon_rejected():
-    for bad in (0, 1, 7, 30, 90, -5, "soon", None, 21.5):
+    for bad in (0, 5, 63, 30, 90, -5, "soon", None, 21.5):
         with pytest.raises(Exception):
             AIOpinion.model_validate(_valid_payload(time_horizon_days=bad))
 

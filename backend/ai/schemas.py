@@ -5,7 +5,7 @@ Spec (Milestones 4-5):
   top_bullish[5], top_risks[5], events, limitations}.
   No raw candles, full statements, or keys (enforced in evidence.py).
 - AIOpinion {direction bullish|bearish|neutral, probability 0-1,
-  time_horizon_days 5|21|63 only, catalysts, risks, evidence_ids,
+  time_horizon_days 1|7|14|21 only, catalysts, risks, evidence_ids,
   limitations}. Validators reject bad probs/horizons/claims without
   evidence_ids.
 
@@ -23,7 +23,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 Direction = Literal["bullish", "bearish", "neutral"]
-ALLOWED_HORIZONS = (5, 21, 63)
+ALLOWED_HORIZONS = (1, 7, 14, 21)
 
 DISCLAIMER = (
     "Not investment advice. This AI opinion is a bounded, evidence-grounded "
@@ -40,28 +40,28 @@ MAX_SHORT_STR = 280
 
 
 def _strict_horizon(value: Any) -> int:
-    """Coerce to an allowed horizon (5/21/63). Rejects truncation traps
+    """Coerce to an allowed horizon (1/7/14/21). Rejects truncation traps
     like 21.5, bools, and non-numeric strings instead of silent int()."""
     if isinstance(value, bool):
-        raise ValueError("time_horizon_days must be one of 5, 21, 63")
+        raise ValueError("time_horizon_days must be one of 1, 7, 14, 21")
     if isinstance(value, float):
         if not value.is_integer():
-            raise ValueError("time_horizon_days must be one of 5, 21, 63")
+            raise ValueError("time_horizon_days must be one of 1, 7, 14, 21")
         value = int(value)
     elif isinstance(value, str):
         text = value.strip()
         if not text.lstrip("+-").isdigit():
-            raise ValueError("time_horizon_days must be one of 5, 21, 63")
+            raise ValueError("time_horizon_days must be one of 1, 7, 14, 21")
         try:
             value = int(text)
         except ValueError as exc:
-            raise ValueError("time_horizon_days must be one of 5, 21, 63") from exc
+            raise ValueError("time_horizon_days must be one of 1, 7, 14, 21") from exc
     elif isinstance(value, int):
         pass
     else:
-        raise ValueError("time_horizon_days must be one of 5, 21, 63")
+        raise ValueError("time_horizon_days must be one of 1, 7, 14, 21")
     if value not in ALLOWED_HORIZONS:
-        raise ValueError("time_horizon_days must be one of 5, 21, 63")
+        raise ValueError("time_horizon_days must be one of 1, 7, 14, 21")
     return value
 
 
@@ -361,7 +361,7 @@ class ForecastOpinionRequest(BaseModel):
         try:
             return _strict_horizon(value)
         except ValueError as exc:
-            raise ValueError("horizon must be one of 5, 21, 63") from exc
+            raise ValueError("horizon must be one of 1, 7, 14, 21") from exc
 
     @field_validator("quant_prob", mode="before")
     @classmethod

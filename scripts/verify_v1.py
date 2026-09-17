@@ -405,7 +405,7 @@ def check_dod(root: Path, rep: Report) -> None:
         rep.add("DoD 4", "deterministic forecast + calibrated confidence", "PASS",
                 ["ForecastService + calibration (Brier/ECE/reliability) in "
                  "backend/forecasting/",
-                 "horizons 5/21/63 enforced; versions + disclosure on every row",
+                 "horizons 1/7/14/21 enforced; versions + disclosure on every row",
                  "evidence: python -m pytest backend/tests/test_forecast.py "
                  "backend/tests/test_forecast_api.py backend/tests/test_backtest_api.py -q"])
     elif core_ok:

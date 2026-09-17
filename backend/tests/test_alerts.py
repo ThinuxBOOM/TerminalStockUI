@@ -149,7 +149,7 @@ def test_model_and_migration_contract(isolated_db):
             assert "gen_random_uuid()" in lowered
             assert "condition in ('price_above', 'price_below', 'direction_above', " \
                 "'direction_below', 'change_pct_below')" in lowered
-            assert "check (horizon_days in (5, 21, 63))" in lowered
+            assert "check (horizon_days in (1, 7, 14, 21))" in lowered
             assert "on delete cascade" in lowered
             assert "ix_alerts_symbol_active" in lowered
             assert "ix_alert_events_alert" in lowered
@@ -250,7 +250,7 @@ def test_create_bad_horizon_422(isolated_db):
     try:
         resp = client.post("/api/alerts/", json={
             "symbol": "AAPL", "condition": "direction_above",
-            "threshold": 0.6, "horizon_days": 7,
+            "threshold": 0.6, "horizon_days": 5,
         })
         assert resp.status_code == 422, resp.text
     finally:

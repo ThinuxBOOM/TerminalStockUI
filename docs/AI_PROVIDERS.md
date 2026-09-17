@@ -22,7 +22,7 @@ JSON`), one evidence builder, one validator.
 | Profile | Identifier | Typical provider/model | Budget guidance |
 |---|---|---|---|
 | Quick Insight | `quick_insight` | `gemini` / `gemini-3.7-flash` | Small evidence packet, low randomness, cached by evidence hash |
-| Forecast Assist | `forecast_assist` | `gemini` / `gemini-3.7-flash` | Bounded opinion only (`time_horizon_days` ∈ 5/21/63); `ai_weight ≤ 0.20` |
+| Forecast Assist | `forecast_assist` | `gemini` / `gemini-3.7-flash` | Bounded opinion only (`time_horizon_days` ∈ 1/7/14/21); `ai_weight ≤ 0.20` |
 | Deep Research | `deep_research` | operator-selected | Larger packet; still within evidence limits below |
 | Report | `report` | operator-selected (scheduled allowed) | Scheduled reports are the only non-explicit call path |
 

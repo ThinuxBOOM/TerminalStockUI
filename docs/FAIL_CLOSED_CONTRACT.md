@@ -21,7 +21,7 @@
 | AI with no key | `423` | `AI disabled: no API key configured for gemini (...)` |
 | AI live-call failure (timeout/network, stub refused) | `502` | `AI insight failed: live model call unsuccessful` |
 | Stale/missing FX on rank | `423` | `FX_PROVENANCE_MISSING` |
-| Bad symbol / horizon / profile / market | `422` | `horizon must be one of [5, 21, 63]` |
+| Bad symbol / horizon / profile / market | `422` | `horizon must be one of [1, 7, 14, 21]` |
 | Unknown instrument / job | `404` | `unknown job_id` |
 
 ## Per surface

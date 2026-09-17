@@ -222,7 +222,7 @@ def _ai_row_to_out(row: AuditLog) -> dict:
 def list_forecasts(
     symbol: Optional[str] = Query(default=None, description="Exchange symbol filter, e.g. AAPL"),
     instrument_id: Optional[str] = Query(default=None),
-    horizon_days: Optional[int] = Query(default=None, description="One of 5, 21, 63"),
+    horizon_days: Optional[int] = Query(default=None, description="One of 1, 7, 14, 21"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -236,12 +236,12 @@ def list_forecasts(
         except (TypeError, ValueError):
             raise _HTTPException(
                 status_code=422,
-                detail=f"horizon_days must be one of [5, 21, 63], got {horizon_days}",
+                detail=f"horizon_days must be one of [1, 7, 14, 21], got {horizon_days}",
             ) from None
-        if horizon_int not in (5, 21, 63):
+        if horizon_int not in (1, 7, 14, 21):
             raise _HTTPException(
                 status_code=422,
-                detail=f"horizon_days must be one of [5, 21, 63], got {horizon_days}",
+                detail=f"horizon_days must be one of [1, 7, 14, 21], got {horizon_days}",
             )
         horizon_days = horizon_int
     try:

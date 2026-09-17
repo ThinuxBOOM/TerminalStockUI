@@ -86,7 +86,7 @@ Explicit-request-only AI call (Milestone 4/5). Body: `{ "profile": "quick_insigh
   (`backend/api/ai.py:189-225`); the `/api/securities/.../ai-*` paths above are the
   pre-implementation sketch and are NOT served (see Phase 4a table below).
 - Returns **strict-schema JSON** bounded opinion: `direction, probability (0–1),
-  time_horizon_days (5|21|63 only), catalysts[], risks[], evidence_ids[], limitations[]`.
+  time_horizon_days (1|7|14|21 only), catalysts[], risks[], evidence_ids[], limitations[]`.
 - Rejects claims without `evidence_ids`; rejects out-of-range probabilities/horizons.
 - `ai_weight ≤ 0.20`, server-enforced. Disabling AI leaves `/forecast` intact.
 - API keys never accepted from, or returned to, the client.
@@ -127,11 +127,11 @@ only** and never override the quantitative core.
 
 ### `GET /api/securities/{instrument_id}/forecast?horizon_days=21` (M3)
 
-- Implemented route is `GET /api/forecast/{symbol}?horizon=5|21|63`
+- Implemented route is `GET /api/forecast/{symbol}?horizon=1|7|14|21`
   (`backend/api/forecast.py:163-168`). Query key is `horizon` (not `horizon_days`).
-- Horizons outside `{5, 21, 63}` → `422` (not `400`) with
-  `{"detail": "horizon must be one of [5, 21, 63], got <value>"}` exactly
-  (`backend/api/forecast.py:170-174`; `FORECAST_HORIZONS = (5, 21, 63)` in
+- Horizons outside `{1, 7, 14, 21}` → `422` (not `400`) with
+  `{"detail": "horizon must be one of [1, 7, 14, 21], got <value>"}` exactly
+  (`backend/api/forecast.py:170-174`; `FORECAST_HORIZONS = (1, 7, 14, 21)` in
   `backend/forecasting/common.py:13`). The `400 INVALID_HORIZON` code in earlier
   drafts is docs-only — no such `error.code` is emitted by code (grep over
   `backend/` finds no `INVALID_HORIZON`).
@@ -169,7 +169,7 @@ only** and never override the quantitative core.
   (`Quick Insight`, `Deep Research`, `Forecast Assist`, `Report`) via server-side
   normalization (`backend/api/ai.py:72-76`). Unknown profile → `422`
   `{"detail": "unknown AI profile: ...; expected one of [...]"}`.
-- Returns strict-schema bounded opinion: `direction (bullish|bearish|neutral), probability (0–1), time_horizon_days (5|21|63 only), catalysts[], risks[], evidence_ids[] (non-empty), limitations[]`.
+- Returns strict-schema bounded opinion: `direction (bullish|bearish|neutral), probability (0–1), time_horizon_days (1|7|14|21 only), catalysts[], risks[], evidence_ids[] (non-empty), limitations[]`.
 - Server-enforced: reject claims without `evidence_ids`; reject out-of-range probabilities/horizons; `ai_weight ≤ 0.20`.
 - Keys: never accepted from, or returned to, the client. Request/response payloads are redacted in logs and audit rows.
 
@@ -177,9 +177,9 @@ only** and never override the quantitative core.
 
 - Implemented as `POST /api/ai/forecast_opinion` (`backend/api/ai.py:189-225`).
 - Same profile validation as `ai-insight` with `forecast_assist` profile semantics: may raise/lower/leave unchanged the displayed confidence but never overrides the deterministic forecast. Disabling AI leaves `/forecast` intact.
-- Horizon validation: `backend/api/ai.py:79-97` (`_check_horizon`) — any non-`5|21|63`
+- Horizon validation: `backend/api/ai.py:79-97` (`_check_horizon`) — any non-`1|7|14|21`
   value (bool, non-integer float, non-numeric string, out-of-range int) → `422`
-  `{"detail": "horizon must be one of 5, 21, 63"}` exactly. `quant_prob` outside
+  `{"detail": "horizon must be one of 1, 7, 14, 21"}` exactly. `quant_prob` outside
   `[0, 1]` → `422 {"detail": "quant_prob must be in [0, 1]"}` (`backend/api/ai.py:195-196`).
   Bad `ai_weight` → `422` with the `ValueError` text from `resolve_ai_weight`
   (`backend/api/ai.py:197-200`; presets/cap in `backend/ai/blend.py:17-46`).
@@ -188,7 +188,7 @@ only** and never override the quantitative core.
 
 - Implemented route `GET /api/ai/providers/performance[?exchange&horizon]`
   (`backend/api/ai.py:228-236`). Query keys are `exchange` and `horizon` (not
-  `horizon_days`); non-`5|21|63` `horizon` → `422 {"detail": "horizon must be one of 5, 21, 63"}`
+  `horizon_days`); non-`1|7|14|21` `horizon` → `422 {"detail": "horizon must be one of 1, 7, 14, 21"}`
   (`backend/api/ai.py:233-234`).
 - Historical provider/model scoreboard by exchange and horizon: `{rows, disclaimer}` where
   each row is `{provider, model, exchange, horizon, calls, stub_calls, errors, decided,
@@ -221,8 +221,8 @@ only** and never override the quantitative core.
 
 | `error.code` / `detail` | HTTP | Meaning | Source |
 |---|---|---|---|
-| (no code; `detail: "horizon must be one of [5, 21, 63], got ..."`) | 422 | `horizon` not in `{5, 21, 63}` on forecast/screener | `backend/api/forecast.py:170-174`, `backend/api/screener.py:82-86` |
-| (no code; `detail: "horizon must be one of 5, 21, 63"`) | 422 | bad AI horizon on `/api/ai/*` | `backend/api/ai.py:79-97,233-234` |
+| (no code; `detail: "horizon must be one of [1, 7, 14, 21], got ..."`) | 422 | `horizon` not in `{1, 7, 14, 21}` on forecast/screener | `backend/api/forecast.py:170-174`, `backend/api/screener.py:82-86` |
+| (no code; `detail: "horizon must be one of 1, 7, 14, 21"`) | 422 | bad AI horizon on `/api/ai/*` | `backend/api/ai.py:79-97,233-234` |
 | (no code; `detail: "unknown AI profile: ...; expected one of [...]"`) | 422 | unknown AI profile | `backend/api/ai.py:72-76` |
 | (no code; `detail: "unknown instrument_id"`) | 404 | `instrument_id` not in registry/DB | `backend/api/market_data.py:74-76,88-90` |
 | (no code; `detail: "unknown alert ..."` ) | 404 | `alert_id` not found / unparseable UUID | `backend/api/alerts.py:134-155` |
@@ -588,8 +588,8 @@ payload; locally it hits FastAPI directly.
 
 Request params: `market` (MIC in `{XNYS, XNAS, XSHG, XPAR, XAMS, XBRU}` or `ALL`/omitted;
 `backend/api/screener.py:36,56-66`), `min_direction` (float `0.0–1.0`, default `0.5`),
-`horizon` (`5|21|63`, default `21`), `limit` (`1–50`, default `20`).
-Errors: bad `horizon` → `422 {"detail": "horizon must be one of [5, 21, 63], got ..."}`;
+`horizon` (`1|7|14|21`, default `21`), `limit` (`1–50`, default `20`).
+Errors: bad `horizon` → `422 {"detail": "horizon must be one of [1, 7, 14, 21], got ..."}`;
 unknown `market` → `422 {"detail": "unknown market ...: expected one of [...] or ALL"}`.
 Per-symbol failures degrade to `skipped: [{symbol, reason}]`, never a batch 500.
 
@@ -618,7 +618,7 @@ Per-symbol failures degrade to `skipped: [{symbol, reason}]`, never a batch 500.
 - `POST /api/alerts[/] {symbol, condition, threshold, horizon_days=21, target_ccy="USD"}`
   → `{alert, provenance, disclosure}`. `condition ∈ {price_above, price_below,
   direction_above, direction_below, change_pct_below}` (`backend/api/alerts.py:60-70`);
-  `horizon_days ∈ {5,21,63}` for `direction_*` only; symbol must resolve via registry
+  `horizon_days ∈ {1, 7, 14, 21}` for `direction_*` only; symbol must resolve via registry
   else `422 {"detail": "unknown symbol ..."}` (`backend/api/alerts.py:261-265`);
   non-finite `threshold` → `422 {"detail": "threshold must be a finite number"}`
   (`backend/api/alerts.py:176-198,225-246`); bad `horizon_days`/`target_ccy` →
@@ -659,6 +659,24 @@ unknown → `422 {"detail": "unknown provider; expected one of [...]"}` (`backen
 - Dashboard: `GET /api/providers/health` → `{providers: [...]}` with zero-row stub
   (`backend/api/providers.py:13-23`); `POST /api/providers/health/test` reference-quote
   probe (`backend/api/providers.py:26-34`).
+
+### New surface 4: news — `GET /api/news` (`backend/api/news.py`)
+
+Market news via Alpaca News API (v1beta1, US only). Fail-closed: no keys → `423`
+(never stub news); upstream miss → `502`. Query: `symbols` (comma-list, max 10,
+non-US suffixes skipped), `limit` (1–50, default 20). Each article carries
+`title/summary/url/created_at/symbols/author` + deterministic keyword `sentiment`
+(-1..+1) and `sentiment_label` (bullish/bearish/neutral). `GET /api/news/symbol/{symbol}`
+is the per-symbol alias. Homepage renders this in Market news with mood badges.
+
+### New surface 5: signals — `GET /api/signals/top` (`backend/api/signals.py`)
+
+Top-5 research-further + Top-5 be-careful per market (MIC), deterministic:
+`signal = 0.8 * ensemble_direction_probability + 0.2 * news_sentiment_mapped_0_1`.
+Query: `horizon` (`1|7|14|21`, default `21`), `per_market` (1–10, default `5`).
+Bad horizon → `422`. Each row carries price/change, ensemble/news/signal
+probabilities, plain-English `verdict` + `what_it_means`, confidence, and
+provenance. Powers the homepage "What should I look at today?" shortlist.
 
 ---
 

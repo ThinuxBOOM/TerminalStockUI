@@ -181,22 +181,22 @@ def _check_profile(profile: str) -> str:
 
 def _check_horizon(horizon: Any) -> int:
     if isinstance(horizon, bool):
-        raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
+        raise HTTPException(status_code=422, detail="horizon must be one of 1, 7, 14, 21")
     if isinstance(horizon, float):
         if not horizon.is_integer():
-            raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
+            raise HTTPException(status_code=422, detail="horizon must be one of 1, 7, 14, 21")
         horizon = int(horizon)
     elif isinstance(horizon, str):
         text = horizon.strip()
         if not text.lstrip("+-").isdigit():
-            raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
+            raise HTTPException(status_code=422, detail="horizon must be one of 1, 7, 14, 21")
         horizon = int(text)
     try:
         value = int(horizon)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
-    if value not in (5, 21, 63):
-        raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
+        raise HTTPException(status_code=422, detail="horizon must be one of 1, 7, 14, 21")
+    if value not in (1, 7, 14, 21):
+        raise HTTPException(status_code=422, detail="horizon must be one of 1, 7, 14, 21")
     return value
 
 
@@ -499,8 +499,8 @@ def providers_performance(
     exchange: str | None = None, horizon: int | None = None,
     ai: AIRouter = Depends(get_ai_router),
 ) -> dict[str, Any]:
-    if horizon is not None and horizon not in (5, 21, 63):
-        raise HTTPException(status_code=422, detail="horizon must be one of 5, 21, 63")
+    if horizon is not None and horizon not in (1, 7, 14, 21):
+        raise HTTPException(status_code=422, detail="horizon must be one of 1, 7, 14, 21")
     try:
         rows = ai.performance.summary(exchange=exchange, horizon=horizon)
     except HTTPException:

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-FORECAST_HORIZONS = (5, 21, 63)
+FORECAST_HORIZONS = (1, 7, 14, 21)
 
 TARGET_DIRECTION = "direction_probability"
 TARGET_RETURN_RANGE = "expected_return_range"
@@ -28,7 +28,7 @@ class ForecastResult:
 
     Attributes:
         target: One of the TARGET_* constants.
-        horizon_days: Forecast horizon in trading days (5/21/63).
+        horizon_days: Forecast horizon in trading days (1/7/14/21).
         value: Payload (float probability, dict range, or regime label).
         formula: Human-readable method description.
         model_name / model_version: Which baseline produced this.

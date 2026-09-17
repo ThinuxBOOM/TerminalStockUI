@@ -76,6 +76,8 @@ from backend.api.markets import router as markets_router
 from backend.api.liquidation_proxy import router as liquidation_router
 from backend.api.market_index import router as market_index_router
 from backend.api.screener import router as screener_router
+from backend.api.news import router as news_router
+from backend.api.signals import router as signals_router
 
 
 def _cors_origins() -> list[str]:
@@ -154,6 +156,8 @@ def create_app() -> FastAPI:
     app.include_router(cron_router)
     app.include_router(fx_router)
     app.include_router(screener_router)
+    app.include_router(news_router)
+    app.include_router(signals_router)
     app.include_router(markets_router)
     app.include_router(liquidation_router)
     app.include_router(market_index_router)

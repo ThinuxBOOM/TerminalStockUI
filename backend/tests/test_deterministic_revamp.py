@@ -7,7 +7,7 @@ Covers the Backend-Agent-2 revamp (analytics + forecasting deterministic code):
   * calibration vectorization matches brute-force bin semantics (edge p=0/1)
   * DCF vectorized grid matches hand computation + Gordon NaN guard
   * analytics edge cases: bool fields missing, bad split factor dropped
-  * horizons 5/21/63 + provenance/version stamps preserved
+  * horizons 1/7/14/21 + provenance/version stamps preserved
   * perf: cached forecast <200ms on 250 bars; uncached hot path reported
 Synthetic data only, no network, no AI, deterministic.
 """
@@ -289,7 +289,7 @@ def test_invalid_split_factor_dropped_degraded():
 def test_horizons_versions_and_determinism_preserved():
     svc = ForecastService(market_service=_FakeMarket(make_ohlcv()))
     all_h = svc.forecast_all("AAPL", as_of=FIXED_AS_OF)
-    assert set(all_h) == set(FORECAST_HORIZONS) == {5, 21, 63}
+    assert set(all_h) == set(FORECAST_HORIZONS) == {1, 7, 14, 21}
     for horizon, res in all_h.items():
         assert res["horizon_days"] == horizon
         assert res["model_version"] == "ensemble-v2"

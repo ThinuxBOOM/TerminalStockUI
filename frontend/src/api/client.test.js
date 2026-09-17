@@ -99,9 +99,9 @@ describe("freshnessOf", () => {
   });
 });
 describe("constants and client defaults", () => {
-  it("FORECAST_HORIZONS is [5, 21, 63]", () => {
-    expect(FORECAST_HORIZONS).toEqual([5, 21, 63]);
-    expect(FORECAST_HORIZONS).toHaveLength(3);
+  it("FORECAST_HORIZONS is [1, 7, 14, 21]", () => {
+    expect(FORECAST_HORIZONS).toEqual([1, 7, 14, 21]);
+    expect(FORECAST_HORIZONS).toHaveLength(4);
     expect(FORECAST_HORIZONS).toContain(21);
   });
   it("MARKET_STATES covers the five badge states", () => {

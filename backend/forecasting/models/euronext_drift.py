@@ -203,7 +203,7 @@ class EuxDriftBaseline:
         as_of: str | None = None,
         data_version: str = "unspecified",
     ) -> dict[int, ForecastResult]:
-        """Direction probabilities for 5/21/63 trading days."""
+        """Direction probabilities for 1/7/14/21 trading days."""
         return {int(h): self.direction_probability(h, as_of, data_version)
                 for h in horizons}
 

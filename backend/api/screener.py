@@ -223,7 +223,7 @@ def screen(
         default=0.5, ge=0.0, le=1.0,
         description="Minimum direction_probability to include",
     ),
-    horizon: int = Query(default=21, description="Trading-day horizon: 5, 21 or 63"),
+    horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     limit: int = Query(default=20, ge=1, le=50, description="Max rows (cap 50)"),
     offset: int = Query(default=0, ge=0, le=200, description="Skip first N filtered rows"),
     registry: InstrumentRegistry = Depends(get_registry),

@@ -177,11 +177,11 @@ def test_screener_min_direction_filter():
 def test_screener_horizon_validation():
     client = _client()
     try:
-        for horizon in (5, 21, 63):
+        for horizon in (1, 7, 14, 21):
             resp = client.get("/api/screener", params={"horizon": horizon})
             assert resp.status_code == 200, (horizon, resp.text)
             assert resp.json()["horizon"] == horizon
-        for bad in (1, 7, 10, 30, 126):
+        for bad in (5, 63, 10, 30, 126):
             resp = client.get("/api/screener", params={"horizon": bad})
             assert resp.status_code == 422, (bad, resp.text)
     finally:

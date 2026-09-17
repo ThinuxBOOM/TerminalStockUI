@@ -119,8 +119,8 @@ def test_backtest_run_and_history_have_disclosure():
     try:
         run = client.post(
             "/api/backtest/run",
-            json={"symbol": "AAPL", "horizons": [5],
-                  "train_size": 100, "test_size": 21, "gap": 5},
+            json={"symbol": "AAPL", "horizons": [7],
+                  "train_size": 100, "test_size": 21, "gap": 7},
         )
         assert run.status_code == 200, run.text
         assert PROVENANCE_KEYS <= set(run.json()["provenance"])

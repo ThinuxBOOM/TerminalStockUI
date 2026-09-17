@@ -47,7 +47,7 @@ def test_audit_chain_and_redacted_payload(tmp_path):
 
 
 def test_forecast_horizons_and_ai_cap():
-    assert set((5, 21, 63))  # contract: horizons limited to 5/21/63
+    assert set((1, 7, 14, 21))  # contract: horizons limited to 1/7/14/21
     f = Forecast(horizon_days=21, target_date=date(2026, 10, 3),
                  model_version="m", feature_version="f", data_version="d", ai_weight=0.2)
     assert float(f.ai_weight) <= 0.20

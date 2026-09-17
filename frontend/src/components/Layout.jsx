@@ -12,14 +12,14 @@ import {
 } from "lucide-react";
 
 const NAV = [
-  { to: "/", label: "HOME", Icon: LayoutDashboard },
-  { to: "/welcome", label: "WELCOME", Icon: Sparkles },
-  { to: "/search", label: "SEARCH", Icon: Search },
-  { to: "/screener", label: "SCREENER", Icon: SlidersHorizontal },
-  { to: "/watchlist", label: "WATCHLIST", Icon: Star },
-  { to: "/backtest", label: "BACKTEST", Icon: FlaskConical },
-  { to: "/providers", label: "PROVIDERS", Icon: Plug },
-  { to: "/login", label: "LOGIN (STUB)", Icon: LogIn },
+  { to: "/", label: "HOME", Icon: LayoutDashboard, hint: "Start here" },
+  { to: "/search", label: "FIND STOCKS", Icon: Search, hint: "Search any company" },
+  { to: "/screener", label: "TOP PICKS", Icon: SlidersHorizontal, hint: "Best odds right now" },
+  { to: "/watchlist", label: "MY LIST", Icon: Star, hint: "Stocks you follow" },
+  { to: "/backtest", label: "TEST IDEAS", Icon: FlaskConical, hint: "How good were past calls?" },
+  { to: "/providers", label: "DATA HEALTH", Icon: Plug, hint: "Is the data fresh?" },
+  { to: "/welcome", label: "GUIDE", Icon: Sparkles, hint: "Learn in 2 minutes" },
+  { to: "/login", label: "SIGN IN (SOON)", Icon: LogIn, hint: "Coming soon" },
 ];
 
 const SearchBar = memo(function SearchBar({ q, setQ, onSubmit, searchRef }) {
@@ -101,9 +101,12 @@ function Layout({ children }) {
       </a>
       <header className="sticky top-0 z-40 border-b border-term-border bg-term-panel">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
-          <Link to="/" className="shrink-0 font-sans font-black text-base tracking-tight text-term-green" aria-label="OneMarket home">
-            ONE<span className="text-term-text">MARKET</span>
-            <span className="ml-2 font-sans text-2xs font-normal tracking-normal text-term-muted/70">TERMINAL v0.1</span>
+          <Link to="/" className="flex shrink-0 items-center gap-2" aria-label="OneMarket home">
+            <img src="/logo.svg" alt="OneMarket logo" className="h-8 w-8 rounded-lg" width="32" height="32" />
+            <span className="font-sans font-black text-base tracking-tight text-term-green">
+              ONE<span className="text-term-text">MARKET</span>
+              <span className="ml-2 font-sans text-2xs font-normal tracking-normal text-term-muted/70">EASY INVESTING</span>
+            </span>
           </Link>
           <SearchBar q={q} setQ={setQ} onSubmit={onSubmit} searchRef={searchRef} />
           <span
@@ -119,6 +122,7 @@ function Layout({ children }) {
             <NavLink
               key={n.to}
               to={n.to}
+              title={n.hint ?? n.label}
               className={({ isActive }) =>
                 `inline-flex items-center gap-1.5 rounded px-3 py-1 font-sans text-xs tracking-widest transition-colors duration-150 ${isActive ? "bg-term-greenDim text-term-green border-b-2 border-term-green" : "text-term-muted hover:text-term-text"}`
               }
@@ -136,7 +140,7 @@ function Layout({ children }) {
         role="contentinfo"
         className="mx-auto w-full max-w-7xl border-t border-term-border px-4 pb-6 pt-3 text-2xs text-term-muted"
       >
-        Deterministic analytics are the source of truth. AI opinions are bounded and capped. Not investment advice.
+        Plain-English stock insights — no jargon needed. Numbers show their source and freshness. AI opinions are bounded and capped at 20%. Not investment advice.
       </footer>
     </div>
   );

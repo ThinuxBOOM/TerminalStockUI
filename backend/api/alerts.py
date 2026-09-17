@@ -9,7 +9,7 @@ CRUD router (prefix ``/api/alerts``):
   DELETE /api/alerts/{alert_id}  204 (cascades fired events)
 
 ``condition`` is one of price_above / price_below / direction_above /
-direction_below / change_pct_below. ``horizon_days`` (5/21/63, default 21)
+direction_below / change_pct_below. ``horizon_days`` (1/7/14/21, default 21)
 is consumed by the direction_* conditions only. Create validates the symbol
 via the instrument registry (unknown -> 422) and rejects non-finite
 thresholds (NaN/Inf -> 422).
@@ -174,7 +174,7 @@ class AlertCreate(BaseModel):
     symbol: str = Field(min_length=1, description="e.g. AAPL")
     condition: AlertCondition
     threshold: float
-    horizon_days: int = Field(default=21, description="One of 5, 21, 63 (used by direction_*)")
+    horizon_days: int = Field(default=21, description="One of 1, 7, 14, 21 (used by direction_*)")
     target_ccy: str = Field(default="USD", description="ISO 4217 code, e.g. USD")
 
     @field_validator("symbol")

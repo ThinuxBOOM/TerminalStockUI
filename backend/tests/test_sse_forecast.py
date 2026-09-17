@@ -6,7 +6,7 @@ Synthetic bars only, no network, no AI. Covers:
   * SSE drift winsorization + wider bands
   * Service routing (.SS suffix or XSHG MIC) -> blended versions
   * Confidence penalized one notch on limit proximity
-  * Horizons 5/21/63 only + determinism
+  * Horizons 1/7/14/21 only + determinism
 """
 
 from __future__ import annotations
@@ -254,7 +254,7 @@ def test_sse_confidence_penalized_one_notch_on_limit_proximity():
 def test_sse_horizons_only_and_deterministic():
     svc = ForecastService(market_service=_FakeMarket(make_sse_limit_up()))
     all_h = svc.forecast_all("600519.SS", as_of=FIXED_AS_OF)
-    assert set(all_h) == set(FORECAST_HORIZONS) == {5, 21, 63}
+    assert set(all_h) == set(FORECAST_HORIZONS) == {1, 7, 14, 21}
     for horizon, res in all_h.items():
         assert res["horizon_days"] == horizon
         assert 0.0 <= res["direction_probability"] <= 1.0
@@ -269,7 +269,7 @@ def test_sse_horizons_only_and_deterministic():
         )
     assert first["model_version"] == second["model_version"]
     with pytest.raises(ValueError):
-        svc.forecast("600519.SS", 7, as_of=FIXED_AS_OF)
+        svc.forecast("600519.SS", 5, as_of=FIXED_AS_OF)
 
 
 def test_registry_exposes_both_models():

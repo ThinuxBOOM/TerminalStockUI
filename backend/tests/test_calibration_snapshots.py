@@ -161,7 +161,7 @@ def test_snapshot_venue_member_versions():
 def test_snapshot_bad_inputs_raise():
     market = FakeMarket()
     with pytest.raises(ValueError):
-        build_snapshot("AAPL", 7, market_service=market)
+        build_snapshot("AAPL", 5, market_service=market)
     with pytest.raises(ValueError):
         build_snapshot("   ", 21, market_service=market)
 
@@ -204,13 +204,13 @@ def test_upsert_idempotency_on_sqlite(isolated_db):
 
 
 def test_zero_window_snapshot_persists(isolated_db):
-    snap = build_snapshot("AAPL", 5, market_service=EmptyMarket())
+    snap = build_snapshot("AAPL", 7, market_service=EmptyMarket())
     Session = get_session_factory()
     db = Session()
     try:
         row = upsert_snapshot(db, snap)
         assert row.n_windows == 0 and row.brier is None
-        got = get_latest_snapshot(db, "AAPL", 5, snap["model_version"])
+        got = get_latest_snapshot(db, "AAPL", 7, snap["model_version"])
         assert got is not None and got.reliability == []
     finally:
         db.close()
@@ -232,7 +232,7 @@ def test_model_and_migration_contract(isolated_db):
         lowered = text.lower()
         assert "create table if not exists calibration_snapshots" in lowered
         assert "gen_random_uuid()" in lowered
-        assert "check (horizon_days in (5, 21, 63))" in lowered
+        assert "check (horizon_days in (1, 7, 14, 21))" in lowered
         assert "uq_calibration_snapshot" in lowered
         assert "unique (symbol, horizon_days, model_version, feature_version, data_version)" in lowered
         assert "reliability" in lowered and "members" in lowered
@@ -266,7 +266,7 @@ def test_cron_calibrate_single_symbol_200(isolated_db, monkeypatch):
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["ok"] is True
-        # Honest counting: calibrated = n>=10 only (h=63 stub n=1 is weak,
+        # Honest counting: calibrated = n>=10 only (thin windows are weak,
         # not skill). calibrated + unscored covers all horizons.
         assert body["calibrated"] + body["unscored"] == len(FORECAST_HORIZONS)
         assert set(body["snapshots"]) == {f"AAPL:{h}" for h in FORECAST_HORIZONS}
@@ -344,7 +344,7 @@ def test_forecast_calibration_empty_then_present(isolated_db, monkeypatch):
         assert again["calibration"] == snap["reliability"]
         assert len(again["calibration"]) == 10
         # Other horizons still empty (lookup is per-horizon).
-        other = client.get("/api/forecast/AAPL", params={"horizon": 5}).json()
+        other = client.get("/api/forecast/AAPL", params={"horizon": 7}).json()
         assert other["calibration"] == []
     finally:
         _teardown()

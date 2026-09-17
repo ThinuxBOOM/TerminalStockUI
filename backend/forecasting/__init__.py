@@ -1,6 +1,6 @@
 """Validated forecasting engine baselines (Milestone 3, no AI).
 
-Targets: direction probability (5/21/63 trading days), expected-return
+Targets: direction probability (1/7/14/21 trading days), expected-return
 range, volatility regime, large-drawdown probability.
 Models: historical-drift, momentum, regularized logistic regression,
 gradient-boosted direction (stub), empirical quantile bands.

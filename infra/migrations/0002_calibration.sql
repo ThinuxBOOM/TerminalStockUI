@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS calibration_snapshots (
   snapshot_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   model_version TEXT NOT NULL,
   feature_version TEXT NOT NULL,
-  horizon_days  INT NOT NULL CHECK (horizon_days IN (5, 21, 63)),
+  horizon_days  INT NOT NULL CHECK (horizon_days IN (1, 7, 14, 21)),
   symbol        TEXT NOT NULL,          -- exchange symbol, e.g. 'AAPL'
   exchange_mic  TEXT NOT NULL,          -- XNYS / XNAS / XSHG / XPAR / XAMS / XBRU ...
   brier         NUMERIC NULL,           -- mean((p - y)^2); NULL when n_windows = 0

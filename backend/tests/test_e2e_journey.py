@@ -153,13 +153,13 @@ def test_e2e_journey_search_to_audit():
         # 5. Backtest run + history.
         resp = client.post(
             "/api/backtest/run",
-            json={"symbol": "AAPL", "horizons": [5, 21],
+            json={"symbol": "AAPL", "horizons": [7, 21],
                   "train_size": 100, "test_size": 21, "gap": 21},
         )
         assert resp.status_code == 200, resp.text
         run = resp.json()
         assert run["symbol"] == "AAPL"
-        assert set(run["results"]) == {"5", "21"}
+        assert set(run["results"]) == {"7", "21"}
         assert run["model_version"] and run["feature_version"] and run["data_version"]
         _assert_provenance(run, "backtest-run")
         resp = client.get("/api/backtest/AAPL")

@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS alerts (
   exchange_mic   TEXT NOT NULL DEFAULT '', -- XNYS / XNAS / XSHG / XPAR / XAMS / XBRU ...
   condition      TEXT NOT NULL CHECK (condition IN ('price_above', 'price_below', 'direction_above', 'direction_below', 'change_pct_below')),
   threshold      NUMERIC NOT NULL,
-  horizon_days   INT NOT NULL DEFAULT 21 CHECK (horizon_days IN (5, 21, 63)), -- used by direction_*
+  horizon_days   INT NOT NULL DEFAULT 21 CHECK (horizon_days IN (1, 7, 14, 21)), -- used by direction_*
   target_ccy     TEXT NOT NULL DEFAULT 'USD',
   is_active      BOOLEAN NOT NULL DEFAULT TRUE,
   cooldown_hours INT NOT NULL DEFAULT 24,

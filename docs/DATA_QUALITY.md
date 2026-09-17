@@ -66,7 +66,7 @@ Spec §§5 (M3), §6 testing, §7 definition of done.
 - Reported per `(model_version, horizon_days)`: **Brier score**, **calibration
   error (ECE)**, and a **reliability table** (`bin_low/bin_high/count/
   mean_predicted/fraction_positive`). Helpers: `backend/forecasting/calibration/`.
-- Targets: direction probability (5/21/63 trading days), expected-return range,
+- Targets: direction probability (1/7/14/21 trading days), expected-return range,
   volatility regime, large-drawdown probability, relative performance vs benchmark.
 - The performance dashboard shows failures as well as successes; grade-D inputs
   block forecasts (`409 FORECAST_BLOCKED`) instead of emitting uncalibrated numbers.

@@ -149,7 +149,9 @@ def test_bars_backfilled_on_demand_then_db_served(isolated_db, monkeypatch):
 
     def _fake_fetch(provider_symbol: str, period="2y", interval="1d"):
         assert period == "2y" and interval == "1d"
-        base = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        from datetime import timedelta as _td
+
+        base = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - _td(days=119)
         bars, price = [], 330.0
         for i in range(120):
             o = round(price, 2)

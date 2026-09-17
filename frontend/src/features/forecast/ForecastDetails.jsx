@@ -118,7 +118,7 @@ function ForecastDetails({ symbol }) {
   const hasAnyCalibration = chartRows.length > 0 || calHistory.length > 0;
   const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
   const recentBacktest = useMemo(
-    // Match the viewed horizon: a 5d run must not vouch for the 63d tab.
+    // Match the viewed horizon: a 1d run must not vouch for the 21d tab.
     () => getRecentBacktests().find(
       (r) => r.symbol === normalizedSymbol && (r.horizons.length === 0 || r.horizons.includes(horizon))
     ),

@@ -134,20 +134,20 @@ def test_refresh_forecast_real_ok_only_when_all_horizons_complete():
     full = refresh_forecast("AAPL", forecast=_Full())
     assert full["job"] == "refresh_forecast"
     assert full["ok"] is True
-    assert full["horizons_completed"] == [5, 21, 63]
+    assert full["horizons_completed"] == [1, 7, 14, 21]
     assert full["errors"] == {}
     _assert_envelope(full, "refresh_forecast")
 
     class _Partial:
         def forecast(self, symbol: str, horizon: int) -> dict:
-            if horizon == 63:
+            if horizon == 14:
                 raise ValueError("no bars")
             return {"symbol": symbol, "horizon_days": horizon}
 
     partial = refresh_forecast("AAPL", forecast=_Partial())
     assert partial["ok"] is False
-    assert partial["horizons_completed"] == [5, 21]
-    assert "63" in partial["errors"]
+    assert partial["horizons_completed"] == [1, 7, 21]
+    assert "14" in partial["errors"]
     _assert_envelope(partial, "refresh_forecast")
 
 

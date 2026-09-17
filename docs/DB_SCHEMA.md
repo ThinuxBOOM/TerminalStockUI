@@ -1,7 +1,7 @@
 # OneMarket Analyzer — DB schema (0001–0006 revamp)
 
 Additive-only revamp (Backend Agent 7). No existing table/column was renamed,
-removed, or retyped. Preserved intact: `forecasts.horizon_days IN (5,21,63)`,
+removed, or retyped. Preserved intact: `forecasts.horizon_days IN (1, 7, 14, 21)`,
 `ai_weight <= 0.20`, alerts condition/horizon CHECKs, calibration horizon
 CHECK, and the `audit_logs` append-only hash chain.
 
@@ -104,9 +104,9 @@ erDiagram
   revamp file going forward: it is the canonical UNION (`0006_snapshots.sql`
   stays as the writer-contract draft; its CREATEs are no-ops after revamp).
 
-Preserved CHECKs (unchanged): `forecasts.horizon_days IN (5,21,63)`,
+Preserved CHECKs (unchanged): `forecasts.horizon_days IN (1, 7, 14, 21)`,
 `ai_weight >= 0 AND ai_weight <= 0.20`, `alerts.condition IN (...)`,
-`alerts.horizon_days IN (5,21,63)`, `calibration_snapshots.horizon_days IN (5,21,63)`,
+`alerts.horizon_days IN (1, 7, 14, 21)`, `calibration_snapshots.horizon_days IN (1, 7, 14, 21)`,
 `provider_secrets/provider_budgets provider IN (gemini,openai,anthropic,xai)`.
 
 ## Retention (backend/observability/retention.py)
