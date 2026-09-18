@@ -15,9 +15,19 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from datetime import date, datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+#: Reserve inside a budgeted serverless tick for the sequential persist
+#: phase (DB upserts + snapshot saves + commits). The fetch pool gets
+#: ``budget - reserve``; the persist loop breaks at the hard deadline and
+#: defers the remainder ("persist deferred (retry next tick)") so the HTTP
+#: response always starts inside the caller's curl/Vercel window. Progress
+#: accumulates across ticks (idempotent upserts) — a deferred symbol is
+#: refetched next run, never lost.
+_PERSIST_RESERVE_S = 12.0
 
 #: Default ingest universe (overridable via the ``INGEST_SYMBOLS`` env
 #: comma-list). Canonical provider forms (Yahoo suffixes included).
@@ -758,11 +768,15 @@ def ingest_symbols(
     problems (unknown instrument, fetch failure, row failure) or for an
     unreachable DB (all symbols then land in ``errors``).
 
-    ``budget_s`` caps the parallel fetch phase (for sharded 50-symbol
-    serverless ticks): unresolved symbols land in ``errors`` as
-    "fetch budget exceeded" instead of the legacy sequential fallback,
-    which could run minutes past maxDuration on a cold batch. None keeps
-    the legacy fallback (small default-universe ticks).
+    ``budget_s`` caps the whole budgeted tick — parallel fetch phase plus
+    the sequential persist phase — for sharded 50-symbol serverless ticks:
+    symbols still unresolved when the fetch pool times out land in
+    ``errors`` as "fetch budget exceeded", and symbols still unpersisted at
+    the hard deadline land in ``errors`` as "persist deferred (retry next
+    tick)", instead of the legacy behavior of holding the HTTP response open
+    minutes past maxDuration (curl exit 28 with zero bytes). None keeps the
+    legacy unbounded behavior (small default-universe ticks, CLI backfills).
+    Progress accumulates across ticks via idempotent upserts.
     """
     if registry is None:
         from backend.instruments.registry import InstrumentRegistry
@@ -796,12 +810,23 @@ def ingest_symbols(
 
     ingested: dict[str, int] = {}
     errors: dict[str, str] = {}
-    # Parallel fetch, sequential persist: Yahoo fetches are I/O-bound and
-    # dominate wall time (9 symbols x 5-15s sequential = 45-135s > Vercel
-    # maxDuration 60). Fetch in a 4-worker pool with a 15s per-symbol
-    # join, then upsert on this thread's single DB session (sessions are
-    # not thread-safe). DB writes stay sequential and race-safe.
     try:
+        tick_budget: float | None = None
+        if budget_s is not None:
+            try:
+                tick_budget = max(0.0, float(budget_s))
+            except (TypeError, ValueError):
+                tick_budget = None
+        tick_started = time.monotonic()
+
+        def _tick_expired() -> bool:
+            return tick_budget is not None and (time.monotonic() - tick_started) >= tick_budget
+
+        # Parallel fetch, sequential persist: Yahoo fetches are I/O-bound and
+        # dominate wall time (9 symbols x 5-15s sequential = 45-135s > Vercel
+        # maxDuration 60). Fetch in a 4-worker pool with a bounded join, then
+        # upsert on this thread's single DB session (sessions are not
+        # thread-safe). DB writes stay sequential and race-safe.
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _done
         from backend.security.validation import sanitize_error as _sanerr
 
@@ -865,12 +890,15 @@ def ingest_symbols(
             workers = max(1, min(4, len(resolved)))
             try:
                 pool_timeout = 55.0
-                if budget_s is not None:
-                    try:
-                        pool_timeout = max(5.0, min(55.0, float(budget_s)))
-                    except (TypeError, ValueError):
-                        pool_timeout = 55.0
-                with _TPE(max_workers=workers) as _pool:
+                if tick_budget is not None:
+                    # Leave the persist reserve for Phase 2 commits so the
+                    # tick deadline covers fetch AND persist (a fetch phase
+                    # that eats the whole budget would defer everything it
+                    # just fetched — wasted vendor calls, zero durable
+                    # progress).
+                    pool_timeout = max(5.0, min(55.0, tick_budget - _PERSIST_RESERVE_S))
+                _pool = _TPE(max_workers=workers)
+                try:
                     _futs = { _pool.submit(_do_fetch, r): r for r in resolved }
                     for _fut in _done(_futs, timeout=pool_timeout):
                         try:
@@ -887,6 +915,18 @@ def ingest_symbols(
                             errors[item_raw] = reason
                             continue
                         fetched[item_raw] = (provider_symbol, bars, bar_source)
+                finally:
+                    # Never let straggler vendor calls delay the HTTP
+                    # response: the legacy `with`-block shutdown(wait=True)
+                    # held the response open until every in-flight fetch
+                    # finished — on Yahoo throttle that stacked minutes past
+                    # maxDuration (curl exit 28, zero bytes). Cancel pending
+                    # work and orphan running calls; the remainder is already
+                    # marked budget-exceeded below and retries next tick.
+                    try:
+                        _pool.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
             except Exception:
                 if budget_s is not None:
                     # Serverless tick: mark the remainder for the next shard
@@ -914,9 +954,17 @@ def ingest_symbols(
                             except Exception:
                                 errors[r] = "fetch failed"
 
-        # Phase 2: persist sequentially on this thread's session.
+        # Phase 2: persist sequentially on this thread's session. On a
+        # budgeted tick the hard deadline applies here too: sequential
+        # commits for ~50 symbols can otherwise push the response past the
+        # caller's curl budget even after a fast fetch phase. Deferred
+        # symbols are refetched next tick (idempotent) — partial durable
+        # progress beats a timed-out tick with nothing.
         for raw in wanted:
             if raw in errors or raw not in fetched:
+                continue
+            if _tick_expired():
+                errors[raw] = "persist deferred (retry next tick)"
                 continue
             try:
                 provider_symbol, bars, bar_source = fetched[raw]
