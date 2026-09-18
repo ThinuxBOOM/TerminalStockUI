@@ -80,11 +80,22 @@ than frequent. All times UTC.
 
 | What runs | Where | Cadence | Why this time |
 |---|---|---|---|
-| `GET /api/cron/ingest` (universe bars; Alpaca-first for US when `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` resolve, else yfinance/AKShare/Stooq) | Vercel cron | `0 1 * * *` (01:00) | 21:00 ET — after the US close, after Alpaca daily bars finalize; SSE/Euronext long closed |
-| `GET /api/cron/calibrate` (walk-forward snapshots) | Vercel cron | `0 2 * * *` (02:00) | After ingest lands, before the EU open |
+| `GET /api/cron/ingest` (universe bars; Alpaca-first for US when `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` resolve, else yfinance/AKShare/Stooq) | Vercel cron | `30 5 * * *` (05:30) | After the US close, after daily bars finalize; SSE/Euronext long closed |
+| `GET /api/cron/ingest?universe=sp500&shard=N&shards=10` (S&P 500 warm, 10 parallel shards) | GH Actions `sp500-ingest.yml` | `0 6 * * *` (06:00) | After the default-universe ingest; sharded so each tick fits serverless budgets |
+| `GET /api/cron/calibrate` (walk-forward snapshots) | Vercel cron | `30 6 * * *` (06:30) | After ingest lands, before the EU open |
 | `GET /api/cron/evaluate` (alerts) | GH Actions `alerts.yml` | every 15 min | Intraday cadence Vercel Hobby can't host (2-slot cap) |
 | `GET /api/cron/snapshot` (compressed 1d snapshot per universe symbol, feed-attributed in `market_snapshots.source`) | GH Actions `snapshots.yml` | hourly (`7 * * * *`) | Bounds replay-point staleness to ~1h for scoring/audits |
+| `GET /api/cron/score` (matured-forecast scoring) | GH Actions `score.yml` | `0 7 * * *` (07:00) | After calibrate lands |
+| `GET /api/cron/health` (provider health probe) | GH Actions `health.yml` | `0 8 * * *` (08:00) | After score; feeds the health dashboard |
 | `POST /api/cron/retention` `{"apply": true}` | GH Actions `retention.yml` | weekly Sun 03:00 | Windows are days-to-years wide; weekly keeps DELETE sets small |
+
+Local hosting: every row above runs on the machine itself via
+`scripts/cron/local-cron.*` (Task Scheduler on Windows with
+`install-windows-tasks.ps1`, cron on Linux with `crontab.local.example`)
+or the self-hosted-runner example
+(`.github/workflows/local-selfhosted.yml.example`) — see
+`scripts/cron/README.md`. GitHub-hosted runners cannot reach localhost,
+so keep exactly ONE scheduler active per database.
 
 Snapshots compress **at capture** (smallest of gzip+json /
 delta-q100+gzip / zlib / zstd wins, ~30–60 rows/KB), so no monthly

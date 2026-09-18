@@ -41,6 +41,7 @@ on:
   #   - cron: "*/15 * * * *"   # evaluate (alerts)
   #   - cron: "7 * * * *"      # snapshot
   #   - cron: "30 5 * * *"     # ingest
+  #   - cron: "0 6 * * *"      # sp500 warm (10 shards, sequential below)
   #   - cron: "30 6 * * *"     # calibrate
   #   - cron: "0 7 * * *"      # score
   #   - cron: "0 8 * * *"      # health
@@ -77,6 +78,19 @@ jobs:
             test "$code" = "200"
           }
           hit ingest /api/cron/ingest GET
+          # sp500 warm (sp500-ingest.yml daily 06:00, 10 shards): sequential
+          # here — one runner, no matrix. A single shard failing never
+          # blocks the rest (bars persist per symbol; next tick continues).
+          if [ -z "$ONLY" ] || [ "$ONLY" = "sp500" ]; then
+            for shard in 1 2 3 4 5 6 7 8 9 10; do
+              code=""
+              code=$(curl -s --max-time 58 --connect-timeout 10 -o /tmp/local.json -w "%{http_code}" \
+                -H "Authorization: Bearer $CRON_SECRET" \
+                "$APP_URL/api/cron/ingest?universe=sp500&shard=$shard&shards=10") || code="curl-fail"
+              echo "[sp500-shard-$shard] HTTP ${code:-<none>}"; head -c 1000 /tmp/local.json 2>/dev/null || true; echo ""
+              if [ "$code" != "200" ]; then echo "[sp500-shard-$shard] FAILED (continues; next tick retries)"; fi
+            done
+          fi
           hit calibrate /api/cron/calibrate GET
           hit snapshot /api/cron/snapshot GET
           hit evaluate /api/cron/evaluate GET
