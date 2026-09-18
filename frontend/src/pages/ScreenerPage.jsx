@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { FORECAST_HORIZONS, getScreener } from "../api/client";
+import AdSlot from "../components/AdSlot";
+import { useAuth } from "../hooks/useAuth";
 import CurrencyValue from "../components/CurrencyValue";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
@@ -47,7 +49,8 @@ function screenerErrorDetail(error) {
 function ScreenerPage() {
   const [market, setMarket] = useState("");
   const [horizon, setHorizon] = useState(21);
-  const SCREENER_LIMIT = 20;
+  // Tier mirror for the single below-filters ad (guest-safe, zero requests).
+  const { tier } = useAuth();  const SCREENER_LIMIT = 20;
   const [offset, setOffset] = useState(0);
   // Slider input stays responsive while the backend query fires on a
   // debounced value: a full-universe scan takes ~30s cold, so every 0.01
@@ -141,7 +144,7 @@ function ScreenerPage() {
       "aria-label": "Minimum direction probability (numeric)",
       className: "term-input w-20"
     }
-  )))), /* @__PURE__ */ React.createElement("p", { className: "mt-2 text-[11px] text-term-muted" }, "Deterministic ensemble forecast at ", horizon, "d \xB7 ranked by direction probability desc \xB7 seed universe only.")), /* @__PURE__ */ React.createElement("div", { className: "mt-4" }, screen.isLoading && /* @__PURE__ */ React.createElement(Skeleton, { label: "scanning universe\u2026", lines: 6 }), screen.isError && /* @__PURE__ */ React.createElement(
+  )))), /* @__PURE__ */ React.createElement("p", { className: "mt-2 text-[11px] text-term-muted" }, "Deterministic ensemble forecast at ", horizon, "d \xB7 ranked by direction probability desc \xB7 seed universe only.")), /* @__PURE__ */ React.createElement(AdSlot, { slotId: "screener-below-filters", format: "in-feed", tier: tier, slotIndex: 2 }), /* @__PURE__ */ React.createElement("div", { className: "mt-4" }, screen.isLoading && /* @__PURE__ */ React.createElement(Skeleton, { label: "scanning universe\u2026", lines: 6 }), screen.isError && /* @__PURE__ */ React.createElement(
     ErrorState,
     {
       title: "Screener unavailable",

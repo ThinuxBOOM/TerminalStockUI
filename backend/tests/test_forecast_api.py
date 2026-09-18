@@ -12,6 +12,7 @@ from backend.forecasting.backtesting import LeakageError, assert_no_leakage
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.forecasting.features import build_features
 from backend.forecasting.service import reset_forecast_service
+from backend.tests.auth_helpers import inject_admin_auth
 from backend.tests.fixtures import make_ohlcv
 
 
@@ -19,6 +20,7 @@ def _client() -> TestClient:
     reset_forecast_service()
     app = FastAPI()
     app.include_router(router)
+    inject_admin_auth(app)
     return TestClient(app)
 
 

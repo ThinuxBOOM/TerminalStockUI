@@ -13,8 +13,12 @@ from backend.market_data.providers.base import CircuitBreaker
 
 
 def _client() -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     reset_deps()
-    return TestClient(create_app())
+    app = create_app()
+    inject_admin_auth(app)
+    return TestClient(app)
 
 
 def test_health_endpoint_shape():

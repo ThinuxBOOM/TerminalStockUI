@@ -68,6 +68,7 @@ def _stub_service() -> MarketDataService:
 def _client() -> TestClient:
     """Full app with live market data (no network) + no-key AI (423 path)."""
     from backend.api import deps as deps_module
+    from backend.tests.auth_helpers import inject_admin_auth
 
     reset_deps()
     reset_forecast_service()
@@ -87,6 +88,7 @@ def _client() -> TestClient:
 
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: stub
+    inject_admin_auth(app)
     client = TestClient(app)
     client._empty_store = empty_store  # type: ignore[attr-defined]
     return client

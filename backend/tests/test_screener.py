@@ -98,6 +98,8 @@ def _clear_screener_cache() -> None:
 
 def _client(svc: MarketDataService | None = None,
             registry: InstrumentRegistry | None = None) -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     reset_deps()
     reset_forecast_service()
     _clear_screener_cache()
@@ -110,6 +112,7 @@ def _client(svc: MarketDataService | None = None,
     app.include_router(router)
     app.dependency_overrides[get_market_service] = lambda: stub
     app.dependency_overrides[get_registry] = lambda: reg
+    inject_admin_auth(app)
     return TestClient(app)
 
 

@@ -64,9 +64,12 @@ def _stub_service() -> MarketDataService:
 
 
 def _client() -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     reset_deps()
     app = create_app()
     app.dependency_overrides[get_market_service] = _live_service
+    inject_admin_auth(app)
     return TestClient(app)
 
 
@@ -172,11 +175,14 @@ def test_passive_health_records_do_not_alter_provenance():
 
 
 def test_providers_health_rows_carry_enriched_schema():
+    from backend.tests.auth_helpers import inject_admin_auth
+
     reset_deps()
     app = create_app()
     app.dependency_overrides[get_market_service] = _live_service
     from fastapi.testclient import TestClient
 
+    inject_admin_auth(app)
     client = TestClient(app)
     client.get("/api/market_data/quote", params={"symbol": "AAPL"})
     resp = client.get("/api/providers/health")

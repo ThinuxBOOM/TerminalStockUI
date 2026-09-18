@@ -1,6 +1,8 @@
 import React from "react";
 import { Link, useParams } from "react-router-dom";
 import ForecastDetails from "../features/forecast/ForecastDetails";
+import AdSlot from "../components/AdSlot";
+import { useAuth } from "../hooks/useAuth";
 
 function safeDecode(v) {
   try {
@@ -14,6 +16,8 @@ function ForecastDetailsPage() {
   const { symbol = "AAPL" } = useParams();
   const decoded = safeDecode(symbol);
   const enc = encodeURIComponent(decoded);
+  // Tier mirror for the single in-article ad below (guest-safe, zero requests).
+  const { tier } = useAuth();
   return (
     <div>
       <nav className="mb-3 flex flex-wrap items-center gap-2 text-xs" aria-label="Breadcrumb">
@@ -27,6 +31,9 @@ function ForecastDetailsPage() {
       <div id="research">
         <ForecastDetails symbol={decoded} />
       </div>
+      {/* V2 compliant ads: one in-article slot below the research (slot index
+          2 of the per-tier budget). Never inside table rows. */}
+      <AdSlot slotId="forecast-inarticle" format="in-article" tier={tier} slotIndex={2} />
     </div>
   );
 }

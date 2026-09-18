@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { getAuditForecasts, getProvidersHealth, getQuote } from "../api/client";
 import { getTopSignals } from "../api/signals";
 import { getNews } from "../api/news";
+import AdSlot from "../components/AdSlot";
+import { useAuth } from "../hooks/useAuth";
 import StatusPill from "../components/StatusPill";
 import MarketLiquidityPanel from "../components/MarketLiquidityPanel";
 import MarketIndicesSection from "../components/AspiChart";
@@ -121,6 +123,8 @@ const WatchlistRow = memo(WatchlistRowInner);
 function HomePage() {
   const navigate = useNavigate();
   const [signalHorizon, setSignalHorizon] = useState(21);
+  // Tier mirror for the single in-feed ad below (guest-safe, zero requests).
+  const { tier } = useAuth();
   const providers = useQuery({
     queryKey: ["providers-health"],
     queryFn: getProvidersHealth,
@@ -233,6 +237,11 @@ function HomePage() {
         onHorizon={setSignalHorizon}
         onRetry={() => void signals.refetch()}
       />
+
+      {/* V2 compliant ads: one in-feed slot between TopSignals and the
+          watchlist/news grid (slot index 2 of the per-tier budget). Never
+          inside a collapsed CollapsibleSection. */}
+      <AdSlot slotId="home-infeed" format="in-feed" tier={tier} slotIndex={2} />
 
       {/* My List (watchlist, separate) + Market news side by side */}
       <div className="grid min-w-0 items-start gap-6 lg:grid-cols-2">

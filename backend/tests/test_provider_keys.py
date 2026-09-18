@@ -39,8 +39,11 @@ def isolated(tmp_path, monkeypatch):
 
 def _client() -> TestClient:
     from backend.api.main import create_app
+    from backend.tests.auth_helpers import inject_admin_auth
 
-    return TestClient(create_app())
+    app = create_app()
+    inject_admin_auth(app)
+    return TestClient(app)
 
 
 # --- validation matrix -----------------------------------------------------

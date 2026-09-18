@@ -44,8 +44,12 @@ def _clean_env(monkeypatch):
 
 
 def _client() -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     reset_deps()
-    return TestClient(create_app())
+    app = create_app()
+    inject_admin_auth(app)
+    return TestClient(app)
 
 
 # --- auth -------------------------------------------------------------------

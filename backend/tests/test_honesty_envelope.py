@@ -26,6 +26,7 @@ from backend.cache import InMemoryCache
 from backend.db.session import get_db
 from backend.forecasting.service import reset_forecast_service
 from backend.instruments.registry import InstrumentRegistry
+from backend.tests.auth_helpers import inject_admin_auth
 from backend.market_data.fx.convert import compare_cross_market, rank_cross_market
 from backend.market_data.health import ProviderHealthTracker
 from backend.market_data.providers.base import ProviderError
@@ -100,6 +101,7 @@ def _teardown() -> None:
 def test_analytics_has_disclosure_and_provenance():
     app = FastAPI()
     app.include_router(analytics_router)
+    inject_admin_auth(app)
     client = TestClient(app)
     try:
         body = client.get("/api/analytics/AAPL").json()
@@ -115,6 +117,7 @@ def test_backtest_run_and_history_have_disclosure():
     reset_backtest_history()
     app = FastAPI()
     app.include_router(backtest_router)
+    inject_admin_auth(app)
     client = TestClient(app)
     try:
         run = client.post(
@@ -194,6 +197,7 @@ def _screener_client(svc=None, registry=None) -> TestClient:
     app.include_router(screener_router)
     app.dependency_overrides[get_market_service] = lambda: stub
     app.dependency_overrides[get_registry] = lambda: reg
+    inject_admin_auth(app)
     return TestClient(app)
 
 

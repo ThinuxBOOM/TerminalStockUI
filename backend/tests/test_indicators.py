@@ -30,8 +30,11 @@ def _frame(n: int = 120, seed: int = 42) -> pd.DataFrame:
 
 
 def _analytics_client() -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     app = FastAPI()
     app.include_router(analytics_router)
+    inject_admin_auth(app)
     return TestClient(app)
 
 

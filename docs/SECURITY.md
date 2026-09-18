@@ -80,3 +80,31 @@ routes are unauthenticated and CORS falls back to localhost Vite origins.
   (`backend/db/session.py`).
 - **Per-request DB sessions** — correct SQLAlchemy posture (cached factory,
   short-lived sessions); not a bottleneck.
+
+## V2 auth (JWT + bcrypt — `backend/security/passwords.py`, `backend/auth/guards.py`, `backend/api/auth.py`)
+
+- **Passwords:** bcrypt hashes only (`users.password_hash`, `$2b$`), never
+  plaintext, never logged, never serialized (`GET /api/auth/me` returns
+  `{id, email, tier, subscription_status, is_admin}` only). Register
+  validates email (email-validator, `lower(trim())`) + password ≥ 10 chars;
+  duplicate email → `409`. Login uses ONE 401 message
+  (`invalid email or password`) for miss/mismatch (no user enumeration).
+  When bcrypt is missing, dev/test fall back to stdlib PBKDF2-HMAC-SHA256
+  (`pbkdf2_sha256$...`); production (`APP_ENV=production`) refuses the
+  fallback with `RuntimeError` (fail-closed).
+- **Tokens:** HS256 with the existing `SECRET_KEY` (15min access
+  `{sub, tier, is_admin, type: access}`, 7-day refresh `{sub, type:
+  refresh}` in an httpOnly cookie, `Secure` on https/prod, `SameSite=Lax`).
+  JWT `tier` is informational only — every gate reloads the LIVE `users`
+  row (`GET /api/auth/me` likewise; tier/subscription always fresh).
+- **Gates:** missing/expired/tampered token or unknown user → `401`;
+  live tier rank below `min_tier` → `402` with
+  `{upgrade_required: true, min_tier}`; non-admin on admin routes → `403`.
+  `is_admin` bypasses all tier gates. The legacy `X-Tier` header is never
+  read (spoofed headers cannot escalate). Unknown `min_tier` at wiring
+  time raises `ValueError` (misconfigured gates never open).
+- **Rotation:** login and `POST /api/auth/refresh` (cookie) both rotate
+  the refresh cookie; refresh with a missing/invalid/expired cookie → `401`.
+- **Ops:** same `SECRET_KEY` strength rules as provider secrets
+  (`openssl rand -hex 32`, rotation invalidates all tokens); no password
+  or hash material in audit payloads (redact via `redact_mapping`).

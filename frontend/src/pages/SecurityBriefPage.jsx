@@ -1,6 +1,8 @@
 import React from "react";
 import { Link, useParams } from "react-router-dom";
 import SecurityBrief from "../features/security/SecurityBrief";
+import AdSlot from "../components/AdSlot";
+import { useAuth } from "../hooks/useAuth";
 
 function safeDecode(v) {
   try {
@@ -14,6 +16,8 @@ function SecurityBriefPage() {
   const { symbol = "AAPL" } = useParams();
   const decoded = safeDecode(symbol);
   const enc = encodeURIComponent(decoded);
+  // Tier mirror for the single in-article ad below (guest-safe, zero requests).
+  const { tier } = useAuth();
   // Indicator-favorites onboarding lives on /welcome (per-user favorites stub
   // `indicators:<userId||guest>`). Auth is NOT implemented — this link must
   // not gate any chart behavior.
@@ -33,6 +37,9 @@ function SecurityBriefPage() {
       </nav>
       <h1 className="mb-3 text-sm tracking-widest text-term-muted">SECURITY BRIEF · {decoded}</h1>
       <SecurityBrief symbol={decoded} />
+      {/* V2 compliant ads: one in-article slot below the brief (slot index 2
+          of the per-tier budget). Never inside table rows. */}
+      <AdSlot slotId="brief-inarticle" format="in-article" tier={tier} slotIndex={2} />
     </div>
   );
 }

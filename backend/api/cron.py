@@ -40,6 +40,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cron", tags=["cron"])
 
+#: Global tick budget for GET /api/cron/snapshot (seconds, fetch through
+#: response). The Actions caller curls with --max-time 55 and Vercel kills
+#: the function at maxDuration 60: the endpoint must START responding well
+#: inside both windows even when vendor calls hang. Collection stops at
+#: this deadline and the pool is shut down WITHOUT waiting (stragglers are
+#: orphaned; the remainder is reported skipped and retries next hourly
+#: tick). Module-level (not a function local) so regression tests can
+#: shrink it via monkeypatch.
+_SNAPSHOT_BUDGET_S = 40.0
+
+#: Total tick budget for sharded ingest calls (?universe=sp500&shards=10,
+#: curled with --max-time 58). Covers fetch AND persist; the fetch pool
+#: keeps budget minus the ingest persist reserve. Same orphan-stragglers
+#: discipline as snapshots (see backend/market_data/ingest.py).
+_INGEST_TICK_BUDGET_S = 45.0
+
 #: Test seam: when set, the cron endpoints ingest via this fetch callable
 #: instead of yfinance (cleared by :func:`reset_cron`).
 _fetch_override = None
@@ -195,7 +211,7 @@ def cron_ingest_get(
                                             shard=shard, shards=shards)
     try:
         out = _run_ingest(symbols, registry,
-                          budget_s=50.0 if (meta.get("shards") or 1) > 1 or len(symbols) > 25 else None)
+                          budget_s=_INGEST_TICK_BUDGET_S if (meta.get("shards") or 1) > 1 or len(symbols) > 25 else None)
         return {**out, **meta}
     except HTTPException:
         raise
@@ -235,7 +251,7 @@ def cron_ingest_post(
         shard=getattr(body, "shard", None), shards=getattr(body, "shards", None))
     try:
         out = _run_ingest(symbols, registry,
-                          budget_s=50.0 if (meta.get("shards") or 1) > 1 or len(symbols) > 25 else None)
+                          budget_s=_INGEST_TICK_BUDGET_S if (meta.get("shards") or 1) > 1 or len(symbols) > 25 else None)
         return {**out, **meta}
     except HTTPException:
         raise
@@ -526,7 +542,7 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
     """Capture one compressed snapshot per symbol (batch never 500s).
 
     Fan-out is parallel (ThreadPoolExecutor, one DB session per worker) with
-    a global time budget (~45s, inside Vercel's 60s maxDuration and the
+    a global time budget (40s, inside Vercel's 60s maxDuration and the
     Actions curl 55s budget). A full 27-symbol universe fetched SEQUENTIALLY
     pays one live-vendor round-trip per symbol (up to ~12s each on Yahoo
     throttle + Alpaca/Stooq legs) and reliably exceeds both budgets — the
@@ -555,7 +571,7 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
     except Exception:
         _Session = None  # type: ignore[assignment]
 
-    _BUDGET_S = 45.0
+    _BUDGET_S = _SNAPSHOT_BUDGET_S
     _WORKERS = 6
     started = _time.monotonic()
 
@@ -614,7 +630,14 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
             _record(*_capture_one(raw))
     else:
         workers = max(1, min(_WORKERS, len(wanted)))
-        with _TPE(max_workers=workers) as pool:
+        # Explicit pool (NOT `with`): executor shutdown(wait=True) blocks
+        # until every in-flight vendor call finishes — on throttle that
+        # stacked ~12-25s past the collection deadline and produced curl
+        # exit 28 with zero bytes. shutdown(wait=False) returns the partial
+        # 200 immediately; orphaned calls finish in background and the
+        # remainder (already marked skipped above/below) retries next tick.
+        pool = _TPE(max_workers=workers)
+        try:
             futs = {pool.submit(_capture_one, raw): raw.strip().upper()
                     for raw in wanted}
             for fut, key in futs.items():
@@ -634,6 +657,11 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
                     errors[key] = (f"skipped: {type(exc).__name__} "
                                    f"({str(exc)[:120]})")
                     truncated = True
+        finally:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
             for fut, key in futs.items():
                 if not fut.done() and key not in snapshots and key not in errors:
                     errors[key] = ("skipped: snapshot time budget exceeded "

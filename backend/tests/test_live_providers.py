@@ -477,6 +477,7 @@ def test_probe_rejects_unknown_provider():
     from backend.api.deps import reset_deps
     from backend.api.main import create_app
     from backend.market_data.service import MarketDataService as _Svc
+    from backend.tests.auth_helpers import inject_admin_auth
 
     reset_deps()
     stub = _Svc(provider=YFinanceProvider(stub_mode=True))
@@ -488,6 +489,7 @@ def test_probe_rejects_unknown_provider():
     deps_module._health = stub.health
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: stub
+    inject_admin_auth(app)
     try:
         resp = TestClient(app).post("/api/providers/health/test", params={"provider": "nope"})
         assert resp.status_code == 422, resp.text

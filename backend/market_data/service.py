@@ -395,6 +395,23 @@ class MarketDataService:
     # TwelveData markets) with per-user keys. Paid provider slots should
     # be added as new ``*_provider`` constructor args following the
     # existing opt-in pattern (None = skipped, chain behavior unchanged).
+    @staticmethod
+    def _scope_prefix(user_id: str | None, tier: str | None) -> str:
+        """User-scoped cache prefix u:{id}:t:{tier}: (V2: prevents cross-tier poisoning)."""
+        try:
+            uid = str(user_id).strip() if user_id else "anon"
+            if not uid:
+                uid = "anon"
+        except Exception:
+            uid = "anon"
+        try:
+            from backend.auth.tiers import normalize_tier as _nt
+
+            t = _nt(str(tier) if tier else None)
+        except Exception:
+            t = "free"
+        return f"u:{uid}:t:{t}:"
+
     def get_quote(
         self,
         symbol: str,
@@ -403,7 +420,8 @@ class MarketDataService:
         user_id: str | None = None,
         tier: str | None = None,
     ) -> dict:
-        _ = (user_id, tier)  # reserved for future per-user tier routing; no-op today.
+        # V2: user_id/tier scope the quote cache (u:{id}:t:{tier}: prefix).
+        # Provider gating still happens via routers (quote/bars stay Free).
         # Harden: coerce non-str/None symbols to str (avoids AttributeError
         # on symbol.strip()); empty still flows to ProviderError via provider.
         try:
@@ -433,6 +451,7 @@ class MarketDataService:
                 provider_symbol = yahoo_symbol
         # Canonical cache key: upper-case symbol+MIC so aapl:XNAS and
         # AAPL:XNAS share one entry instead of double-fetching.
+        # V2: prefixed u:{id}:t:{tier}: so per-tier views never poison each other.
         try:
             _cache_sym = str(provider_symbol or "").strip().upper()
         except Exception:
@@ -441,7 +460,11 @@ class MarketDataService:
             _cache_mic = str(mic or "").strip().upper()
         except Exception:
             _cache_mic = str(mic)
-        cache_key = f"quote:{_cache_sym}:{_cache_mic}"
+        try:
+            _prefix = self._scope_prefix(user_id, tier)
+        except Exception:
+            _prefix = "u:anon:t:free:"
+        cache_key = f"{_prefix}quote:{_cache_sym}:{_cache_mic}"
         if self.cache is not None:
             try:
                 hit = self.cache.get(cache_key)  # type: ignore[union-attr]
@@ -653,7 +676,18 @@ class MarketDataService:
         return Provenance(**payload["provenance"])
 
     # -- bars (DB-first, then on-demand live fetch, else raise) ---
-    def _bars_cache_key(self, symbol: str, timeframe: str, limit: int) -> str:
+    def _bars_cache_key(
+        self, symbol: str, timeframe: str, limit: int,
+        user_id: str | None = None, tier: str | None = None,
+    ) -> str:
+        """User-scoped bars key (V2: u:{id}:t:{tier}: prefix).
+
+        NOTE: indicator_cache (backend/db/writers.py put_indicator/get_indicator)
+        stays UNSCOPED by design: indicator payloads are pure deterministic
+        functions of (instrument, timeframe, key) — identical for every tier —
+        so scoping would only multiply rows with zero correctness gain.
+        Quote/bars envelopes carry tier-visible provenance/quotas, hence scoped.
+        """
         try:
             sym = str(symbol or "").strip().upper()
         except Exception:
@@ -662,7 +696,11 @@ class MarketDataService:
             n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
-        return f"bars:{sym}:{(timeframe or '1d')}:{n}"
+        base = f"bars:{sym}:{(timeframe or '1d')}:{n}"
+        try:
+            return f"{self._scope_prefix(user_id, tier)}{base}"
+        except Exception:
+            return base
 
     def warm_bar_counts(
         self, symbols: list[str] | tuple[str, ...] | None, timeframe: str = "1d"
@@ -732,7 +770,10 @@ class MarketDataService:
         except Exception:
             return None
 
-    def get_bars(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> dict:
+    def get_bars(
+        self, symbol: str, timeframe: str = "1d", limit: int = 30,
+        user_id: str | None = None, tier: str | None = None,
+    ) -> dict:
         """Serve daily bars from ``price_bars`` when coverage is sufficient.
 
         DB path: resolve via the registry, read the latest ``limit`` rows
@@ -747,11 +788,15 @@ class MarketDataService:
         fetch (``1d`` only); when that also yields nothing fresh the request
         raises instead of serving synthetic stub bars or days-old history.
         No fallbacks, ever.
+
+        V2: cache is user-scoped (u:{id}:t:{tier}: prefix) to prevent
+        cross-tier poisoning. indicator_cache stays unscoped by design
+        (deterministic per instrument/timeframe/key — see _bars_cache_key).
         """
         cache_key: str | None = None
         if self.cache is not None:
             try:
-                cache_key = self._bars_cache_key(symbol, timeframe, limit)
+                cache_key = self._bars_cache_key(symbol, timeframe, limit, user_id, tier)
                 hit = self.cache.get(cache_key)  # type: ignore[union-attr]
                 if isinstance(hit, dict) and isinstance(hit.get("bars"), list):
                     return hit

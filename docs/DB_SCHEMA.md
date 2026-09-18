@@ -1,4 +1,4 @@
-# OneMarket Analyzer — DB schema (0001–0006 revamp)
+# OneMarket Analyzer — DB schema (0001–0008)
 
 Additive-only revamp (Backend Agent 7). No existing table/column was renamed,
 removed, or retyped. Preserved intact: `forecasts.horizon_days IN (1, 7, 14, 21)`,
@@ -24,10 +24,13 @@ CHECK, and the `audit_logs` append-only hash chain.
 | 13 | `ai_token_ledger` ✨ | 0006 | AI token usage ledger (Agent 4) | Agent 4 |
 | 14 | `provider_health_history` ✨ | 0006 | Durable health samples (Agent 6) | Agent 6 |
 | 15 | `indicator_cache` ✨ | 0006 | Indicator payload cache | analytics |
+| 16 | `users` ✨ | 0008 | Auth + subscription identity (V2) | auth |
 
 ✨ = new in 0006. SQLAlchemy: `backend/db/models.py` (appended block, portable
 types so SQLite tests stay green). Postgres DDL: `infra/migrations/0006_revamp.sql`;
 Supabase twin (+RLS, no anon policies): `supabase/migrations/0006_revamp.sql`.
+0007 retargets horizon CHECKs to V2 `(1, 7, 14, 21)` (twin + idempotent).
+0008 adds `users` (twin + RLS SELECT-own policy); ORM `User` appended at EOF.
 
 ## ER (new tables + key relations)
 
@@ -43,6 +46,8 @@ audit_logs (standalone hash chain: id, prev_hash -> hash, head never purged)
 provider_secrets / provider_budgets (provider PK, standalone)
 ai_token_ledger (standalone ledger; evidence_hash -> AI cache key; user_id NULL stub)
 provider_health_history (standalone samples; provider, ts)
+users (standalone identity; email UNIQUE, bcrypt password_hash, tier, Stripe cols,
+  is_admin; NO FK from the 0006 stubs yet — app-layer enforcement only)
 ```
 
 Mermaid:
@@ -92,6 +97,19 @@ erDiagram
 - `indicator_cache(instrument_id FK CASCADE, timeframe, indicator_key,
   PK (instrument_id, timeframe, indicator_key), payload JSONB '{}', updated_at;
   INDEX (updated_at DESC))`
+- `users(id UUID PK DEFAULT gen_random_uuid(), email TEXT NOT NULL UNIQUE
+  (app normalizes lower(trim())), password_hash TEXT NOT NULL (bcrypt $2b$,
+  never plaintext), tier TEXT NOT NULL DEFAULT 'free'
+  CHECK IN (free, silver, gold, platinum), stripe_customer_id TEXT NULL UNIQUE,
+  stripe_subscription_id TEXT NULL,
+  subscription_status TEXT NULL (active/trialing/past_due/canceled/comped),
+  is_admin BOOL NOT NULL DEFAULT FALSE, created_at, updated_at;
+  INDEX (tier), partial INDEX (stripe_customer_id) WHERE NOT NULL).
+  ORM: `User` (`backend/db/models.py`, EOF-appended, portable `ID_TYPE` for
+  `id` like `Instrument`). RLS (Supabase twin only): enabled + single
+  `users_read_own` SELECT policy for `authenticated` (`auth.uid() = id`);
+  no INSERT/UPDATE/DELETE policies — all writes via backend `DATABASE_URL`
+  owner creds (existing bypass pattern); anon reads 0 rows.
 - Stubs: `alerts.user_id UUID NULL, alerts.tier TEXT NULL,
   forecasts.user_id UUID NULL, forecasts.tier TEXT NULL`
   (migration-only `ADD COLUMN IF NOT EXISTS`; ORM mapping lands with auth so
@@ -153,6 +171,9 @@ psql "$DIRECT_URL" -f infra/migrations/0005_quote_snapshots.sql
 psql "$DIRECT_URL" -f infra/migrations/0006_revamp.sql
 # 4. Re-run 0006 to prove idempotence (must exit 0, no schema drift):
 psql "$DIRECT_URL" -f infra/migrations/0006_revamp.sql
+# 4b. V2 horizons + users (idempotent reruns safe; DIRECT :5432 only):
+psql "$DIRECT_URL" -f infra/migrations/0007_horizons.sql
+psql "$DIRECT_URL" -f infra/migrations/0008_users_auth.sql
 # Supabase Dashboard alternative: paste supabase/migrations/0001..0006 in order,
 # then supabase/seed.sql (seed unchanged: 3 instruments, ON CONFLICT DO NOTHING).
 # 5. Verify: python -m pytest backend/tests/test_db.py \

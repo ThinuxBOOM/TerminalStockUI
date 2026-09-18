@@ -89,6 +89,7 @@ def _live_fx(*, stale_hours: float | None = None) -> FXProvider:
 
 def _client(market=None, fx_provider=None) -> TestClient:
     from backend.api import deps as deps_module
+    from backend.tests.auth_helpers import inject_admin_auth
 
     reset_deps()
     reset_forecast_service()
@@ -107,6 +108,7 @@ def _client(market=None, fx_provider=None) -> TestClient:
     app.dependency_overrides[get_market_service] = lambda: stub
     if fx_provider is not None:
         app.dependency_overrides[fxapi.get_fx_provider] = lambda: fx_provider
+    inject_admin_auth(app)
     return TestClient(app)
 
 

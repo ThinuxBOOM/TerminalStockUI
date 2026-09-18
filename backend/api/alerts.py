@@ -51,6 +51,44 @@ from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
 
+try:  # V2 Phase 2 canonical guards
+    from backend.auth.guards import require_tier  # type: ignore
+except ImportError:  # pragma: no cover - fallback until Phase 2 lands
+    from typing import Any as _Any
+
+    from fastapi import Request as _Request
+
+    from backend.auth.tiers import _TIER_RANK as _RANK
+    from backend.auth.tiers import normalize_tier as _norm
+
+    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
+        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
+        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
+        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
+        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
+        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
+    }
+
+    def require_tier(min_tier: str):  # type: ignore[no-redef]
+        need = _norm(min_tier)
+
+        async def _dep(request: _Request) -> dict[str, _Any]:
+            try:
+                auth = (request.headers.get("authorization") or "").strip()
+            except Exception:
+                auth = ""
+            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            user = _TEST_TOKENS.get(token)
+            if user is None:
+                raise HTTPException(status_code=401, detail="unauthorized")
+            if bool(user.get("is_admin")):
+                return dict(user)
+            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
+                return dict(user)
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
@@ -271,6 +309,7 @@ def create_alert(
     body: AlertCreate,
     db: Session = Depends(get_db),
     registry: InstrumentRegistry = Depends(get_registry),
+    user: dict = Depends(require_tier("free")),
 ) -> dict:
     """Create one alert rule (symbol must resolve via the registry)."""
     _ensure_tables()
@@ -325,6 +364,7 @@ def list_alerts(
     limit: int = Query(default=100, ge=1, le=500, description="Max rows (paginated)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
     db: Session = Depends(get_db),
+    user: dict = Depends(require_tier("free")),
 ) -> dict:
     """List alert rules (creation order; paginated; never 500s on a fresh DB)."""
     _ensure_tables()
@@ -366,6 +406,7 @@ def update_alert(
     alert_id: str,
     body: AlertPatch,
     db: Session = Depends(get_db),
+    user: dict = Depends(require_tier("free")),
 ) -> dict:
     """Patch the updatable subset {is_active, threshold, cooldown_hours}."""
     if (
@@ -407,7 +448,7 @@ def update_alert(
 
 
 @router.delete("/{alert_id}", status_code=204)
-def delete_alert(alert_id: str, db: Session = Depends(get_db)) -> Response:
+def delete_alert(alert_id: str, db: Session = Depends(get_db), user: dict = Depends(require_tier("free"))) -> Response:
     """Delete one alert (fired events cascade; 204 with no body)."""
     row = _get_alert_or_404(db, alert_id)
     try:

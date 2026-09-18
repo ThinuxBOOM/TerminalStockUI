@@ -100,6 +100,35 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* V2 compliant ads: visible labeled reserve. Deliberately NO hiding rules
+ * here (no display:none/opacity:0/1x1) — suppressed tiers don't mount. */
+.ad-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.ad-slot__label {
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: #8b94a3;
+  text-align: center;
+}
+
+.ad-slot__unit {
+  width: 100%;
+}
+
+.ad-slot__empty {
+  display: block;
+  width: 100%;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
