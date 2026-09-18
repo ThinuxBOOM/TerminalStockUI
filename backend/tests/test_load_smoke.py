@@ -59,6 +59,7 @@ def _fresh_fetch(provider_symbol: str, period: str = "2y", interval: str = "1d")
 
 def _build_app():
     from backend.api import deps as deps_module
+    from backend.tests.auth_helpers import inject_admin_auth
 
     reset_deps()
     reset_forecast_service()
@@ -94,6 +95,7 @@ def _build_app():
     base_module.set_default_secret_store(EncryptedSecretStore())
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: stub
+    inject_admin_auth(app)
     return app
 
 

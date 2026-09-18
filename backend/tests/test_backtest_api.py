@@ -8,12 +8,14 @@ from fastapi.testclient import TestClient
 
 from backend.api.backtest import reset_backtest_history, router
 from backend.forecasting.backtesting import LeakageError, assert_no_leakage
+from backend.tests.auth_helpers import inject_admin_auth
 
 
 def _client() -> TestClient:
     reset_backtest_history()
     app = FastAPI()
     app.include_router(router)
+    inject_admin_auth(app)
     return TestClient(app)
 
 

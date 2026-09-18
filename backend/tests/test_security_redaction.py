@@ -70,6 +70,7 @@ def _stub_service() -> MarketDataService:
 
 def _client_with_store(store: EncryptedSecretStore) -> TestClient:
     from backend.api import deps as deps_module
+    from backend.tests.auth_helpers import inject_admin_auth
 
     reset_deps()
     reset_forecast_service()
@@ -81,6 +82,7 @@ def _client_with_store(store: EncryptedSecretStore) -> TestClient:
     base_module.set_default_secret_store(store)
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: stub
+    inject_admin_auth(app)
     return TestClient(app)
 
 

@@ -177,8 +177,11 @@ def test_router_tracks_performance_by_exchange_horizon(empty_store):
 
 
 def _client(empty_store) -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     app = FastAPI()
     app.include_router(ai_api.router)
+    inject_admin_auth(app)
 
     async def _no_market_dependency():
         return None  # endpoints resolve market data internally; offline stub covers it

@@ -103,11 +103,14 @@ def _teardown() -> None:
 
 
 def _client(market=None, forecast=None) -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     reset_deps()
     reset_forecast_service()
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: market or FakeMarket()
     app.dependency_overrides[get_forecast_service] = lambda: forecast or FakeForecast()
+    inject_admin_auth(app)
     return TestClient(app)
 
 

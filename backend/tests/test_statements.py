@@ -373,8 +373,11 @@ def test_resolver_total_failure_returns_empty_never_raises():
 # --- analytics endpoint -----------------------------------------------------
 
 def _analytics_client() -> TestClient:
+    from backend.tests.auth_helpers import inject_admin_auth
+
     app = FastAPI()
     app.include_router(analytics_router)
+    inject_admin_auth(app)
     return TestClient(app)
 
 

@@ -6,11 +6,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.api.analytics_api import router
+from backend.tests.auth_helpers import inject_admin_auth
 
 
 def _client() -> TestClient:
     app = FastAPI()
     app.include_router(router)
+    inject_admin_auth(app)
     return TestClient(app)
 
 
