@@ -29,6 +29,107 @@ from backend.ai.router import AIRouter
 from backend.ai.schemas import DISCLAIMER, EvidencePacket
 from backend.security.secrets import redact_mapping
 
+try:  # V2 Phase 2 canonical guards
+    from backend.auth.guards import get_current_user, require_tier  # type: ignore
+except ImportError:  # pragma: no cover - fallback until Phase 2 lands
+    from fastapi import Request as _Request
+
+    from backend.auth.tiers import _TIER_RANK as _RANK
+    from backend.auth.tiers import normalize_tier as _norm
+
+    _TEST_TOKENS: dict[str, dict[str, Any]] = {
+        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
+        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
+        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
+        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
+        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
+    }
+
+    async def get_current_user(request: _Request) -> dict[str, Any]:  # type: ignore[no-redef]
+        """Fallback auth: Bearer test tokens only. X-Tier is NEVER trusted."""
+        try:
+            auth = (request.headers.get("authorization") or "").strip()
+        except Exception:
+            auth = ""
+        token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+        user = _TEST_TOKENS.get(token)
+        if user is not None:
+            return dict(user)
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    def require_tier(min_tier: str):  # type: ignore[no-redef]
+        need = _norm(min_tier)
+
+        async def _dep(request: _Request) -> dict[str, Any]:
+            user = await get_current_user(request)
+            try:
+                if bool(user.get("is_admin")):
+                    return user
+            except Exception:
+                pass
+            have = _norm(user.get("tier"))
+            if _RANK[have] >= _RANK[need]:
+                return user
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep
+
+
+def _user_field(user: Any, name: str, default: Any = None) -> Any:
+    """Read a user field from dict-style or ORM-style (guards) users."""
+    try:
+        if isinstance(user, dict):
+            return user.get(name, default)
+    except Exception:
+        pass
+    try:
+        val = getattr(user, name, default)
+        return default if val is None and default is not None else val
+    except Exception:
+        return default
+
+
+def _require_profile_tier(user: Any, profile: str) -> None:
+    """Profile-aware HARD gate for /insight + /forecast_opinion.
+
+    quick_insight/forecast_assist are free; report/deep_research need silver.
+    Admin bypasses. Client-supplied body.user_tier is NEVER trusted.
+    Works with dict (fallback) and ORM (guards) users.
+    """
+    try:
+        if bool(_user_field(user, "is_admin", False)):
+            return
+    except Exception:
+        pass
+    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+    need = "silver" if key in ("report", "deep_research") else "free"
+    if need == "free":
+        return
+    try:
+        from backend.auth.tiers import _TIER_RANK as _R2
+        from backend.auth.tiers import normalize_tier as _n2
+
+        have = _n2(_user_field(user, "tier", "free"))
+        if _R2[have] >= _R2[_n2(need)]:
+            return
+    except Exception:
+        return
+    raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+
+def _auth_identity(user: Any) -> tuple[Any, str]:
+    """Real (user_id, tier) from the verified JWT user. Never body fields."""
+    try:
+        uid = _user_field(user, "user_id", None) or _user_field(user, "id", None)
+    except Exception:
+        uid = None
+    try:
+        tier = str(_user_field(user, "tier", "free") or "free").strip().lower() or "free"
+    except Exception:
+        tier = "free"
+    return uid, tier
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
@@ -89,6 +190,7 @@ def _persist_ledger(
     cached: bool,
     user_tier: str | None,
     token_credits: int | None,
+    user_id: Any = None,
 ) -> None:
     """Best-effort ai_token_ledger persist from the router's last entry."""
     try:
@@ -106,12 +208,13 @@ def _persist_ledger(
         Session = get_session_factory()
         db = Session()
         try:
+            # V2: pass the REAL verified user_id/tier (never body fields).
             log_ai_tokens(
                 db, provider=provider, model=model, profile=profile,
                 call_type=call_type, input_tokens=0 if cached else prompt_tok,
                 output_tokens=0 if cached else comp_tok, latency_ms=lat_ms,
                 evidence_hash=getattr(packet, "evidence_hash", None),
-                user_id=None, tier=user_tier,
+                user_id=user_id, tier=user_tier,
             )
         finally:
             try:
@@ -338,8 +441,15 @@ def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
 
 
 @router.post("/insight")
-async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router)) -> dict[str, Any]:
+async def post_insight(
+    body: InsightBody,
+    ai: AIRouter = Depends(get_ai_router),
+    user: dict = Depends(require_tier("free")),
+) -> dict[str, Any]:
     profile = _check_profile(body.profile)
+    # V2 HARD gate: profile-aware (report needs silver). Body tier ignored.
+    _require_profile_tier(user, profile)
+    _uid, _utier = _auth_identity(user)
     # Fail-closed gate first: no key -> 423 before any evidence work.
     _require_live_provider(ai, profile)
     # get_quote/yfinance are blocking sync I/O — keep the event loop free.
@@ -347,8 +457,9 @@ async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router))
     try:
         opinion, cached = await ai.get_insight(
             packet, profile=profile,
-            user_tier=body.user_tier, call_type=body.call_type or "insight",
+            user_tier=_utier, call_type=body.call_type or "insight",
             token_credits=body.token_credits,
+            user_id=_uid,
         )
     except HTTPException:
         raise
@@ -361,7 +472,7 @@ async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router))
     _persist_ledger(
         ai, provider=opinion.provider, model=opinion.model, profile=profile,
         call_type="opinion", packet=packet, cached=cached,
-        user_tier=body.user_tier, token_credits=body.token_credits,
+        user_tier=_utier, token_credits=body.token_credits, user_id=_uid,
     )
     return {
         "symbol": packet.symbol,
@@ -379,9 +490,13 @@ async def post_insight(body: InsightBody, ai: AIRouter = Depends(get_ai_router))
 
 @router.post("/forecast_opinion")
 async def post_forecast_opinion(
-    body: ForecastOpinionBody, ai: AIRouter = Depends(get_ai_router)
+    body: ForecastOpinionBody,
+    ai: AIRouter = Depends(get_ai_router),
+    user: dict = Depends(require_tier("free")),
 ) -> dict[str, Any]:
     profile = _check_profile(body.profile)
+    _require_profile_tier(user, profile)
+    _uid, _utier = _auth_identity(user)
     horizon = _check_horizon(body.horizon)
     try:
         quant_check = float(body.quant_prob) if body.quant_prob is not None else None
@@ -443,8 +558,8 @@ async def post_forecast_opinion(
     try:
         opinion, cached = await ai.get_insight(
             packet, profile=profile, horizon=horizon,
-            user_tier=body.user_tier, call_type=body.call_type or "forecast_opinion",
-            token_credits=body.token_credits,
+            user_tier=_utier, call_type=body.call_type or "forecast_opinion",
+            token_credits=body.token_credits, user_id=_uid,
         )
     except HTTPException:
         raise
@@ -470,7 +585,7 @@ async def post_forecast_opinion(
     _persist_ledger(
         ai, provider=opinion.provider, model=opinion.model, profile=profile,
         call_type="forecast", packet=packet, cached=cached,
-        user_tier=body.user_tier, token_credits=body.token_credits,
+        user_tier=_utier, token_credits=body.token_credits, user_id=_uid,
     )
     try:
         provenance = packet.freshness.model_dump(mode="json")
@@ -541,7 +656,8 @@ class DeepResearchJobBody(BaseModel):
 
 
 async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str | None,
-                        call_type: str | None, token_credits: int | None) -> None:
+                        call_type: str | None, token_credits: int | None,
+                        user_id: Any = None) -> None:
     """Background deep_research worker (never raises; writes job doc).
 
     Fail-closed throughout: no key -> error doc (never a stub opinion);
@@ -566,7 +682,7 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
         opinion, cached = await ai.get_insight(
             packet, profile="deep_research", horizon=horizon,
             user_tier=user_tier, call_type=call_type or "deep_research",
-            token_credits=token_credits,
+            token_credits=token_credits, user_id=user_id,
         )
         try:
             _refuse_stub_opinion(opinion, context="deep research")
@@ -578,7 +694,8 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
         _persist_ledger(ai, provider=opinion.provider, model=opinion.model,
                         profile="deep_research", call_type="evidence",
                         packet=packet, cached=cached,
-                        user_tier=user_tier, token_credits=token_credits)
+                        user_tier=user_tier, token_credits=token_credits,
+                        user_id=user_id)
         _job_put(job_id, {"job_id": job_id, "status": "done",
                           "symbol": packet.symbol, "horizon": horizon,
                           "provider": opinion.provider, "model": opinion.model,
@@ -593,31 +710,36 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
 
 
 @router.post("/deep_research_job", status_code=202)
-async def post_deep_research_job(body: DeepResearchJobBody) -> dict[str, Any]:
+async def post_deep_research_job(
+    body: DeepResearchJobBody,
+    user: dict = Depends(require_tier("silver")),
+) -> dict[str, Any]:
     """Enqueue a deep_research call; poll GET /api/ai/jobs/{id}.
 
     Long-response path: deep_research allows 25s per attempt + retries, which
     risks gateway timeouts on serverless. This 202+poll path returns instantly
     while the worker fills the job doc. The sync /insight+profile=deep_research
-    path is unchanged. Tier fields are logged only (no gating — future prep).
+    path is unchanged. V2 HARD gate: silver+ (body tier ignored).
     """
     from fastapi.responses import JSONResponse as _JR  # local import, no dep change
     import uuid as _uuid
 
     horizon = _check_horizon(body.horizon)
     clean = (body.symbol or "").strip().upper()
+    _uid, _utier = _auth_identity(user)
     job_id = _uuid.uuid4().hex[:16]
     _job_put(job_id, {"job_id": job_id, "status": "pending",
                       "symbol": clean, "horizon": horizon})
-    asyncio.create_task(_run_deep_job(job_id, clean, horizon, body.user_tier,
-                                      body.call_type, body.token_credits))
+    asyncio.create_task(_run_deep_job(job_id, clean, horizon, _utier,
+                                      body.call_type, body.token_credits,
+                                      user_id=_uid))
     return _JR(status_code=202, content={"job_id": job_id, "status": "pending",
               "status_url": f"/api/ai/jobs/{job_id}",
               "symbol": clean, "horizon": horizon})
 
 
 @router.get("/jobs/{job_id}")
-def get_ai_job(job_id: str) -> dict[str, Any]:
+def get_ai_job(job_id: str, user: dict = Depends(require_tier("silver"))) -> dict[str, Any]:
     doc = _job_get((job_id or "").strip())
     if not doc:
         raise HTTPException(status_code=404, detail="unknown job_id")

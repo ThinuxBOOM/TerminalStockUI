@@ -21,3 +21,9 @@ exchange-calendars>=4.5
 # api/index.py exposes the FastAPI `app` natively (no adapter needed).
 mangum>=0.17  # legacy ASGI adapter (kept for compat; not used by api/index.py)
 psycopg[binary]>=3.1  # Supabase Postgres driver (required on Vercel when DATABASE_URL is set)
+
+# --- V2 auth + billing (Phase 0: no behavior change, imports only) ---
+bcrypt>=4.1
+pyjwt>=2.8
+stripe>=8.0
+email-validator>=2.0

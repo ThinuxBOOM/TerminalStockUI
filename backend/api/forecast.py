@@ -19,6 +19,44 @@ from backend.forecasting.service import ForecastService, get_forecast_service
 from backend.market_data.provenance import build_provenance
 from backend.security.validation import sanitize_error, validate_symbol
 
+try:  # V2 Phase 2 canonical guards
+    from backend.auth.guards import require_tier  # type: ignore
+except ImportError:  # pragma: no cover - fallback until Phase 2 lands
+    from typing import Any as _Any
+
+    from fastapi import Request as _Request
+
+    from backend.auth.tiers import _TIER_RANK as _RANK
+    from backend.auth.tiers import normalize_tier as _norm
+
+    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
+        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
+        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
+        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
+        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
+        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
+    }
+
+    def require_tier(min_tier: str):  # type: ignore[no-redef]
+        need = _norm(min_tier)
+
+        async def _dep(request: _Request) -> dict[str, _Any]:
+            try:
+                auth = (request.headers.get("authorization") or "").strip()
+            except Exception:
+                auth = ""
+            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            user = _TEST_TOKENS.get(token)
+            if user is None:
+                raise HTTPException(status_code=401, detail="unauthorized")
+            if bool(user.get("is_admin")):
+                return dict(user)
+            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
+                return dict(user)
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep
+
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
 #: Display bands for the direction probability. Thresholds mirror the
@@ -251,6 +289,7 @@ def calibration_history(
     horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     limit: int = Query(default=20, ge=1, le=50, description="Max snapshots (cap 50)"),
     svc: ForecastService = Depends(get_forecast_service),
+    user: dict = Depends(require_tier("free")),
 ) -> dict:
     """Calibration snapshot history for (symbol, horizon), newest first.
 
@@ -332,6 +371,7 @@ def get_forecast(
     background_tasks: BackgroundTasks,
     horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     svc: ForecastService = Depends(get_forecast_service),
+    user: dict = Depends(require_tier("free")),
 ) -> dict:
     """Forecast one symbol/horizon (ensemble direction + bands + risk)."""
     if int(horizon) not in FORECAST_HORIZONS:

@@ -59,6 +59,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend import __version__ as _version
 from backend.api.deps import reset_deps  # noqa: F401  (public test hook)
+from backend.api.auth import router as auth_router
+from backend.api.billing import router as billing_router
 from backend.api.health import router as health_router
 from backend.api.instruments import router as instruments_router
 from backend.api.market_data import router as market_data_router
@@ -158,6 +160,8 @@ def create_app() -> FastAPI:
     except Exception:
         pass
     app.include_router(health_router)  # GET /health
+    app.include_router(auth_router)  # V2 auth: POST /api/auth/register|login|refresh, GET /api/auth/me
+    app.include_router(billing_router)  # V2 billing: POST /api/billing/checkout|portal|webhook, GET /api/billing/status
     app.include_router(instruments_router)
     app.include_router(market_data_router)
     app.include_router(securities_router)

@@ -152,3 +152,41 @@ a PARTIAL in `docs/V1_CHECKLIST.md`). The default `./onemarket.db` sqlite stub h
 | Postgres `DuplicatePreparedStatement` / pooled-connection errors on Supabase `:6543` | Transaction-mode pooler can't keep named prepared statements: engine uses `NullPool` + `connect_args = {"prepare_threshold": None}` when URL contains `pgbouncer`/`:6543` or `APP_ENV=production`/`VERCEL=1` (`backend/db/session.py:31-40,70-76`); detection-only `?pgbouncer=true` is stripped pre-connect (`backend/db/session.py:64-69`) |
 | `npm` blocked by NVM (`NVM4306`) | Run `nvm reshim` (or `nvm doctor --autofix`), then `npm install` / `npm run typecheck` in `frontend/` |
 | `market_state` shows delayed/stale instead of closed | Holiday-calendar stubs (see `docs/SSE_NOTES.md`, `docs/EURONEXT_NOTES.md`); freshness fallback is by design |
+
+## 8. Admin bootstrap + rotation (V2 auth foundation)
+
+One-off platinum access without paying: `scripts/bootstrap_admin.py` upserts
+`users(email, password_hash, is_admin=true, tier='platinum',
+subscription_status='comped')` + an `admin.bootstrapped` audit row
+(actor `'system'`, payload carries tier/status only — never secrets). Why
+`comped` + `is_admin` instead of a fake Stripe row: Stripe stays the source of
+truth for payers only — no fake `stripe_subscription_id`, no webhook spoof, no
+charge/refund churn. Entitlement = `if user.is_admin: allow all`.
+
+```powershell
+# 1. Schema first (DIRECT :5432 URL, never :6543 pooler):
+psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0008_users_auth.sql
+# 2. Generate a bcrypt hash OFFLINE (preferred — hash travels, password never does):
+python -c "import bcrypt; print(bcrypt.hashpw(b'<password>', bcrypt.gensalt()).decode())"
+# 3. Set env (never commit real values; infra\docker\.env is gitignored):
+$env:ADMIN_EMAIL = "admin@example.com"
+$env:ADMIN_PASSWORD_HASH = '<bcrypt $2b$ string from step 2>'
+# 4. Bootstrap (idempotent upsert — safe to re-run):
+python scripts/bootstrap_admin.py
+#    alt without a prebuilt hash: set $env:ADMIN_PASSWORD (or answer the
+#    getpass prompt); it is hashed in memory only, never stored or logged.
+```
+
+Verify: the script prints `{"ok": true, "tier": "platinum",
+"subscription_status": "comped", "is_admin": true, ...}`; confirm the row and
+audit (`SELECT tier, subscription_status, is_admin FROM users WHERE email=...`;
+`SELECT action FROM audit_logs WHERE action='admin.bootstrapped' ORDER BY id
+DESC LIMIT 1`). App login (`GET /api/auth/me` showing
+`{tier:'platinum', is_admin:true, subscription_status:'comped'}`) arrives with
+the Phase 2 auth routes; until then the DB/audit rows are the check.
+
+Rotation: set a new `ADMIN_PASSWORD_HASH` in `infra\docker\.env` + rerun the
+script (upsert overwrites the hash, re-asserts platinum/comped/is_admin), then
+restart the backend. Never print keys/hashes: logs and audit payloads pass
+through `redact_mapping`; if a secret ever lands in an audit row it cannot be
+removed (append-only hash chain) — rotate immediately (same rule as §6).

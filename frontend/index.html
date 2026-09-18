@@ -10,6 +10,19 @@
     <link rel="apple-touch-icon" href="/logo.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- V2 compliant ads: connection warm-up for AdSense origins. -->
+    <link rel="preconnect" href="https://pagead2.googlesyndication.com" crossorigin />
+    <link rel="preconnect" href="https://googleads.g.doubleclick.net" crossorigin />
+    <!-- AdSense loader: plain async <script>, NEVER Vite-bundled/imported.
+         Zero-traffic starter: replace ca-pub-XXXXXXXXXXXXXXXX with the real
+         publisher ID (same value as VITE_ADS_CLIENT_ID in frontend/.env)
+         once AdSense onboarding completes. Until then <AdSlot/> renders its
+         labeled reserve but performs zero ad pushes. -->
+    <script
+      async
+      src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX"
+      crossorigin="anonymous"
+    ></script>
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap"
       rel="stylesheet"

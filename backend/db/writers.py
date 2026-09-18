@@ -157,7 +157,15 @@ def put_indicator(
     indicator_key: str,
     payload: dict,
 ) -> bool:
-    """Upsert one indicator_cache row (deterministic, not user-scoped)."""
+    """Upsert one indicator_cache row (deterministic, not user-scoped).
+
+    V2: indicator_cache stays UNSCOPED by design — payloads are pure
+    deterministic functions of (instrument_id, timeframe, indicator_key),
+    identical for every tier/user. Scoping by u:{id}:t:{tier}: would only
+    multiply rows with zero correctness gain, unlike AI/screener/quote/bars
+    caches whose outputs vary by tier/quota/model and MUST be user-scoped
+    to prevent cross-tier poisoning.
+    """
     if db is None or instrument_id is None or not indicator_key:
         return False
     try:

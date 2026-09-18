@@ -85,6 +85,85 @@ const api = axios.create({
   timeout: 6e4,
   headers: { "Content-Type": "application/json" }
 });
+// V2 auth wiring (additive only — no existing call path changes).
+// ./auth.js registers the live Bearer source via setAuthTokenProvider (kept
+// behind a setter to avoid a client<->auth import cycle). 401 -> /login,
+// 402 -> `onemarket:upgrade-required` upsell event (UpgradeModal listens).
+// All branches are window-guarded so node/vitest imports never throw.
+let authTokenProvider = null;
+let authErrorHandlers = {};
+function setAuthTokenProvider(fn) {
+  authTokenProvider = typeof fn === "function" ? fn : null;
+}
+function setAuthErrorHandlers(h) {
+  authErrorHandlers = h && typeof h === "object" ? h : {};
+}
+function readAuthToken() {
+  try {
+    return authTokenProvider ? authTokenProvider() : null;
+  } catch {
+    return null;
+  }
+}
+function defaultUnauthorized() {
+  try {
+    if (typeof window !== "undefined" && window.location) {
+      const path = window.location.pathname || "";
+      if (!path.startsWith("/login")) window.location.assign("/login");
+    }
+  } catch {
+    // never throw out of an interceptor
+  }
+}
+function defaultUpgradeRequired(err) {
+  try {
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      let detail = null;
+      try {
+        detail = err?.response?.data ?? null;
+      } catch {
+        detail = null;
+      }
+      window.dispatchEvent(
+        new CustomEvent("onemarket:upgrade-required", { detail })
+      );
+    }
+  } catch {
+    // never throw out of an interceptor
+  }
+}
+api.interceptors.request.use((config) => {
+  try {
+    const token = readAuthToken();
+    if (typeof token === "string" && token !== "") {
+      config.headers = config.headers ?? {};
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  } catch {
+    // auth must never break a request
+  }
+  return config;
+});
+api.interceptors.response.use(
+  (response) => response,
+  (err) => {
+    try {
+      const status = err?.response?.status;
+      if (status === 401) {
+        const fn = authErrorHandlers.onUnauthorized;
+        if (typeof fn === "function") fn(err);
+        else defaultUnauthorized();
+      } else if (status === 402) {
+        const fn = authErrorHandlers.onUpgradeRequired;
+        if (typeof fn === "function") fn(err);
+        else defaultUpgradeRequired(err);
+      }
+    } catch {
+      // error routing must never mask the original failure
+    }
+    return Promise.reject(err);
+  }
+);
 function normalizeSymbolParam(v) {
   return String(v ?? "").trim().toUpperCase().replace(/\s+/g, "");
 }
@@ -1764,6 +1843,6 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
     }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, testProviderHealth };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, setAuthErrorHandlers, setAuthTokenProvider, testProviderHealth };
 
 export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };

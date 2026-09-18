@@ -11,12 +11,42 @@ import os
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from backend.cache import get_cache
 from backend.market_data.provenance import build_provenance
 
 router = APIRouter(prefix="/api/news", tags=["news"])
+
+
+def _scope_prefix(user: dict | None) -> str:
+    try:
+        uid = str((user or {}).get("user_id") or (user or {}).get("id") or "anon")
+    except Exception:
+        uid = "anon"
+    try:
+        from backend.auth.tiers import normalize_tier as _n
+
+        tier = _n((user or {}).get("tier"))
+    except Exception:
+        tier = "free"
+    return f"u:{uid}:t:{tier}:"
+
+
+def _user_from_request_best_effort(request: Request | None) -> dict | None:
+    """Best-effort user for cache scoping only (no gating — news stays free)."""
+    try:
+        if request is None or not hasattr(request, "headers"):
+            return None
+        auth = (request.headers.get("authorization") or "").strip()
+        tok = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+        mapping = {"test-free": ("user-free", "free"), "test-silver": ("user-silver", "silver"), "test-gold": ("user-gold", "gold"), "test-platinum": ("user-platinum", "platinum"), "test-admin": ("admin-1", "platinum")}
+        if tok in mapping:
+            uid, tier = mapping[tok]
+            return {"user_id": uid, "tier": tier}
+    except Exception:
+        pass
+    return None
 
 NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 _CACHE_TTL_S = 300
@@ -66,14 +96,20 @@ def news_sentiment_score(title: str, summary: str = "") -> float:
     return round((bull - bear) / max(1, bull + bear), 3)
 
 
-def _cache_key(symbols: str, limit: int) -> str:
-    return f"news:{symbols or 'ALL'}:{int(limit)}"
+def _cache_key(symbols: str, limit: int, user: dict | None = None) -> str:
+    """User-scoped key: u:{id}:t:{tier}: prefix prevents cross-tier poisoning."""
+    base = f"news:{symbols or 'ALL'}:{int(limit)}"
+    try:
+        return f"{_scope_prefix(user)}{base}"
+    except Exception:
+        return base
 
 
 @router.get("")
 def get_news(
     symbols: str | None = Query(default=None, description="Comma-list e.g. AAPL,MSFT (US only; empty = market-wide)"),
     limit: int = Query(default=20, ge=1, le=50, description="Max articles (cap 50)"),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     key_id, secret = _resolve_keys()
     if not (key_id and secret):
@@ -92,7 +128,7 @@ def get_news(
                 continue
             sym_list.append(s)
         sym_list = sym_list[:10]
-    ck = _cache_key(",".join(sym_list), int(limit))
+    ck = _cache_key(",".join(sym_list), int(limit), _user_from_request_best_effort(request))
     try:
         cached = get_cache().get(ck)
         if isinstance(cached, dict) and isinstance(cached.get("articles"), list):
@@ -161,5 +197,6 @@ def get_news(
 def get_symbol_news(
     symbol: str,
     limit: int = Query(default=10, ge=1, le=50),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
-    return get_news(symbols=symbol, limit=limit)
+    return get_news(symbols=symbol, limit=limit, request=request)

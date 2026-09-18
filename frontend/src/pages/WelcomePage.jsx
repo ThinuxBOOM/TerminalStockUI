@@ -517,7 +517,10 @@ function WelcomePage() {
         </h2>
         <p className="mx-auto mt-1 max-w-xl text-center text-xs leading-relaxed text-term-muted">
           Nothing is locked right now — no account, no paywall. These plans just show where
-          subscriptions are heading in V2.
+          subscriptions are heading in V2.{" "}
+          <Link to="/pricing" className="text-term-green hover:underline">
+            See live plans + checkout →
+          </Link>
         </p>
         <ul className="mt-5 grid gap-3 md:grid-cols-3">
           <li className="term-panel-nested flex flex-col p-4">

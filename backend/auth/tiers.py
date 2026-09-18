@@ -51,11 +51,16 @@ TIER_QUOTAS: dict[str, dict[str, Any]] = {
 }
 
 # Call-type -> minimum tier that will be allowed once gating lands.
+# V2 (Phases 3-4): HARD gates enforced via Depends(require_tier(...)).
 FEATURE_MIN_TIER: dict[str, str] = {
     "quick_insight": "free",
     "forecast_assist": "free",
     "report": "silver",
     "deep_research": "silver",
+    "screener": "silver",
+    "backtest": "gold",
+    "providers_configure": "platinum",
+    "all_providers": "platinum",
 }
 
 _TIER_RANK = {name: i for i, name in enumerate(VALID_TIERS)}

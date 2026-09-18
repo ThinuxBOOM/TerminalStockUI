@@ -3,6 +3,7 @@ import { Routes, Route } from "react-router-dom";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Layout from "./components/Layout";
 import Skeleton from "./components/Skeleton";
+import UpgradeModal from "./components/UpgradeModal";
 import HomePage from "./pages/HomePage";
 import NotFoundPage from "./pages/NotFoundPage";
 // Route-level code splitting: each page (and its heavy deps — charts,
@@ -16,8 +17,37 @@ const ProviderSettingsPage = lazy(() => import("./pages/ProviderSettingsPage"));
 const BacktestLabPage = lazy(() => import("./pages/BacktestLabPage"));
 const WatchlistPage = lazy(() => import("./pages/WatchlistPage"));
 const WelcomePage = lazy(() => import("./pages/WelcomePage"));
-const LoginStubPage = lazy(() => import("./pages/LoginStubPage"));
+// V2 real auth + billing routes (lazy like the rest).
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const PricingPage = lazy(() => import("./pages/PricingPage"));
+const CheckoutSuccessPage = lazy(() => import("./pages/CheckoutSuccessPage"));
+const AccountPage = lazy(() => import("./pages/AccountPage"));
 function App() {
-  return /* @__PURE__ */ React.createElement(Layout, null, /* @__PURE__ */ React.createElement(ErrorBoundary, null, /* @__PURE__ */ React.createElement(Suspense, { fallback: /* @__PURE__ */ React.createElement(Skeleton, { label: "loading page…", lines: 6 }) }, /* @__PURE__ */ React.createElement(Routes, null, /* @__PURE__ */ React.createElement(Route, { path: "/", element: /* @__PURE__ */ React.createElement(HomePage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/welcome", element: /* @__PURE__ */ React.createElement(WelcomePage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/login", element: /* @__PURE__ */ React.createElement(LoginStubPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/search", element: /* @__PURE__ */ React.createElement(SearchPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/screener", element: /* @__PURE__ */ React.createElement(ScreenerPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/security/:symbol", element: /* @__PURE__ */ React.createElement(SecurityBriefPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/forecast/:symbol", element: /* @__PURE__ */ React.createElement(ForecastDetailsPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/providers", element: /* @__PURE__ */ React.createElement(ProviderSettingsPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/backtest", element: /* @__PURE__ */ React.createElement(BacktestLabPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "/watchlist", element: /* @__PURE__ */ React.createElement(WatchlistPage, null) }), /* @__PURE__ */ React.createElement(Route, { path: "*", element: /* @__PURE__ */ React.createElement(NotFoundPage, null) })))));
+  return (
+    <Layout>
+      <ErrorBoundary>
+        <Suspense fallback={<Skeleton label="loading page…" lines={6} />}>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/welcome" element={<WelcomePage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/checkout/success" element={<CheckoutSuccessPage />} />
+            <Route path="/account" element={<AccountPage />} />
+            <Route path="/search" element={<SearchPage />} />
+            <Route path="/screener" element={<ScreenerPage />} />
+            <Route path="/security/:symbol" element={<SecurityBriefPage />} />
+            <Route path="/forecast/:symbol" element={<ForecastDetailsPage />} />
+            <Route path="/providers" element={<ProviderSettingsPage />} />
+            <Route path="/backtest" element={<BacktestLabPage />} />
+            <Route path="/watchlist" element={<WatchlistPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </Suspense>
+      </ErrorBoundary>
+      {/* Global 402 upsell surface (axios 402 -> event -> this modal). */}
+      <UpgradeModal />
+    </Layout>
+  );
 }
 export { App as default };

@@ -515,3 +515,47 @@ Index("ix_provider_health_history_provider_ts",
       ProviderHealthHistory.provider, ProviderHealthHistory.ts.desc())
 Index("ix_provider_health_history_ts", ProviderHealthHistory.ts.desc())
 Index("ix_indicator_cache_updated", IndicatorCache.updated_at.desc())
+
+
+# --- V2 auth users (APPENDED at end-of-file by design) -------------------------
+# Parallel agents append other models to this same file: do not move this block
+# above existing models and do not edit any line above it. Mirrors
+# infra/migrations/0008_users_auth.sql (Postgres UUID/TIMESTAMPTZ map to
+# portable ID_TYPE/DateTime(timezone=True) here so SQLite tests stay green).
+# Additive-only: no existing table/column renamed or removed. The 0006
+# user_id/tier stubs on alerts/forecasts/ai_token_ledger/market_snapshots/
+# forecast_accuracy stay migration-only (no FK here — avoids a backfill lock;
+# app-layer enforcement only until a later migration adds NOT VALID + VALIDATE).
+class User(Base):
+    """Auth + subscription identity (V2 Phase 1).
+
+    ``email`` is stored normalized (lower(trim())) with app-level uniqueness
+    (DB UNIQUE). ``password_hash`` holds a bcrypt ``$2b$`` string only — never
+    plaintext, never logged, never placed in audit payloads. ``tier`` mirrors
+    the DDL CHECK (free/silver/gold/platinum). Stripe columns are the webhook
+    source of truth for payers; the admin bootstrap uses
+    ``subscription_status='comped'`` + ``is_admin=True`` with no Stripe objects.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        _sa.CheckConstraint(
+            "tier IN ('free', 'silver', 'gold', 'platinum')",
+            name="ck_users_tier",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    tier: Mapped[str] = mapped_column(Text, nullable=False, default="free")
+    stripe_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True, default=None)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    subscription_status: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_users_tier", User.tier)
+Index("ix_users_stripe_customer", User.stripe_customer_id)

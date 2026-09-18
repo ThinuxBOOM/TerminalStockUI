@@ -44,6 +44,45 @@ from backend.analytics.valuation import dcf_sensitivity, peer_compare, wacc
 from backend.api.deps import get_market_service
 from backend.market_data.service import MarketDataService
 
+try:  # V2 Phase 2 canonical guards
+    from backend.auth.guards import require_tier  # type: ignore
+except ImportError:  # pragma: no cover - fallback until Phase 2 lands
+    from typing import Any as _Any
+
+    from fastapi import HTTPException as _HTTPException
+    from fastapi import Request as _Request
+
+    from backend.auth.tiers import _TIER_RANK as _RANK
+    from backend.auth.tiers import normalize_tier as _norm
+
+    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
+        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
+        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
+        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
+        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
+        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
+    }
+
+    def require_tier(min_tier: str):  # type: ignore[no-redef]
+        need = _norm(min_tier)
+
+        async def _dep(request: _Request) -> dict[str, _Any]:
+            try:
+                auth = (request.headers.get("authorization") or "").strip()
+            except Exception:
+                auth = ""
+            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            user = _TEST_TOKENS.get(token)
+            if user is None:
+                raise _HTTPException(status_code=401, detail="unauthorized")
+            if bool(user.get("is_admin")):
+                return dict(user)
+            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
+                return dict(user)
+            raise _HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep
+
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 BAR_LIMIT = 120
@@ -228,6 +267,7 @@ def get_analytics(
         description="Comma-separated overlays, e.g. SMA20,EMA12,RSI14,MACD,BB20,VWAP,ATR14",
     ),
     svc: MarketDataService = Depends(get_market_service),
+    user: dict = Depends(require_tier("free")),
 ) -> dict:
     """Deterministic analytics for one symbol (technical live, statements unavailable)."""
     from fastapi import HTTPException as _HTTPException

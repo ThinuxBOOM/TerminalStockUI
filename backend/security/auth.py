@@ -25,7 +25,21 @@ from fastapi import HTTPException, Request
 _HEADER_CANDIDATES = ("x-api-key", "authorization")
 
 # Paths that never require a key (liveness + framework introspection).
-_OPEN_PATHS = ("/health", "/", "/openapi.json", "/docs", "/redoc")
+# V2: Stripe webhook uses HMAC (not API key) as auth; auth register/login/
+# refresh are public by design (JWT/cookie is the auth). /api/auth/me and all
+# other /api/* stay guarded when API_KEY is set (send X-API-Key header
+# alongside Authorization Bearer JWT — both headers coexist).
+_OPEN_PATHS = (
+    "/health",
+    "/",
+    "/openapi.json",
+    "/docs",
+    "/redoc",
+    "/api/billing/webhook",
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/refresh",
+)
 
 
 def _configured_keys() -> list[str]:

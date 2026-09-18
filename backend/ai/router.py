@@ -446,9 +446,28 @@ class AIRouter:
     def cache_key(
         self, profile: str, packet: EvidencePacket, horizon: int | None,
         provider: str, model: str,
+        user_id: object = None, tier: object = None,
     ) -> str:
+        """User-scoped key: u:{id}:t:{tier}: prefix prevents cross-tier poisoning.
+
+        Different tiers may see different models/quotas for the same evidence;
+        without the prefix a free-tier cached opinion could leak to platinum
+        (or vice versa). user_id/tier come from the verified JWT user only.
+        """
         horizon_part = str(horizon) if horizon in (1, 7, 14, 21) else "-"
-        return f"{profile}:{provider}:{model}:{packet.evidence_hash}:{horizon_part}"
+        try:
+            uid = str(user_id).strip() if user_id else "anon"
+            if not uid:
+                uid = "anon"
+        except Exception:
+            uid = "anon"
+        try:
+            from backend.auth.tiers import normalize_tier as _nt
+
+            t = _nt(str(tier) if tier else None)
+        except Exception:
+            t = "free"
+        return f"u:{uid}:t:{t}:{profile}:{provider}:{model}:{packet.evidence_hash}:{horizon_part}"
 
     def clear_cache(self) -> None:
         # Evict this router's known keys from BOTH layers: get_insight reads
@@ -541,10 +560,11 @@ class AIRouter:
         profile: str = "quick_insight",
         horizon: int | None = None,
         timeout_s: float | None = None,
-        # --- future tier-routing stubs (logged, NEVER enforced today) ---
+        # --- V2: verified identity for user-scoped cache + ledger ---
         user_tier: str | None = None,
         call_type: str | None = None,
         token_credits: int | None = None,
+        user_id: Any = None,
     ) -> tuple[AIOpinion, bool]:
         """Return (opinion, cached). Malformed provider output degrades to a
         marked stub via the provider layer; this method never raises for
@@ -562,7 +582,7 @@ class AIRouter:
             # Respect the profile map without mutating shared instances.
             provider = _with_model(provider, model)
 
-        cache_hit_key = self.cache_key(key, packet, horizon, provider_name, provider.model)
+        cache_hit_key = self.cache_key(key, packet, horizon, provider_name, provider.model, user_id=user_id, tier=user_tier)
         cached = self._cache_get(cache_hit_key)
         if cached is not None:
             self._log_tokens(
@@ -584,7 +604,7 @@ class AIRouter:
                         provider_name=provider_name, provider=provider,
                         limits=limits, timeout_override=timeout_s,
                         user_tier=user_tier, call_type=call_type,
-                        token_credits=token_credits,
+                        token_credits=token_credits, user_id=user_id,
                     )
                 )
                 self._inflight[cache_hit_key] = task
@@ -621,6 +641,7 @@ class AIRouter:
         user_tier: str | None = None,
         call_type: str | None = None,
         token_credits: int | None = None,
+        user_id: Any = None,
     ) -> list[tuple[AIOpinion, bool]]:
         """Batch helper: concurrent get_insight calls behind a semaphore.
 
@@ -635,7 +656,7 @@ class AIRouter:
                 return await self.get_insight(
                     packet, profile=key, horizon=horizon,
                     user_tier=user_tier, call_type=call_type,
-                    token_credits=token_credits,
+                    token_credits=token_credits, user_id=user_id,
                 )
 
         return list(await asyncio.gather(*(_one(packet) for packet in packets)))
@@ -653,12 +674,13 @@ class AIRouter:
         user_tier: str | None = None,
         call_type: str | None = None,
         token_credits: int | None = None,
+        user_id: Any = None,
     ) -> tuple[AIOpinion, float, bool]:
         """Single-flight provider call with timeout/retry/breaker. Returns
         (opinion, latency_ms, coalesced=False). Never raises for provider
         failures (ValueError/TypeError contract errors still propagate)."""
         breaker = self.breaker_for(provider_name)
-        cache_hit_key = self.cache_key(profile, packet, horizon, provider_name, provider.model)
+        cache_hit_key = self.cache_key(profile, packet, horizon, provider_name, provider.model, user_id=user_id, tier=user_tier)
         try:
             effective_timeout = float(timeout_override if timeout_override else limits.get("timeout_s", 60.0))
         except (TypeError, ValueError):

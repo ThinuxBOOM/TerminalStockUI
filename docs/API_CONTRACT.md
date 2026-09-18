@@ -860,6 +860,57 @@ Distinct path (never collides with `/quote` or `/bars`):
   indicators: {requested, bars, max_points, series, provenance, +flat},
   provenance}`.
 
+---
+
+## V2 appendix (auth — normative, `backend/api/auth.py`)
+
+JWT Bearer (HS256, `SECRET_KEY`) + bcrypt. Access token TTL 15min, refresh
+in an httpOnly cookie (7 days, rotated on login/refresh). Email is
+`lower(trim())`-normalized. Auth errors: unauthenticated `401`, tier too
+low `402` (`{upgrade_required: true, min_tier}`), admin-only `403`.
+
+### `POST /api/auth/register` → `201`
+
+Body `{email, password}` (password ≥ 10 chars; invalid email → `422`;
+duplicate email → `409 {"detail": "email already registered"}`).
+Inserts `tier='free'`; returns the user + access token and sets the
+refresh cookie:
+
+```json
+{
+  "id": "9b8f...",
+  "email": "user@example.com",
+  "tier": "free",
+  "subscription_status": null,
+  "is_admin": false,
+  "access_token": "<jwt>",
+  "token_type": "bearer"
+}
+```
+
+### `POST /api/auth/login` → `200`
+
+Body `{email, password}`. Miss/mismatch (same message, no enumeration) →
+`401 {"detail": "invalid email or password"}`. Success returns the same
+shape as register (fresh access token) and rotates the refresh cookie.
+
+### `GET /api/auth/me` → `200`
+
+Requires `Authorization: Bearer <access_token>`. Loads the LIVE `users`
+row (tier/subscription fresh, not JWT-cached):
+
+```json
+{"id": "9b8f...", "email": "user@example.com", "tier": "free", "subscription_status": null, "is_admin": false}
+```
+
+Missing/expired/tampered token or unknown user → `401 {"detail": "unauthorized"}`.
+
+### `POST /api/auth/refresh` → `200`
+
+Reads the `refresh_token` httpOnly cookie (missing/invalid/expired →
+`401`); rotates the cookie and returns `{access_token, token_type}` plus
+the live user fields (same shape as register).
+
 ### Series semantics (both endpoints)
 
 - Point: `{time: "YYYY-MM-DD", value: number|null}` (`IndicatorPointSchema`,
