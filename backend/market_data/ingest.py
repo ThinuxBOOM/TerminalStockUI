@@ -600,7 +600,9 @@ def _is_alpaca_bars_eligible(provider_symbol: str) -> bool:
         upper = (provider_symbol or "").strip().upper()
     except Exception:
         return False
-    return bool(upper) and not upper.endswith(_NON_US_BAR_SUFFIXES)
+    if not upper or upper.startswith("^"):
+        return False  # caret indices (^NYA/^IXIC/^FCHI/^AEX/^BFX) are yfinance-only
+    return not upper.endswith(_NON_US_BAR_SUFFIXES)
 
 
 def fetch_daily_bars_with_fallback(

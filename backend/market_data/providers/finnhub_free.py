@@ -99,6 +99,8 @@ def to_finnhub_symbol(symbol: str) -> str:
     text = (symbol or "").strip().upper()
     if not text:
         raise ProviderError(NAME, "empty symbol", retryable=False)
+    if text.startswith("^"):
+        raise ProviderError(NAME, "finnhub does not serve index symbols", retryable=False)
     for suffix in _NON_US_SUFFIXES:
         if text.endswith(suffix):
             raise ProviderError(NAME, "finnhub free tier supports US symbols only",

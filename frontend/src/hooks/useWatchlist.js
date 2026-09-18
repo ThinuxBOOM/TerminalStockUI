@@ -3,14 +3,15 @@ const WATCHLIST_KEY = "onemarket.watchlist.v1";
 const WATCHLIST_SOURCES_KEY = "onemarket.watchlist.sources.v1";
 const DEFAULT_WATCHLIST = ["AAPL", "MSFT", "600519.SS", "ASML.AS"];
 const MAX_SYMBOLS = 30;
-const SYMBOL_RE = /^[A-Z0-9][A-Z0-9.\-:]{0,31}$/;
+const SYMBOL_RE = /^\^?[A-Z0-9][A-Z0-9.\-:]{0,31}$/;
 function normalizeSymbol(v) {
   const upper = String(v ?? "").trim().toUpperCase().replace(/\s+/g, "");
   if (!upper) return "";
   // Allowlist the ticker alphabet (mirrors backend/security/validation.py):
-  // strip anything outside [A-Z0-9.\-:] so localStorage content can never
-  // smuggle markup/script into rendered output, then enforce shape.
-  const clean = upper.replace(/[^A-Z0-9.\-:]/g, "").slice(0, 32);
+  // strip anything outside [A-Z0-9.\-:^] so localStorage content can never
+  // smuggle markup/script into rendered output, then enforce shape (single
+  // leading ^ only via SYMBOL_RE).
+  const clean = upper.replace(/[^A-Z0-9.\-:^]/g, "").slice(0, 32);
   if (!clean || !SYMBOL_RE.test(clean) || clean.includes("..")) return "";
   return clean;
 }

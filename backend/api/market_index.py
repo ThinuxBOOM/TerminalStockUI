@@ -7,10 +7,10 @@ miss so the next candidate is tried. Per-candidate failures degrade to the
 next candidate; the batch never 500s because of one bad symbol.
 
 Symbols only live here (never prices). Caret index symbols (^NYA, ^IXIC,
-^FCHI, ^AEX, ^BFX) are rejected by ``validate_symbol`` (no ``^`` in the
-alphabet), so each MIC lists frontend-safe proxy symbols and the response
-badges proxy series with ``is_proxy=true``. XSHG needs no proxy:
-``000001.SS`` is valid under the current alphabet.
+^FCHI, ^AEX, ^BFX) are accepted by ``validate_symbol`` (single leading
+``^``) and served natively via yfinance; each MIC still lists ETF proxy
+symbols as fallback and the response badges proxy series with
+``is_proxy=true``. XSHG needs no proxy: ``000001.SS`` is natively valid.
 
 XCOL (Colombo CSE ASPI) is probe-ready but DISABLED until the venue is
 enabled in ``config/markets.yaml`` and the vendor index symbol is confirmed

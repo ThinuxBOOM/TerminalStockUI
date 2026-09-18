@@ -263,6 +263,8 @@ class MarketDataService:
         if upper_mic in ("XSHG", "XPAR", "XAMS", "XBRU"):
             return False
         upper = (provider_symbol or "").strip().upper()
+        if not upper or upper.startswith("^"):
+            return False  # caret indices (^NYA/^IXIC/^FCHI/^AEX/^BFX) are yfinance-only
         for suffix in (".SS", ".PA", ".AS", ".BR", ".CN", ".FR", ".NL", ".BE", ".BO", ".L"):
             if upper.endswith(suffix):
                 return False

@@ -14,7 +14,7 @@ import re
 
 from fastapi import HTTPException
 
-SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
+SYMBOL_RE = re.compile(r"^\^?[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
 SYMBOL_MAX_LEN = 32
 
 

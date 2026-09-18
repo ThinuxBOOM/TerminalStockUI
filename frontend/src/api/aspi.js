@@ -9,22 +9,21 @@ import { getMarketTopRows } from "./markets";
 //
 // Data honesty rules (same bar as the rest of the terminal):
 // - No hardcoded prices anywhere in this module (config carries SYMBOLS only).
-// - Proxy labelling: caret index symbols (^IXIC, ^FCHI, ...) are rejected by
-//   backend validate_symbol (SYMBOL_RE has no `^`), so each MIC lists
-//   frontend-safe proxy symbols. Charts ALWAYS badge proxy series as PROXY.
+// - Proxy labelling: caret index symbols (^IXIC, ^FCHI, ...) are served
+//   natively (backend allows leading `^`, yfinance-only); each MIC still
+//   lists ETF proxies as fallback. Charts ALWAYS badge proxy series as PROXY.
 // - Native currency only; Top-20 tables never rank across currencies
 //   (FX gate respected: no converted_price, no cross-market ranking).
 
 // ---------------------------------------------------------------------------
 // Benchmark registry (symbols only — never prices).
 //
-// Primary = canonical benchmark for the venue. Proxies = frontend-safe
-// symbols tried in order when the primary is unreachable (422 on `^`,
-// unknown symbol, or empty bars). XSHG needs no proxy: 000001.SS is valid
-// under the current backend alphabet.
+// Primary = canonical benchmark for the venue. Proxies = ETF symbols tried
+// in order when the primary is unreachable (unknown symbol or empty bars).
+// XSHG needs no proxy: 000001.SS is natively valid.
 //
-// TODO(backend): relax validate_symbol to allow a leading `^` (or serve the
-// proposed GET /api/markets/{mic}/index) so primaries resolve directly.
+// Native index endpoint GET /api/markets/{mic}/index serves primaries
+// directly (leading `^` allowed, yfinance-only).
 // TODO(data): confirm Euronext ETF proxy symbols (CAC.PA, IAEX.AS) against
 // the vendor feed; EWN/EWQ/EWK (iShares MSCI single-country ETFs) are the
 // last-resort proxies and are USD-denominated — the chart labels the actual
