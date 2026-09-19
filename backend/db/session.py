@@ -131,7 +131,11 @@ def _create_engine(url: str):
         # Supabase :6543 is a transaction-mode pooler: named server-side
         # prepared statements do not survive across checkouts
         # (DuplicatePreparedStatement). Disable them; plain queries only.
-        kwargs["connect_args"] = {"prepare_threshold": None}
+        # connect_timeout=5: fail fast into "db unavailable" instead of
+        # holding the serverless tick past Vercel maxDuration (the SP500
+        # shard workflow died this way: DB connect hung outside the tick
+        # budget -> curl exit 28 on all 10 shards).
+        kwargs["connect_args"] = {"prepare_threshold": None, "connect_timeout": 5}
     else:
         kwargs.update(
             pool_size=5, max_overflow=5, pool_timeout=10, pool_recycle=300
@@ -143,9 +147,11 @@ def _create_engine(url: str):
             from backend.db.supabase import is_supabase_pooled as _is_pooled
 
             if _is_pooled(url):
-                kwargs["connect_args"] = {"prepare_threshold": None}
+                kwargs["connect_args"] = {"prepare_threshold": None, "connect_timeout": 5}
+            else:
+                kwargs["connect_args"] = {"connect_timeout": 5}
         except Exception:
-            pass
+            kwargs.setdefault("connect_args", {"connect_timeout": 5})
     return create_engine(url, **kwargs)
 
 

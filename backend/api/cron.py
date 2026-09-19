@@ -50,10 +50,11 @@ router = APIRouter(prefix="/api/cron", tags=["cron"])
 #: shrink it via monkeypatch.
 _SNAPSHOT_BUDGET_S = 40.0
 
-#: Total tick budget for sharded ingest calls (?universe=sp500&shards=10,
-#: curled with --max-time 58). Covers fetch AND persist; the fetch pool
-#: keeps budget minus the ingest persist reserve. Same orphan-stragglers
-#: discipline as snapshots (see backend/market_data/ingest.py).
+#: Total tick budget for sharded ingest calls (?universe=sp500&shards=20,
+#: curled with --max-time 50). Covers fetch AND persist (DB-connect time
+#: included); the fetch pool keeps budget minus elapsed minus the ingest
+#: persist reserve. Same orphan-stragglers discipline as snapshots
+#: (see backend/market_data/ingest.py).
 _INGEST_TICK_BUDGET_S = 45.0
 
 #: Test seam: when set, the cron endpoints ingest via this fetch callable
@@ -141,7 +142,7 @@ def _resolve_ingest_symbols(
     """Universe selection for ingest ticks: explicit symbols win, else the
     named universe (default = legacy default_universe, sp500 = S&P 500
     constituents), optionally sliced to one deterministic shard
-    (?shard=2&shards=10) so a 500-symbol universe warms in N
+    (?shard=2&shards=20) so a 500-symbol universe warms in N
     serverless-safe ticks. Returns (symbols, meta) with the resolved
     universe/shard echo for the response envelope."""
     if single and single.strip():
@@ -202,8 +203,8 @@ def cron_ingest_get(
 ) -> dict:
     """Vercel Cron entry: ``GET /api/cron/ingest[?symbol=AAPL]``.
 
-    Sharded full-index warming: ``?universe=sp500&shard=2&shards=10``
-    ingests one deterministic ~50-symbol slice (each tick stays inside
+    Sharded full-index warming: ``?universe=sp500&shard=2&shards=20``
+    ingests one deterministic ~25-symbol slice (each tick stays inside
     maxDuration; shards run as parallel workflow jobs or sequential ticks).
     """
     _check_cron_auth(request)
@@ -240,7 +241,7 @@ def cron_ingest_post(
     registry: InstrumentRegistry = Depends(get_registry),
 ) -> dict:
     """Manual run: ``POST /api/cron/ingest`` with JSON ``{symbols: [...]}``
-    or ``{universe: "sp500", shard: 2, shards: 10}``."""
+    or ``{universe: "sp500", shard: 2, shards: 20}``."""
     _check_cron_auth(request)
     try:
         uni = getattr(body, "universe", None)

@@ -1,10 +1,12 @@
 # OneMarket Analyzer — S&P 500 bars warm schedule (GitHub Actions)
 #
 # Why sharded: 500 symbols x ~2-12s live fetch each can never fit one
-# serverless tick (Vercel maxDuration 60s). Ten parallel jobs x ~50 symbols
-# stay inside the budget once warm; cold ticks truncate to partial 200
-# ("fetch budget exceeded" per-symbol errors) and the next daily tick warms
-# the rest — bars persist per symbol, so progress accumulates.
+# serverless tick (Vercel maxDuration 60s). Twenty parallel jobs x ~25 symbols
+# stay inside the 45s tick budget once warm (10 x 50 routinely overran it
+# under Yahoo throttle + slow-DB cold starts -> curl exit 28 on all shards);
+# cold ticks truncate to partial 200 ("fetch budget exceeded" / "persist
+# deferred" per-symbol errors) and the next daily tick warms the rest — bars
+# persist per symbol, so progress accumulates.
 # Cadence: daily 06:00 UTC (after the default-universe ingest 05:30 UTC).
 # Manual: workflow_dispatch, optionally one shard via inputs.
 # Setup (once): same APP_URL + CRON_SECRET secrets as snapshots.yml.
@@ -17,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       shard:
-        description: "Single 1-based shard to run (empty = all 10)"
+        description: "Single 1-based shard to run (empty = all 20)"
         required: false
         default: ""
 
@@ -25,10 +27,11 @@ jobs:
   warm:
     name: ingest sp500 shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - name: Trigger shard ingest
         if: ${{ inputs.shard == '' || format('{0}', matrix.shard) == inputs.shard }}
@@ -39,24 +42,33 @@ jobs:
           APP_URL="${APP_URL%/}"
           echo "Target host check only (secret never printed):"
           printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
-          # The shard endpoint caps the whole tick at 45s (fetch + persist)
-          # and returns partial 200 instead of hanging (stragglers orphaned,
-          # remainder retried next daily tick — bars persist per symbol so
-          # progress accumulates). Attempt 1 may still time out on a Vercel
-          # cold start (import runs before endpoint code, outside the server
-          # budget) — it warms the function, so retry up to 3 times.
+          # The shard endpoint caps the whole tick at 45s (fetch + persist,
+          # DB-connect time included) and returns partial 200 instead of
+          # hanging (stragglers orphaned, remainder retried next daily tick
+          # — bars persist per symbol so progress accumulates). Attempt 1 may
+          # still time out on a Vercel cold start (import runs before endpoint
+          # code, outside the server budget) — it warms the function, so
+          # retry up to 4 times. 401/403 is an auth misconfig (retrying is
+          # pointless) so fail fast with a clear message.
           ok=0
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4; do
             curl_exit=0
             code=""
-            code=$(curl -s --max-time 58 --connect-timeout 10 -o /tmp/sp500.json -w "%{http_code}" \
+            code=$(curl -s --max-time 50 --connect-timeout 10 -o /tmp/sp500.json -w "%{http_code}" \
               -H "Authorization: Bearer $CRON_SECRET" \
-              "$APP_URL/api/cron/ingest?universe=sp500&shard=${{ matrix.shard }}&shards=10") || curl_exit=$?
-            echo "attempt $attempt: curl exit: $curl_exit shard: ${{ matrix.shard }}"
+              "$APP_URL/api/cron/ingest?universe=sp500&shard=${{ matrix.shard }}&shards=20") || curl_exit=$?
+            echo "attempt $attempt: curl exit: $curl_exit shard: ${{ matrix.shard }} (28 = timeout after 50s)"
             echo "attempt $attempt: HTTP status: ${code:-<none>}"
             if [ -f /tmp/sp500.json ]; then head -c 2000 /tmp/sp500.json; echo ""; else echo "<no response body>"; fi
+            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              echo "Auth failed (HTTP $code): APP_URL/CRON_SECRET mismatch — not retrying. Check repo Secrets vs Vercel env."
+              break
+            fi
             if [ "$curl_exit" = "0" ] && [ "$code" = "200" ]; then ok=1; break; fi
-            if [ "$attempt" != "3" ]; then echo "sleeping 20s before retry..."; sleep 20; fi
+            if [ "$curl_exit" = "28" ]; then
+              echo "Shard request timed out: backend slower than 50s (cold start / vendor throttle). Warms the function; retrying."
+            fi
+            if [ "$attempt" != "4" ]; then echo "sleeping 25s before retry..."; sleep 25; fi
           done
           test "$ok" = "1"
         env:

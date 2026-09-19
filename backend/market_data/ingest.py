@@ -771,7 +771,7 @@ def ingest_symbols(
     unreachable DB (all symbols then land in ``errors``).
 
     ``budget_s`` caps the whole budgeted tick — parallel fetch phase plus
-    the sequential persist phase — for sharded 50-symbol serverless ticks:
+    the sequential persist phase — for sharded 25-symbol serverless ticks:
     symbols still unresolved when the fetch pool times out land in
     ``errors`` as "fetch budget exceeded", and symbols still unpersisted at
     the hard deadline land in ``errors`` as "persist deferred (retry next
@@ -779,7 +779,27 @@ def ingest_symbols(
     minutes past maxDuration (curl exit 28 with zero bytes). None keeps the
     legacy unbounded behavior (small default-universe ticks, CLI backfills).
     Progress accumulates across ticks via idempotent upserts.
+
+    The tick clock starts on entry (DB connect included): a slow/paused
+    Postgres previously hung OUTSIDE the budget and pushed the whole tick
+    past Vercel maxDuration even though fetch+persist fit. connect_timeout=5
+    (see db/session) plus elapsed-aware pool sizing fixes that class.
     """
+    # Tick clock starts FIRST so DB connect time counts against the budget.
+    tick_budget: float | None = None
+    if budget_s is not None:
+        try:
+            tick_budget = max(0.0, float(budget_s))
+        except (TypeError, ValueError):
+            tick_budget = None
+    tick_started = time.monotonic()
+
+    def _elapsed() -> float:
+        try:
+            return time.monotonic() - tick_started
+        except Exception:
+            return 0.0
+
     if registry is None:
         from backend.instruments.registry import InstrumentRegistry
 
@@ -813,22 +833,15 @@ def ingest_symbols(
     ingested: dict[str, int] = {}
     errors: dict[str, str] = {}
     try:
-        tick_budget: float | None = None
-        if budget_s is not None:
-            try:
-                tick_budget = max(0.0, float(budget_s))
-            except (TypeError, ValueError):
-                tick_budget = None
-        tick_started = time.monotonic()
-
         def _tick_expired() -> bool:
-            return tick_budget is not None and (time.monotonic() - tick_started) >= tick_budget
+            return tick_budget is not None and _elapsed() >= tick_budget
 
         # Parallel fetch, sequential persist: Yahoo fetches are I/O-bound and
-        # dominate wall time (9 symbols x 5-15s sequential = 45-135s > Vercel
-        # maxDuration 60). Fetch in a 4-worker pool with a bounded join, then
-        # upsert on this thread's single DB session (sessions are not
-        # thread-safe). DB writes stay sequential and race-safe.
+        # dominate wall time. Fetch in a bounded pool, then upsert on this
+        # thread's single DB session (sessions are not thread-safe). DB
+        # writes stay sequential and race-safe. Budgeted (sharded) ticks
+        # use 8 workers so 25 symbols clear in ~3-4 waves even when Yahoo
+        # throttles to ~8-10s per fetch; small unbounded ticks keep 4.
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _done
         from backend.security.validation import sanitize_error as _sanerr
 
@@ -889,7 +902,9 @@ def ingest_symbols(
                         reason = f"{type(exc).__name__}"
                     return (item_raw, provider_symbol, None, None, reason)
 
-            workers = max(1, min(4, len(resolved)))
+            # Budgeted ticks fan out wider: 25 symbols / 8 workers clears in
+            # ~4 waves; unbounded small ticks keep the legacy width of 4.
+            workers = max(1, min(8 if tick_budget is not None else 4, len(resolved)))
             try:
                 pool_timeout = 55.0
                 if tick_budget is not None:
@@ -897,8 +912,11 @@ def ingest_symbols(
                     # tick deadline covers fetch AND persist (a fetch phase
                     # that eats the whole budget would defer everything it
                     # just fetched — wasted vendor calls, zero durable
-                    # progress).
-                    pool_timeout = max(5.0, min(55.0, tick_budget - _PERSIST_RESERVE_S))
+                    # progress). Subtract time ALREADY spent (DB connect +
+                    # resolve) — the old code ignored it and routinely
+                    # overran Vercel maxDuration on slow-DB ticks.
+                    remaining_budget = tick_budget - _elapsed() - _PERSIST_RESERVE_S
+                    pool_timeout = max(5.0, min(40.0, remaining_budget))
                 _pool = _TPE(max_workers=workers)
                 try:
                     _futs = { _pool.submit(_do_fetch, r): r for r in resolved }

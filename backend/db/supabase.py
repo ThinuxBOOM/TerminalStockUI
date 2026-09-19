@@ -84,7 +84,12 @@ def create_supabase_engine(url: str | None = None, **kwargs):
     # prepared statements do not survive across checkouts
     # (DuplicatePreparedStatement). Disable them; plain queries only.
     # (Mirrors the pooled branch of backend/db/session._create_engine.)
+    # Fail-fast connects: without connect_timeout a paused/Unreachable
+    # Supabase holds the serverless tick open past Vercel maxDuration
+    # (curl exit 28, zero bytes). 5s fails fast into per-symbol
+    # "db unavailable" instead of a killed function.
     _connect_args = dict(kwargs.get("connect_args") or {})
     _connect_args.setdefault("prepare_threshold", None)
+    _connect_args.setdefault("connect_timeout", 5)
     kwargs["connect_args"] = _connect_args
     return create_engine(resolved, **kwargs)
