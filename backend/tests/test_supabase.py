@@ -92,7 +92,10 @@ def test_uuid_type_is_postgres_native():
 
 def test_pooled_engine_disables_prepared_statements(monkeypatch):
     """Transaction-mode poolers (:6543) cannot keep named prepared
-    statements across checkouts (DuplicatePreparedStatement)."""
+    statements across checkouts (DuplicatePreparedStatement). Fail-fast
+    connects (connect_timeout=5) are also required so a paused Supabase
+    fails into "db unavailable" instead of holding the serverless tick
+    past Vercel maxDuration (SP500 shard curl exit 28)."""
     from sqlalchemy.pool import NullPool
 
     import backend.db.session as sess
@@ -116,15 +119,22 @@ def test_pooled_engine_disables_prepared_statements(monkeypatch):
     engine = sess.get_engine(POOLED)
     try:
         assert captured.get("poolclass") is NullPool
-        assert captured.get("connect_args") == {"prepare_threshold": None}
+        assert captured.get("connect_args") == {
+            "prepare_threshold": None,
+            "connect_timeout": 5,
+        }
     finally:
         engine.dispose()
         sess.reset_engine()
 
 
 def test_direct_engine_keeps_default_prepares(monkeypatch):
+    """Direct (:5432) keeps server-side prepares but still fail-fasts
+    connects (connect_timeout=5, same SP500 rationale as the pooled
+    branch)."""
     import backend.db.session as sess
 
+    sess.reset_engine()
     captured: dict = {}
     real_create = sess.create_engine
 
@@ -137,6 +147,8 @@ def test_direct_engine_keeps_default_prepares(monkeypatch):
     engine = sess.get_engine(DIRECT)
     try:
         assert "poolclass" not in captured
-        assert "connect_args" not in captured
+        assert "prepare_threshold" not in (captured.get("connect_args") or {})
+        assert (captured.get("connect_args") or {}).get("connect_timeout") == 5
     finally:
         engine.dispose()
+        sess.reset_engine()
