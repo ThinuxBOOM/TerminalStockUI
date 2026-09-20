@@ -201,7 +201,7 @@ def test_eux_routing_versions_and_direction_blend():
 
     svc = ForecastService(market_service=_FakeMarket(make_eux_bars()))
     res = svc.forecast("MC.PA", 21, as_of=FIXED_AS_OF)
-    assert res["model_version"] == EUX_BLEND_VERSION == "ensemble-v2+eux-drift-v1"
+    assert res["model_version"] == EUX_BLEND_VERSION == "ensemble-v3+eux-drift-v1"
     assert res["feature_version"] == EUX_FEATURE_VERSION == "eux-features-v1"
     assert "eux" in res["data_version"]
     assert "sse" not in res["data_version"]
@@ -211,7 +211,7 @@ def test_eux_routing_versions_and_direction_blend():
     assert set(res["components"]) >= {"historical-drift", "momentum", "eux-drift"}
     assert "sse-drift" not in res["components"]
     assert EUX_DRIFT_VERSION in res["model_members"]
-    # ensemble-v2: weighted US mean (raw) blended 50/50 with eux-drift on RAW,
+    # ensemble-v3: weighted US mean (raw) blended 50/50 with eux-drift on RAW,
     # then shrinkage-calibrated.
     us_window = {k: v for k, v in res["components"].items() if k != "eux-drift"}
     us_raw = _weighted_mean(us_window)[0]
@@ -286,7 +286,7 @@ def test_us_and_sse_paths_unaffected():
     us = ForecastService(
         market_service=_FakeMarket(make_ohlcv(), instrument_id="XNAS-AAPL")
     ).forecast("AAPL", 21, as_of=FIXED_AS_OF)
-    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v2"
+    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v3"
     assert us["feature_version"] == "features-v2"
     assert "sse" not in us["data_version"]
     assert "eux" not in us["data_version"]
@@ -296,7 +296,7 @@ def test_us_and_sse_paths_unaffected():
     sse = ForecastService(
         market_service=_FakeMarket(make_ohlcv(), instrument_id="XSHG-600519.SS")
     ).forecast("600519.SS", 21, as_of=FIXED_AS_OF)
-    assert sse["model_version"] == SSE_BLEND_VERSION == "ensemble-v2+sse-drift-v1"
+    assert sse["model_version"] == SSE_BLEND_VERSION == "ensemble-v3+sse-drift-v1"
     assert sse["feature_version"] == SSE_FEATURE_VERSION == "sse-features-v1"
     assert "sse" in sse["data_version"]
     assert "eux" not in sse["data_version"]
@@ -308,7 +308,7 @@ def test_us_and_sse_paths_unaffected():
 
 def test_registry_exposes_all_three_models():
     models = {(m["name"], m["version"]) for m in list_models()}
-    assert ("ensemble", "ensemble-v2") in models
+    assert ("ensemble", "ensemble-v3") in models
     assert ("ensemble", "ensemble-v1") in models  # legacy retained
     assert ("sse-drift", "sse-drift-v1") in models
     assert ("eux-drift", "eux-drift-v1") in models

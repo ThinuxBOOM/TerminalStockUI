@@ -1,6 +1,6 @@
 """GET /api/signals/top — Top-5 BUY / Top-5 SHORT per market.
 
-Deterministic: ensemble-v2 direction_probability (weight 0.8) blended with
+Deterministic: ensemble-v3 direction_probability (weight 0.8) blended with
 local news sentiment (weight 0.2, mapped 0..1). No AI, no recommendations —
 ranked probabilities with full provenance + disclosure. Non-trader friendly
 labels included (plain-English verdict + what-it-means).

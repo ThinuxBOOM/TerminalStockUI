@@ -1,17 +1,21 @@
-"""Forecast orchestrator: market_data -> features -> models -> bands (Milestone 3).
+"""Forecast orchestrator: market_data -> features -> models -> bands (ensemble-v3).
 
 Deterministic, no AI, no network. The market-data bars used here are the
 offline-capable deterministic stub (seeded by symbol), so runs are
 reproducible per symbol/day without any provider call.
 
 Pipeline per (symbol, horizon):
-  1. MarketDataService.get_bars(symbol, limit=250) -> OHLCV + provenance.
+  1. MarketDataService.get_bars(symbol, limit=500) -> OHLCV + provenance.
   2. build_features(OHLCV) (past-only, leakage-safe).
-  3. Ensemble direction = mean of available {historical-drift, momentum,
-     logistic-direction} probabilities (logistic failure falls back cleanly).
+  3. Ensemble-v3 direction = adaptive (inverse-Brier) or fixed mean of
+     available {historical-drift, momentum, logistic-direction,
+     gradient-boost-direction, trend-persistence, mean-reversion}
+     probabilities (ML failure falls back cleanly), then isotonic/Platt
+     (or shrinkage) calibration.
   4. Expected-return range from empirical quantile bands (median -> mid).
   5. Volatility regime + drawdown probability from quantile_bands estimators.
-  6. Confidence from member agreement (+ quality-grade downgrade).
+  6. Confidence from member agreement + trailing skill (Brier/ECE/
+     n_effective) + quality-grade downgrades.
   7. Record dict whose keys mirror infra/migrations/0001_initial.sql
      forecasts table columns.
 
@@ -80,30 +84,44 @@ from backend.forecasting.models.euronext_drift import (
     MODEL_VERSION as EUX_DRIFT_VERSION,
     EuxDriftBaseline,
 )
-from backend.forecasting.registry import ENSEMBLE_VERSION, TREND_PERSISTENCE_VERSION
+from backend.forecasting.registry import (
+    ENSEMBLE_VERSION,
+    MEAN_REVERSION_VERSION,
+    TREND_PERSISTENCE_VERSION,
+)
 from backend.market_data.service import MarketDataService
 
 DISCLOSURE = "Not investment advice"
-BAR_LIMIT = 250
-#: ensemble-v2 fixed reliability weights (sum 1.0; renormalized over the
-#: members that actually ran). ML members get 0.25 each (nonlinear + linear
-#: capture different structure), drift/momentum 0.20 each (base-rate priors),
-#: trend-persistence 0.10 (heuristic quarterly tilt, lowest weight).
-#: Fixed (not per-symbol adaptive) for determinism; per-symbol adaptive
-#: weighting is the V2.1 hook (plug in trailing Brier inverse here).
+BAR_LIMIT = 500
+#: ensemble-v3 fixed reliability weights (sum 1.0; renormalized over the
+#: members that actually ran). ML members get 0.22 each (nonlinear + linear
+#: capture different structure), drift/momentum 0.18 each (base-rate priors),
+#: trend-persistence + mean-reversion 0.10 each (heuristics, lowest weight).
+#: Fixed weights are the fallback; per-symbol adaptive inverse-Brier weights
+#: (from trailing snapshots) plug in via _weighted_mean(..., member_brier).
 ENSEMBLE_WEIGHTS = {
-    "historical-drift": 0.20,
-    "momentum": 0.20,
-    "logistic-direction": 0.25,
-    "gradient-boost-direction": 0.25,
+    "historical-drift": 0.18,
+    "momentum": 0.18,
+    "logistic-direction": 0.22,
+    "gradient-boost-direction": 0.22,
     "trend-persistence": 0.10,
+    "mean-reversion": 0.10,
 }
-#: Shrinkage toward 0.5 applied to the weighted mean (damps overconfidence;
-#: raw ML/drift means are typically overconfident on 250-bar fits).
+#: Shrinkage toward 0.5 applied when no isotonic/Platt calibrator is
+#: available (damps overconfidence; raw ML/drift means are typically
+#: overconfident on 500-bar fits).
 #: p_cal = 0.5 + (p_raw - 0.5) * SHRINKAGE, then clipped to [FLOOR, CAP].
+#: With a fitted calibrator dict, _calibrate_prob applies it instead.
 CALIBRATION_SHRINKAGE = 0.8
 PROB_FLOOR = 0.05
 PROB_CAP = 0.95
+#: Skill gates for the v3 confidence honesty layer (see _confidence):
+#: ensemble Brier above coin-flip or ECE above this costs a notch.
+SKILL_BRIER_THRESHOLD = 0.25
+SKILL_ECE_THRESHOLD = 0.15
+#: Effective independent blocks below this costs a notch (overlapping
+#: h-day windows: n_effective ~= n_windows / horizon).
+SKILL_MIN_N_EFFECTIVE = 5.0
 #: Member-agreement spread (max(p) - min(p)) for full 3-member "high"
 #: confidence. Values unchanged; named so the band lives in one place.
 CONFIDENCE_HIGH_MAX_SPREAD = 0.08
@@ -114,8 +132,8 @@ DRAWDOWN_PENALTY_THRESHOLD = 0.25
 #: Volatility regimes that cost one confidence notch (strongest bucket first).
 VOLATILITY_PENALTY_REGIMES = frozenset({"high", "elevated", "extreme"})
 #: Members needed for "high" confidence (thin ensembles cap at moderate).
-#: ensemble-v2 has 5 members; require >= 4 for high (one ML miss tolerated).
-FULL_ENSEMBLE_MIN_MODELS = 4
+#: ensemble-v3 has 6 members; require >= 5 for high (one ML miss tolerated).
+FULL_ENSEMBLE_MIN_MODELS = 5
 #: Minimum distance of the ensemble mean from 0.5 for "high" confidence.
 #: Agreement near coin-flip (e.g. members {0.51,0.53,0.55}) must not read
 #: as high-confidence even when spread is tight.
@@ -134,6 +152,7 @@ MEMBER_VERSIONS = {
     "logistic-direction": LOGISTIC_VERSION,
     "gradient-boost-direction": GRADIENT_BOOST_VERSION,
     "trend-persistence": TREND_PERSISTENCE_VERSION,
+    "mean-reversion": MEAN_REVERSION_VERSION,
     "sse-drift": SSE_DRIFT_VERSION,
     "eux-drift": EUX_DRIFT_VERSION,
 }
@@ -148,11 +167,65 @@ MEMBER_FORMULAS = {
         "z = (mom_63/vol_63)*2 + trail_dd_63*2 + ((rsi_14-50)/50)*0.5; "
         "P = sigmoid(clip(z, -6, 6)) (63d trend + drawdown + RSI persistence)"
     ),
+    "mean-reversion": (
+        "z = ((50-rsi_14)/50)*1.0 + (-ret_5/(vol_daily*sqrt(5)))*0.5; "
+        "P = sigmoid(clip(z, -6, 6)) (RSI + 5d reversal contrarian)"
+    ),
 }
 
 
-def _weighted_mean(probas: dict[str, float | None]) -> tuple[float, dict[str, float], float, float]:
-    """Fixed-weight mean over available members (deterministic).
+def _adaptive_weights(
+    available: list[str], member_brier: dict[str, float | None] | None
+) -> dict[str, float] | None:
+    """Inverse-Brier weights over ``available``; None when unusable.
+
+    Deterministic, never raises. Falls back to fixed ENSEMBLE_WEIGHTS when
+    fewer than 2 members carry finite Brier in (0, 1], or when the Brier
+    dict is missing. Single usable member is NOT enough to go adaptive
+    (would pin 1.0 on one model); caller keeps fixed weights instead.
+    """
+    try:
+        if not isinstance(member_brier, dict) or not member_brier:
+            return None
+        inv: dict[str, float] = {}
+        for name in available:
+            try:
+                b = member_brier.get(name)
+            except Exception:
+                continue
+            if b is None or isinstance(b, bool):
+                continue
+            try:
+                v = float(b)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(v) or v <= 1e-9 or v > 1.0:
+                continue
+            inv[str(name)] = 1.0 / v
+        if len(inv) < 2:
+            return None
+        # Only go adaptive when every available member has skill data;
+        # partial skill would silently zero-weight the unknown members.
+        if set(inv) != set(available):
+            return None
+        total = sum(inv.values())
+        if not total > 0 or not math.isfinite(total):
+            return None
+        return {k: v / total for k, v in inv.items()}
+    except Exception:
+        return None
+
+
+def _weighted_mean(
+    probas: dict[str, float | None],
+    member_brier: dict[str, float | None] | None = None,
+) -> tuple[float, dict[str, float], float, float]:
+    """Weighted mean over available members (deterministic).
+
+    Fixed ENSEMBLE_WEIGHTS by default, renormalized over members that ran.
+    Pass ``member_brier`` (trailing per-member Brier from snapshots) for
+    inverse-Brier adaptive weighting; unusable skill falls back to fixed
+    weights so the path never crashes and old callers are unaffected.
 
     Returns (mean_raw, weights_used, spread, std). Missing/None/NaN members
     are skipped and remaining weights renormalized proportionally. Empty
@@ -171,13 +244,17 @@ def _weighted_mean(probas: dict[str, float | None]) -> tuple[float, dict[str, fl
             clean[name] = min(max(number, 0.0), 1.0)
     if not clean:
         return 0.5, {}, 0.0, 0.0
-    total_w = sum(float(ENSEMBLE_WEIGHTS.get(n, 0.0)) for n in clean)
-    if not total_w > 0:
-        # Unknown member keys only: fall back to equal weight (never crash).
-        equal = 1.0 / len(clean)
-        weights = {n: equal for n in clean}
+    adaptive = _adaptive_weights(list(clean), member_brier)
+    if adaptive is not None:
+        weights = adaptive
     else:
-        weights = {n: float(ENSEMBLE_WEIGHTS.get(n, 0.0)) / total_w for n in clean}
+        total_w = sum(float(ENSEMBLE_WEIGHTS.get(n, 0.0)) for n in clean)
+        if not total_w > 0:
+            # Unknown member keys only: fall back to equal weight (never crash).
+            equal = 1.0 / len(clean)
+            weights = {n: equal for n in clean}
+        else:
+            weights = {n: float(ENSEMBLE_WEIGHTS.get(n, 0.0)) / total_w for n in clean}
     mean = sum(clean[n] * weights[n] for n in clean)
     values = list(clean.values())
     spread = float(max(values) - min(values)) if len(values) > 1 else 0.0
@@ -189,8 +266,22 @@ def _weighted_mean(probas: dict[str, float | None]) -> tuple[float, dict[str, fl
     return float(mean), weights, spread, float(std)
 
 
-def _calibrate_prob(p_raw: float) -> float:
-    """Shrinkage calibration: pull raw mean toward 0.5, clip extremes."""
+def _calibrate_prob(p_raw: float, calibrator: dict | None = None) -> float:
+    """Calibrate a raw ensemble mean (deterministic, never raises).
+
+    With a fitted ``calibrator`` dict (isotonic/Platt from walk-forward
+    OOF pairs) applies it; otherwise the v2 shrinkage fallback:
+    p_cal = 0.5 + (p_raw - 0.5) * SHRINKAGE, clipped to [FLOOR, CAP].
+    """
+    if isinstance(calibrator, dict) and calibrator:
+        try:
+            from backend.forecasting.calibration.calibrators import (
+                apply_calibrator as _apply,
+            )
+
+            return float(_apply(p_raw, calibrator))
+        except Exception:
+            pass
     try:
         raw = float(p_raw)
     except (TypeError, ValueError):
@@ -435,6 +526,51 @@ def _trend_persistence_signal(ohlcv: pd.DataFrame, _ext: pd.DataFrame | None = N
         return None
 
 
+def _mean_reversion_signal(ohlcv: pd.DataFrame, _ext: pd.DataFrame | None = None) -> float | None:
+    """6th ensemble member (contrarian: RSI + 5d reversal).
+
+    Past-only, deterministic, bounded [0, 1], None when history is too
+    short or non-finite. Never raises. Diversifies the trend-following
+    members (drift/momentum/trend-persistence): oversold + recent drop
+    reads bullish, overbought + recent jump reads bearish.
+
+    ``_ext`` accepts a precomputed extended-feature frame (same pattern as
+    :func:`_trend_persistence_signal`); values identical either way.
+    """
+    try:
+        ext = _ext if _ext is not None else build_extended_features(ohlcv)
+    except Exception:
+        return None
+    try:
+        if len(ext) == 0:
+            return None
+        last = ext.iloc[-1]
+        rsi = float(last.get("rsi_14", 50.0) or 50.0)
+        ret5 = float(last.get("ret_5", 0.0) or 0.0)
+        vol_ann = float(last.get("vol_21", float("nan")))
+    except Exception:
+        return None
+    try:
+        import math as _math
+
+        if not (_math.isfinite(rsi) and _math.isfinite(ret5)):
+            return None
+        # Annualized vol_21 -> daily; guard flat history.
+        if _math.isfinite(vol_ann) and vol_ann > 1e-6:
+            vol_daily = vol_ann / _math.sqrt(252.0)
+        else:
+            vol_daily = 0.01
+        denom = vol_daily * _math.sqrt(5.0)
+        if not _math.isfinite(denom) or denom <= 1e-9:
+            denom = 0.02
+        # RSI contrarian tilt + standardized 5d reversal.
+        z = ((50.0 - rsi) / 50.0) * 1.0 + (-ret5 / denom) * 0.5
+        z = max(min(z, 6.0), -6.0)
+        return 1.0 / (1.0 + _math.exp(-z))
+    except Exception:
+        return None
+
+
 def _confidence(
     spread: float,
     n_models: int,
@@ -444,10 +580,13 @@ def _confidence(
     direction_prob: float | None = None,
     mean_prob: float | None = None,
     ai_disagreement: float | None = None,
+    skill_brier: float | None = None,
+    skill_ece: float | None = None,
+    n_effective: float | None = None,
 ) -> str:
-    """Deterministic confidence from member agreement.
+    """Deterministic confidence from member agreement + trailing skill.
 
-    spread = max(p) - min(p) over ensemble members. Full agreement + 3
+    spread = max(p) - min(p) over ensemble members. Full agreement + 5
     members -> high; moderate agreement -> moderate; else low. Thin
     ensembles (fallback) cap at moderate; poor data quality caps at low.
 
@@ -464,6 +603,10 @@ def _confidence(
         (legacy callers) skips the gate for backward compat.
       * ai_disagreement > AI_DISAGREEMENT_THRESHOLD -> one notch down
         (wires AI second-opinion clash into the displayed label).
+      * v3 skill honesty (all ``None``-safe no-ops for legacy callers):
+        trailing ensemble Brier >= 0.25 (no better than coin-flip),
+        ECE >= 0.15, or n_effective < 5 each cost one notch. These wire
+        walk-forward skill (not just agreement) into the label.
     ``regime=None`` / ``drawdown_prob=None`` are no-ops (backward compat).
 
     NOTE (future per-user calibration hook): per-user / per-tier confidence
@@ -534,6 +677,26 @@ def _confidence(
         if _ad_f is not None and math.isfinite(_ad_f):
             if _ad_f > AI_DISAGREEMENT_THRESHOLD:
                 level = _penalize_confidence(level)
+    # v3 skill honesty: trailing walk-forward skill downgrades agreement-only
+    # labels. All inputs None-safe (legacy callers pass nothing -> no-op).
+    try:
+        _sb = float(skill_brier) if skill_brier is not None and not isinstance(skill_brier, bool) else None
+    except (TypeError, ValueError):
+        _sb = None
+    if _sb is not None and math.isfinite(_sb) and _sb >= SKILL_BRIER_THRESHOLD:
+        level = _penalize_confidence(level)
+    try:
+        _se = float(skill_ece) if skill_ece is not None and not isinstance(skill_ece, bool) else None
+    except (TypeError, ValueError):
+        _se = None
+    if _se is not None and math.isfinite(_se) and _se >= SKILL_ECE_THRESHOLD:
+        level = _penalize_confidence(level)
+    try:
+        _ne = float(n_effective) if n_effective is not None and not isinstance(n_effective, bool) else None
+    except (TypeError, ValueError):
+        _ne = None
+    if _ne is not None and math.isfinite(_ne) and _ne < SKILL_MIN_N_EFFECTIVE:
+        level = _penalize_confidence(level)
     return level
 
 
@@ -634,7 +797,7 @@ class ForecastService:
         if len(rows) < 100:
             raise ValueError(f"insufficient history for {symbol!r}: {len(rows)} bars")
         # Drop incomplete OHLC rows (None open/high/low): a single None bar
-        # must not kill a 250-bar forecast. Count drops in provenance.
+        # must not kill a 500-bar forecast. Count drops in provenance.
         prov = dict(bars.get("provenance", {}) or {})
         try:
             kept = [r for r in rows if r.get("close") is not None]
@@ -694,8 +857,25 @@ class ForecastService:
 
     # -- public ---------------------------------------------------------
     def forecast(
-        self, symbol: str, horizon: int, as_of: str | None = None
+        self,
+        symbol: str,
+        horizon: int,
+        as_of: str | None = None,
+        member_brier: dict[str, float | None] | None = None,
+        calibrator: dict | None = None,
+        skill_brier: float | None = None,
+        skill_ece: float | None = None,
     ) -> dict:
+        """Forecast one symbol/horizon (ensemble-v3 direction + bands + risk).
+
+        Optional v3 skill hooks (all backward-compatible no-ops when None):
+          * ``member_brier``: trailing per-member Brier for inverse-Brier
+            adaptive weighting (fixed ENSEMBLE_WEIGHTS fallback).
+          * ``calibrator``: fitted isotonic/Platt dict for the raw mean
+            (shrinkage fallback).
+          * ``skill_brier``/``skill_ece``: trailing ensemble skill wired
+            into the confidence label (agreement + skill honesty).
+        """
         try:
             horizon = int(horizon)  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
@@ -736,15 +916,16 @@ class ForecastService:
         closes = ohlcv["close"]
         # Single-validate feature bundle: v1 frame (kept for compat) + v2
         # extended frame for the ML members share one validation + RSI pass.
-        # ensemble-v2 fits logistic-v3 + gradient-boost-v1 on the EXTENDED
+        # ensemble-v3 fits logistic-v3 + gradient-boost-v1 on the EXTENDED
         # frame (14 cols); drift/momentum stay on closes/log-returns.
         features, ext_features = build_feature_bundle(ohlcv)
 
-        # -- direction ensemble v2 (weighted + shrinkage-calibrated) -----
+        # -- direction ensemble v3 (adaptive + isotonic-calibrated) -------
         # Members: drift + momentum (priors) + logistic-v3 + gradient-boost-v1
-        # (ML, v2 features) + trend-persistence (heuristic). Fixed weights in
-        # ENSEMBLE_WEIGHTS, renormalized over members that actually ran;
-        # raw weighted mean -> shrinkage calibration -> clipped primary.
+        # (ML, v2 features) + trend-persistence + mean-reversion (heuristics).
+        # Fixed ENSEMBLE_WEIGHTS unless member_brier enables inverse-Brier
+        # adaptive weights (renormalized over members that actually ran);
+        # raw weighted mean -> isotonic/Platt (or shrinkage) -> clipped.
         lret = log_returns(closes).dropna()
         drift_p = float(
             HistoricalDriftBaseline()
@@ -791,9 +972,19 @@ class ForecastService:
                 probas["trend-persistence"] = float(trend_p)
         except Exception:
             pass
-        us_raw, us_weights, us_spread, _us_std = _weighted_mean(probas)
+        # 6th member (v3): mean-reversion contrarian (RSI + 5d reversal).
+        # Diversifies the trend-following members; same frame, no rebuild.
+        try:
+            mr_p = _mean_reversion_signal(ohlcv, _ext=ext_features)
+            if mr_p is not None and 0.0 <= float(mr_p) <= 1.0:
+                probas["mean-reversion"] = float(mr_p)
+        except Exception:
+            pass
+        us_raw, us_weights, us_spread, _us_std = _weighted_mean(
+            probas, member_brier=member_brier
+        )
         us_direction_raw = float(us_raw)
-        us_direction = float(_calibrate_prob(us_raw))
+        us_direction = float(_calibrate_prob(us_raw, calibrator=calibrator))
         formulas: dict[str, str] = {
             name: MEMBER_FORMULAS[name] for name in probas if name in MEMBER_FORMULAS
         }
@@ -852,7 +1043,7 @@ class ForecastService:
                 "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized SSE drift"
             )
             direction_raw = float((us_direction_raw + sse_p) / 2.0)
-            direction = float(_calibrate_prob(direction_raw))
+            direction = float(_calibrate_prob(direction_raw, calibrator=calibrator))
             spread = float(max(probas.values()) - min(probas.values())) if probas else 0.0
             try:
                 _sse_std = float(pd.Series(list(probas.values())).std(ddof=1))
@@ -890,6 +1081,9 @@ class ForecastService:
                 regime,
                 dd_prob,
                 direction_prob=direction,
+                skill_brier=skill_brier,
+                skill_ece=skill_ece,
+                n_effective=us_range.get("n_effective"),
             )
             confidence = (
                 _penalize_confidence(base_confidence)
@@ -917,7 +1111,7 @@ class ForecastService:
                 "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized Euronext drift"
             )
             direction_raw = float((us_direction_raw + eux_p) / 2.0)
-            direction = float(_calibrate_prob(direction_raw))
+            direction = float(_calibrate_prob(direction_raw, calibrator=calibrator))
             spread = float(max(probas.values()) - min(probas.values())) if probas else 0.0
             try:
                 _eux_std = float(pd.Series(list(probas.values())).std(ddof=1))
@@ -953,6 +1147,9 @@ class ForecastService:
                 regime,
                 dd_prob,
                 direction_prob=direction,
+                skill_brier=skill_brier,
+                skill_ece=skill_ece,
+                n_effective=us_range.get("n_effective"),
             )
             model_version = EUX_BLEND_VERSION
             feature_version = EUX_FEATURE_VERSION
@@ -972,6 +1169,9 @@ class ForecastService:
                 regime,
                 dd_prob,
                 direction_prob=direction,
+                skill_brier=skill_brier,
+                skill_ece=skill_ece,
+                n_effective=us_range.get("n_effective"),
             )
             model_version = ENSEMBLE_VERSION
             feature_version = EXTENDED_FEATURE_VERSION
@@ -979,7 +1179,7 @@ class ForecastService:
         # reason is already disclosed in provenance missing_fields above).
         confidence_reasons: list[str] = []
         # Base penalties already inside _confidence: regime, drawdown, grade,
-        # sharpness. Record them for the wire `confidence_reasons`.
+        # sharpness, skill. Record them for the wire `confidence_reasons`.
         try:
             if str(regime).lower() in VOLATILITY_PENALTY_REGIMES:
                 confidence_reasons.append(f"volatility regime {regime} penalty (-1 notch)")
@@ -993,6 +1193,35 @@ class ForecastService:
                     )
                 elif isinstance(dd_prob, float) and math.isnan(float(dd_prob)):
                     confidence_reasons.append("drawdown unknown penalty (conservative)")
+        except Exception:
+            pass
+        # v3 skill honesty reasons (mirror the _confidence gates above).
+        try:
+            if skill_brier is not None and not isinstance(skill_brier, bool):
+                _sbf = float(skill_brier)
+                if math.isfinite(_sbf) and _sbf >= SKILL_BRIER_THRESHOLD:
+                    confidence_reasons.append(
+                        f"trailing Brier {_sbf:.3f} >= {SKILL_BRIER_THRESHOLD:.2f} (coin-flip) penalty"
+                    )
+        except Exception:
+            pass
+        try:
+            if skill_ece is not None and not isinstance(skill_ece, bool):
+                _sef = float(skill_ece)
+                if math.isfinite(_sef) and _sef >= SKILL_ECE_THRESHOLD:
+                    confidence_reasons.append(
+                        f"trailing ECE {_sef:.3f} >= {SKILL_ECE_THRESHOLD:.2f} penalty"
+                    )
+        except Exception:
+            pass
+        try:
+            _neff = expected_range.get("n_effective")
+            if _neff is not None and not isinstance(_neff, bool):
+                _neff_f = float(_neff)
+                if math.isfinite(_neff_f) and _neff_f < SKILL_MIN_N_EFFECTIVE:
+                    confidence_reasons.append(
+                        f"thin effective sample (n_effective {_neff_f:.1f} < {SKILL_MIN_N_EFFECTIVE:.0f}) penalty"
+                    )
         except Exception:
             pass
         if thin_note:
@@ -1165,11 +1394,30 @@ class ForecastService:
         # shaping belongs here as a pure function of (payload, user_tier) —
         # owned by another agent (auth/tiers). Never branch global
         # determinism on identity here; identical inputs stay identical.
+        try:
+            _adaptive = bool(
+                isinstance(member_brier, dict) and len(member_brier) >= 2
+                and set(weights_used) <= set(member_brier)
+                and any(
+                    abs(float(weights_used.get(k, 0.0)) - float(ENSEMBLE_WEIGHTS.get(k, 0.0) or 0.0)) > 1e-9
+                    for k in weights_used if k in ENSEMBLE_WEIGHTS
+                )
+            )
+        except Exception:
+            _adaptive = False
+        try:
+            _cal_method = "isotonic-platt" if isinstance(calibrator, dict) and calibrator else "shrinkage-0.8"
+        except Exception:
+            _cal_method = "shrinkage-0.8"
         payload = {
             "symbol": symbol.strip().upper(),
             "horizon_days": horizon,
             "direction_probability": direction,
             "direction_probability_raw": float(direction_raw),
+            "calibration_method": _cal_method,
+            "adaptive_weights": bool(_adaptive),
+            "skill_brier": _finite_or_none(skill_brier),
+            "skill_ece": _finite_or_none(skill_ece),
             "expected_return_range": expected_range,
             "volatility_regime": regime,
             "volatility_detail": regime_detail,
@@ -1202,15 +1450,23 @@ class ForecastService:
                 pass
         return payload
 
-    def forecast_all(self, symbol: str, as_of: str | None = None) -> dict[int, dict]:
+    def forecast_all(
+        self,
+        symbol: str,
+        as_of: str | None = None,
+        skill_by_horizon: dict[int, dict] | None = None,
+    ) -> dict[int, dict]:
         """All horizons with ONE bars load + ONE feature build.
 
         Shared: bars, OHLCV frame, v1+v2 features, log-returns, quantile bands
         (single multi-horizon call), volatility regime (horizon-independent),
-        trend-persistence signal and the multi-horizon ML fits (logistic-v3 +
-        gradient-boost-v1 on the extended frame). Per horizon only the cheap
-        drift/momentum scalars, venue-drift blend, drawdown probability and
-        record assembly remain. ensemble-v2 weighted + shrinkage-calibrated.
+        trend-persistence + mean-reversion signals and the multi-horizon ML
+        fits (logistic-v3 + gradient-boost-v1 on the extended frame). Per
+        horizon only the cheap drift/momentum scalars, venue-drift blend,
+        drawdown probability and record assembly remain. ensemble-v3
+        adaptive-weighted + isotonic-calibrated (skill_by_horizon[h] may
+        carry {member_brier, calibrator, skill_brier, skill_ece}; missing
+        horizons fall back to fixed weights + shrinkage).
         """
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
@@ -1294,6 +1550,12 @@ class ForecastService:
         except Exception:
             trend_p = None
         try:
+            mr_p_all = _mean_reversion_signal(ohlcv, _ext=ext_features)
+            if mr_p_all is not None and not 0.0 <= float(mr_p_all) <= 1.0:
+                mr_p_all = None
+        except Exception:
+            mr_p_all = None
+        try:
             logreg_all = LogisticDirectionModel(
                 horizons=list(FORECAST_HORIZONS)
             ).fit(ext_features, closes)
@@ -1369,12 +1631,22 @@ class ForecastService:
                     pass
             if trend_p is not None:
                 probas["trend-persistence"] = float(trend_p)
+            if mr_p_all is not None:
+                probas["mean-reversion"] = float(mr_p_all)
             for _m in list(probas):
                 if _m in MEMBER_FORMULAS:
                     formulas_loop[_m] = MEMBER_FORMULAS[_m]
-            us_raw_loop, us_w_loop, us_spread_loop, us_std_loop = _weighted_mean(probas)
+            try:
+                _skill_h = (skill_by_horizon or {}).get(int(horizon)) or {}
+            except Exception:
+                _skill_h = {}
+            _mb_h = _skill_h.get("member_brier") if isinstance(_skill_h, dict) else None
+            _cal_h = _skill_h.get("calibrator") if isinstance(_skill_h, dict) else None
+            us_raw_loop, us_w_loop, us_spread_loop, us_std_loop = _weighted_mean(
+                probas, member_brier=_mb_h
+            )
             us_direction_raw_loop = float(us_raw_loop)
-            us_direction_loop = float(_calibrate_prob(us_raw_loop))
+            us_direction_loop = float(_calibrate_prob(us_raw_loop, calibrator=_cal_h))
             band_obj = bands_all.get(horizon) if isinstance(bands_all, dict) else None
             try:
                 band = band_obj.value if band_obj is not None else None
@@ -1443,7 +1715,7 @@ class ForecastService:
                 probas["sse-drift"] = sse_p
                 formulas_loop["sse-drift"] = "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized SSE drift"
                 direction_raw_loop = float((us_direction_raw_loop + sse_p) / 2.0)
-                direction = float(_calibrate_prob(direction_raw_loop))
+                direction = float(_calibrate_prob(direction_raw_loop, calibrator=_cal_h))
                 sse_band = sse_model_all.expected_return_range(
                     horizon, as_of=stamp, data_version=data_version
                 ).value
@@ -1463,11 +1735,16 @@ class ForecastService:
                 # Limit proximity is horizon-independent (same trailing bars):
                 # hoisted above the loop (identical values, one build).
                 proximity_fired = proximity_all
+                _sb_h = _skill_h.get("skill_brier") if isinstance(_skill_h, dict) else None
+                _se_h = _skill_h.get("skill_ece") if isinstance(_skill_h, dict) else None
                 base_conf = _confidence(
                     float(max(probas.values()) - min(probas.values())) if probas else 0.0,
                     len(probas), str(provenance.get("quality_grade") or "U"),
                     regime, dd_prob,
                     direction_prob=direction,
+                    skill_brier=_sb_h,
+                    skill_ece=_se_h,
+                    n_effective=us_range.get("n_effective"),
                 )
                 confidence = _penalize_confidence(base_conf) if proximity_fired else base_conf
                 model_version, feature_version = SSE_BLEND_VERSION, SSE_FEATURE_VERSION
@@ -1488,7 +1765,7 @@ class ForecastService:
                 probas["eux-drift"] = eux_p
                 formulas_loop["eux-drift"] = "P(up_h) = Phi(mu*h/(sigma*sqrt(h))); winsorized Euronext drift"
                 direction_raw_loop = float((us_direction_raw_loop + eux_p) / 2.0)
-                direction = float(_calibrate_prob(direction_raw_loop))
+                direction = float(_calibrate_prob(direction_raw_loop, calibrator=_cal_h))
                 eux_band = eux_model_all.expected_return_range(
                     horizon, as_of=stamp, data_version=data_version
                 ).value
@@ -1510,6 +1787,9 @@ class ForecastService:
                     len(probas), str(provenance.get("quality_grade") or "U"),
                     regime, dd_prob,
                     direction_prob=direction,
+                    skill_brier=_skill_h.get("skill_brier") if isinstance(_skill_h, dict) else None,
+                    skill_ece=_skill_h.get("skill_ece") if isinstance(_skill_h, dict) else None,
+                    n_effective=us_range.get("n_effective"),
                 )
                 model_version, feature_version = EUX_BLEND_VERSION, EUX_FEATURE_VERSION
                 weights_loop = {**{k: v * 0.5 for k, v in us_w_loop.items()}, "eux-drift": 0.5}
@@ -1529,6 +1809,9 @@ class ForecastService:
                     len(probas), str(provenance.get("quality_grade") or "U"),
                     regime, dd_prob,
                     direction_prob=direction,
+                    skill_brier=_skill_h.get("skill_brier") if isinstance(_skill_h, dict) else None,
+                    skill_ece=_skill_h.get("skill_ece") if isinstance(_skill_h, dict) else None,
+                    n_effective=us_range.get("n_effective"),
                 )
                 model_version, feature_version = ENSEMBLE_VERSION, EXTENDED_FEATURE_VERSION
                 weights_loop = dict(us_w_loop)
@@ -1712,14 +1995,19 @@ __all__ = [
     "CALIBRATION_SHRINKAGE",
     "PROB_FLOOR",
     "PROB_CAP",
+    "SKILL_BRIER_THRESHOLD",
+    "SKILL_ECE_THRESHOLD",
+    "SKILL_MIN_N_EFFECTIVE",
     "MEMBER_VERSIONS",
     "MEMBER_FORMULAS",
     "ForecastService",
     "clear_forecast_cache",
     "get_forecast_service",
     "reset_forecast_service",
+    "_adaptive_weights",
     "_weighted_mean",
     "_calibrate_prob",
     "_confidence_score",
     "_trend_persistence_signal",
+    "_mean_reversion_signal",
 ]

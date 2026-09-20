@@ -380,8 +380,21 @@ def get_forecast(
             detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
         )
     symbol = validate_symbol(symbol)
+    # v3 skill pre-fetch (best-effort): trailing snapshot skill enables
+    # inverse-Brier adaptive weights + isotonic calibration + skill-aware
+    # confidence. All-None on miss keeps the fixed/shrinkage fallback.
     try:
-        result = svc.forecast(symbol, int(horizon))
+        _mb, _cal, _sb, _se = _latest_skill(
+            symbol, int(horizon), market_service=getattr(svc, "market", None)
+        )
+    except Exception:
+        _mb, _cal, _sb, _se = None, None, None, None
+    try:
+        result = svc.forecast(
+            symbol, int(horizon),
+            member_brier=_mb, calibrator=_cal,
+            skill_brier=_sb, skill_ece=_se,
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -457,23 +470,30 @@ def get_forecast(
 
 def forecast_limitations(result: dict) -> list[str]:
     """Honest caveats for the forecast payload (never empty on live data)."""
+    try:
+        _cal_method = str(result.get("calibration_method") or "shrinkage-0.8")
+    except Exception:
+        _cal_method = "shrinkage-0.8"
+    try:
+        _adaptive = bool(result.get("adaptive_weights"))
+    except Exception:
+        _adaptive = False
     items = [
         "Walk-forward validation only; no look-ahead.",
         "Missing data renders unavailable, never silently imputed.",
         "Disabling AI leaves forecasting intact.",
-        "Direction probabilities are shrinkage-calibrated weighted means "
-        "(shrinkage 0.8 toward 0.5, clipped to [0.05, 0.95]; raw mean in "
-        "direction_probability_raw) — not isotonic-calibrated; see ECE. "
-        "Fixed reliability weights (ML 0.25 each, drift/momentum 0.20 each, "
-        "trend 0.10), renormalized over members that ran; not per-symbol "
-        "adaptive (V2.1 hook). "
+        f"Direction probabilities are {_cal_method}-calibrated weighted means "
+        "(raw mean in direction_probability_raw, clipped to [0.05, 0.95]). "
+        f"Weights are {'inverse-Brier adaptive from trailing snapshots' if _adaptive else 'fixed reliability weights (ML 0.22 each, drift/momentum 0.18 each, heuristics 0.10 each), renormalized over members that ran'}. "
         "Confidence labels reflect ensemble agreement downgraded by "
-        "data-quality and trailing-risk signals (vol regime, drawdown, "
-        "staleness), not calibrated skill. High agreement near 0.5 caps at "
+        "data-quality, trailing-risk signals (vol regime, drawdown, "
+        "staleness) AND trailing skill (Brier>=0.25, ECE>=0.15, "
+        "n_effective<5 each cost a notch). High agreement near 0.5 caps at "
         "moderate; AI disagreement downgrades the blend label.",
-        "ensemble-v2 members: historical-drift + momentum + logistic-v3 "
-        "(v2 features) + gradient-boost-v1 (v2 features) + trend-persistence; "
-        "venue blends add sse/eux drift 50/50 then recalibrate.",
+        "ensemble-v3 members: historical-drift + momentum + logistic-v3 "
+        "(v2 features) + gradient-boost-v1 (v2 features) + trend-persistence + "
+        "mean-reversion (contrarian); venue blends add sse/eux drift 50/50 "
+        "then recalibrate.",
     ]
     band = result.get("expected_return_range") or {}
     if band.get("n_windows") is not None:
@@ -533,6 +553,26 @@ def _snapshot_meta(row) -> dict | None:
             n_windows = 0
         members = getattr(row, "members", None)
         members_d = dict(members) if isinstance(members, dict) else {}
+        try:
+            cal_b = getattr(row, "calibrated_brier", None)
+            cal_b_f = None if cal_b is None else float(cal_b)
+        except (TypeError, ValueError):
+            cal_b_f = None
+        try:
+            cal_e = getattr(row, "calibrated_ece", None)
+            cal_e_f = None if cal_e is None else float(cal_e)
+        except (TypeError, ValueError):
+            cal_e_f = None
+        try:
+            mb = getattr(row, "member_brier", None)
+            mb_d = dict(mb) if isinstance(mb, dict) else {}
+        except Exception:
+            mb_d = {}
+        try:
+            cal = getattr(row, "calibrator", None)
+            cal_d = dict(cal) if isinstance(cal, dict) else {}
+        except Exception:
+            cal_d = {}
         created = getattr(row, "created_at", None)
         try:
             created_s = created.isoformat() if hasattr(created, "isoformat") else str(created)
@@ -543,6 +583,10 @@ def _snapshot_meta(row) -> dict | None:
             "ece": ece_f,
             "n_windows": n_windows,
             "members": members_d,
+            "member_brier": mb_d,
+            "calibrated_brier": cal_b_f,
+            "calibrated_ece": cal_e_f,
+            "calibrator": cal_d,
             "model_version": str(getattr(row, "model_version", "") or ""),
             "data_version": str(getattr(row, "data_version", "") or ""),
             "created_at": created_s,
@@ -555,7 +599,8 @@ def _snapshot_wire(row) -> dict:
     """Full wire shape for one snapshot in history (never raises)."""
     meta = _snapshot_meta(row) or {
         "brier": None, "ece": None, "n_windows": 0, "members": {},
-        "model_version": "", "data_version": "", "created_at": "",
+        "member_brier": {}, "calibrated_brier": None, "calibrated_ece": None,
+        "calibrator": {}, "model_version": "", "data_version": "", "created_at": "",
     }
     try:
         reliability = getattr(row, "reliability", None)
@@ -568,10 +613,80 @@ def _snapshot_wire(row) -> dict:
         "n_windows": meta["n_windows"],
         "reliability": rel,
         "members": meta["members"],
+        "member_brier": meta.get("member_brier") or {},
+        "calibrated_brier": meta.get("calibrated_brier"),
+        "calibrated_ece": meta.get("calibrated_ece"),
         "model_version": meta["model_version"],
         "data_version": meta["data_version"],
         "created_at": meta["created_at"],
     }
+
+
+def _latest_skill(
+    symbol: str, horizon: int, market_service=None
+) -> tuple[dict | None, dict | None, float | None, float | None]:
+    """Best-effort v3 skill bundle for the live forecast path.
+
+    Returns (member_brier, calibrator, skill_brier, skill_ece) from the
+    latest ensemble-v3 snapshot with n_windows >= 10; all-None when
+    missing/thin/DB-down (caller falls back to fixed weights + shrinkage).
+    Never raises, never blocks the forecast path on DB latency beyond a
+    best-effort read.
+    """
+    try:
+        from backend.db.session import get_session_factory, init_db
+        from backend.forecasting.calibration.snapshots import (
+            MIN_SCORED_WINDOWS,
+            canonical_symbol,
+            get_latest_snapshot,
+        )
+        from backend.forecasting.registry import ENSEMBLE_VERSION
+
+        try:
+            init_db()
+        except Exception:
+            pass
+        Session = get_session_factory()
+        db = Session()
+        try:
+            canonical = canonical_symbol(symbol, market_service)
+            row = get_latest_snapshot(db, canonical, int(horizon), ENSEMBLE_VERSION)
+            if row is None:
+                return None, None, None, None
+            try:
+                n_w = int(getattr(row, "n_windows", 0) or 0)
+            except (TypeError, ValueError):
+                n_w = 0
+            if n_w < MIN_SCORED_WINDOWS:
+                return None, None, None, None
+            try:
+                mb = getattr(row, "member_brier", None)
+                member_brier = dict(mb) if isinstance(mb, dict) and mb else None
+            except Exception:
+                member_brier = None
+            try:
+                cal = getattr(row, "calibrator", None)
+                calibrator = dict(cal) if isinstance(cal, dict) and cal else None
+            except Exception:
+                calibrator = None
+            try:
+                sb = getattr(row, "brier", None)
+                skill_brier = None if sb is None else float(sb)
+            except (TypeError, ValueError):
+                skill_brier = None
+            try:
+                se = getattr(row, "ece", None)
+                skill_ece = None if se is None else float(se)
+            except (TypeError, ValueError):
+                skill_ece = None
+            return member_brier, calibrator, skill_brier, skill_ece
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return None, None, None, None
 
 
 def _latest_calibration(

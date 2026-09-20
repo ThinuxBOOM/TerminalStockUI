@@ -534,8 +534,12 @@ const ForecastSchema = z.object({
   direction: z.string().optional().default(""),
   regime: z.string().nullable().optional().default(null),
   drawdown: z.number().nullable().optional().default(null),
-  // ensemble-v2 additions (all optional for backward compat with v1 payloads)
+  // ensemble-v3 additions (all optional for backward compat with v1/v2 payloads)
   direction_probability_raw: z.number().min(0).max(1).nullable().optional().default(null),
+  calibration_method: z.string().nullable().optional().default(null),
+  adaptive_weights: z.boolean().nullable().optional().default(null),
+  skill_brier: z.number().nullable().optional().default(null),
+  skill_ece: z.number().nullable().optional().default(null),
   ensemble_weights: z.record(z.number()).optional(),
   ensemble_spread: z.number().nullable().optional().default(null),
   ensemble_std: z.number().nullable().optional().default(null),
@@ -619,8 +623,12 @@ function normalizeForecast(raw, symbol, horizon) {
       high: Number(intervalsRaw.high)
     } : null,
     limitations: strArray(r.limitations),
-    // ensemble-v2 diagnostics (passthrough; null when backend is v1)
+    // ensemble-v3 diagnostics (passthrough; null when backend is v1/v2)
     direction_probability_raw: clamp01OrNull(r.direction_probability_raw ?? r.direction_raw ?? null),
+    calibration_method: typeof r.calibration_method === "string" ? r.calibration_method : null,
+    adaptive_weights: typeof r.adaptive_weights === "boolean" ? r.adaptive_weights : null,
+    skill_brier: numOrNullStrict(r.skill_brier ?? null),
+    skill_ece: numOrNullStrict(r.skill_ece ?? null),
     ensemble_weights: r.ensemble_weights && typeof r.ensemble_weights === "object" ? r.ensemble_weights : void 0,
     ensemble_spread: numOrNullStrict(r.ensemble_spread ?? r.spread ?? null),
     ensemble_std: numOrNullStrict(r.ensemble_std ?? null),

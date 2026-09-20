@@ -1,16 +1,17 @@
-"""Walk-forward calibration snapshots (ensemble-v2).
+"""Walk-forward calibration snapshots (ensemble-v3).
 
 Deterministic, no network. :func:`build_snapshot` replays the
 :class:`~backend.forecasting.service.ForecastService` ensemble over trailing
 price history through :class:`WalkForwardSplitter` (+ ``assert_no_leakage``)
 and scores the replayed direction probabilities with
 :mod:`backend.forecasting.calibration.metrics` (Brier, ECE, reliability
-table) plus per-member hit rates.
+table) plus per-member hit rates AND per-member Brier, plus an
+isotonic/Platt calibrator fit on OOF (raw, label) pairs.
 
 Walk-forward shape (bounded + fast):
-  * Bars: trailing ``SNAPSHOT_BAR_LIMIT`` (250) daily bars via the injected
-    market service (``MarketDataService.get_bars`` caps at 250 anyway).
-  * Splits: ``WalkForwardSplitter(train_size=100, test_size=1,
+  * Bars: trailing ``SNAPSHOT_BAR_LIMIT`` (500) daily bars via the injected
+    market service (``MarketDataService.get_bars`` caps at 1000).
+  * Splits: ``WalkForwardSplitter(train_size=120, test_size=1,
     gap=horizon, expanding=True, step=STRIDE)`` over the leakage-safe
     feature frame — one scored origin per fold (``test_size=1``), a purge
     gap of ``horizon`` bars so train labels can never straddle the test
@@ -19,7 +20,8 @@ Walk-forward shape (bounded + fast):
   * Members: the same ensemble members as
     :class:`~backend.forecasting.service.ForecastService` (``historical-
     drift`` + ``momentum`` + ``logistic-direction`` +
-    ``gradient-boost-direction`` + ``trend-persistence``, plus ``sse-drift`` /
+    ``gradient-boost-direction`` + ``trend-persistence`` +
+    ``mean-reversion``, plus ``sse-drift`` /
     ``eux-drift`` on the routed venues), refit per fold on the train prefix
     only. Member dicts are keyed by model NAME (the same keys as
     ``ForecastService.forecast`` ``components``).
@@ -27,7 +29,8 @@ Walk-forward shape (bounded + fast):
     tail origins with an unobservable horizon are skipped, never imputed.
   * Ensemble weighting mirrors the service: fixed-weight mean of the
     available US members + shrinkage calibration, blended 50/50 on RAW with
-    the venue drift (then recalibrated) when routed.
+    the venue drift (then recalibrated) when routed. The RAW OOF means are
+    also returned to fit the v3 calibrator.
   * Speed: folds whose whole test block sits past the label-observable
     prefix (trailing ``horizon`` bars) are skipped before any fit — those
     folds score nothing today, so skipping only removes wasted fits.
@@ -92,17 +95,17 @@ from backend.forecasting.service import (
 )
 
 #: Trailing bars per snapshot (matches ForecastService.BAR_LIMIT; the market
-#: service caps ``limit`` at 250 anyway, so this is the effective trailing
-#: ~1y window).
-SNAPSHOT_BAR_LIMIT = 250
+#: service caps ``limit`` at 1000, so this is the effective trailing ~2y
+#: window).
+SNAPSHOT_BAR_LIMIT = 500
 #: Minimum bars to attempt a replay (mirrors ForecastService insufficient
 #: history gate).
 MIN_BARS = 100
 #: Walk-forward shape: expanding origin, one scored bar per fold.
-TRAIN_SIZE = 100
+TRAIN_SIZE = 120
 TEST_SIZE = 1
 #: Origins stride: every STRIDE-th bar is scored (bounded + fast).
-STRIDE = 10
+STRIDE = 5
 #: Reliability bins (matches the calibration dashboard contract).
 N_BINS = 10
 #: Minimum scored windows before Brier/ECE read as skill (below this the
@@ -112,15 +115,16 @@ MIN_SCORED_WINDOWS = 10
 #: Amber threshold: n below this carries wide uncertainty.
 SMALL_SAMPLE_WINDOWS = 30
 
-#: ensemble-v2 US members (mirrors ForecastService: 5 members incl. the
-#: promoted gradient-boost + trend-persistence heuristic). Snapshots replay
-#: the LIVE ensemble so Brier/ECE match what the API serves.
+#: ensemble-v3 US members (mirrors ForecastService: 6 members incl.
+#: gradient-boost + trend-persistence + mean-reversion heuristics).
+#: Snapshots replay the LIVE ensemble so Brier/ECE match what the API serves.
 BASE_MEMBERS: tuple[str, ...] = (
     "historical-drift",
     "momentum",
     "logistic-direction",
     "gradient-boost-direction",
     "trend-persistence",
+    "mean-reversion",
 )
 
 
@@ -209,7 +213,14 @@ def _zero_snapshot(
         "ece": None,
         "n_windows": 0,
         "reliability": [],
-        "members": {name: {"hit_rate": None, "n": 0} for name in members},
+        "members": {
+            name: {"hit_rate": None, "n": 0, "brier": None} for name in members
+        },
+        "member_brier": {name: None for name in members},
+        "calibrated_brier": None,
+        "calibrated_ece": None,
+        "calibrator": None,
+        "calibration_method": "shrinkage-0.8",
     }
 
 
@@ -245,13 +256,16 @@ def _score_snapshot_fold(
     frame: Any,
     horizon: int,
     extra: str | None,
-) -> list[tuple[int, float, dict[str, float], float]]:
-    """Score one walk-forward fold; returns [(pos, label, window, ensemble)].
+) -> list[tuple[int, float, dict[str, float], float, float]]:
+    """Score one walk-forward fold; returns [(pos, label, window, raw, ens)].
 
-    Pure function of its slice arguments (shared frames are read-only; every
-    fit uses fixed seeds). Skipped folds (all members missing / tail
-    unobservable) return []. Called in fold order by :func:`build_snapshot`,
-    so merged output matches the legacy inline loop exactly.
+    ``raw`` is the fixed-weight ensemble mean BEFORE calibration (used to
+    fit the v3 isotonic/Platt calibrator on OOF pairs); ``ensemble`` is the
+    shrinkage-calibrated v2-compatible score. Pure function of its slice
+    arguments (shared frames are read-only; every fit uses fixed seeds).
+    Skipped folds (all members missing / tail unobservable) return [].
+    Called in fold order by :func:`build_snapshot`, so merged output
+    matches the legacy inline loop exactly (plus the extra raw field).
     """
     assert_no_leakage(train_idx, test_idx, horizon)
     train_close = closes_feat.iloc[train_idx]
@@ -281,14 +295,23 @@ def _score_snapshot_fold(
             train_feat, train_close)
     except (ValueError, ImportError, TypeError):
         gb_fold = None
-    # Trend-persistence from the TRAIN prefix only (leakage-safe: uses
-    # the ext slice, never full-history rows beyond the fold origin).
+    # Trend-persistence + mean-reversion from the TRAIN prefix only
+    # (leakage-safe: uses the ext slice, never full-history rows beyond
+    # the fold origin).
     try:
         trend_fold = _trend_persistence_signal(frame, _ext=train_feat)
         if trend_fold is not None and not 0.0 <= float(trend_fold) <= 1.0:
             trend_fold = None
     except Exception:
         trend_fold = None
+    try:
+        from backend.forecasting.service import _mean_reversion_signal
+
+        mr_fold = _mean_reversion_signal(frame, _ext=train_feat)
+        if mr_fold is not None and not 0.0 <= float(mr_fold) <= 1.0:
+            mr_fold = None
+    except Exception:
+        mr_fold = None
     extra_p: float | None = None
     if extra == "sse-drift":
         try:
@@ -306,7 +329,7 @@ def _score_snapshot_fold(
                 .direction_probability(horizon).value)
         except (ValueError, TypeError):
             extra_p = None
-    if drift_p is None and mom_p is None and logreg is None and gb_fold is None and trend_fold is None and extra_p is None:
+    if drift_p is None and mom_p is None and logreg is None and gb_fold is None and trend_fold is None and mr_fold is None and extra_p is None:
         return []
     # Batched ML predicts for the fold's test block (test_size=1 in
     # the snapshot stride, but batch keeps the path O(1) predict calls).
@@ -334,7 +357,7 @@ def _score_snapshot_fold(
                     gb_probs[pos] = proba
         except (ValueError, IndexError, KeyError, TypeError):
             gb_probs = {}
-    scored: list[tuple[int, float, dict[str, float], float]] = []
+    scored: list[tuple[int, float, dict[str, float], float, float]] = []
     for pos in (int(p) for p in test_idx):
         try:
             label = labels_full.iloc[pos]
@@ -368,24 +391,30 @@ def _score_snapshot_fold(
                 pass
         if trend_fold is not None:
             window["trend-persistence"] = float(trend_fold)
-        # ensemble-v2 scoring: fixed-weight mean over US members, then
-        # shrinkage calibration; venue blend 50/50 on RAW then recalibrate
-        # (mirrors ForecastService.forecast).
+        if mr_fold is not None:
+            window["mean-reversion"] = float(mr_fold)
+        # ensemble-v3 scoring: fixed-weight mean over US members, then
+        # shrinkage calibration (v2-compatible baseline); venue blend 50/50
+        # on RAW then recalibrate (mirrors ForecastService.forecast).
+        # The RAW mean is also returned so build_snapshot can fit the
+        # isotonic/Platt calibrator on OOF pairs.
         us_window = {k: v for k, v in window.items() if k in BASE_MEMBERS}
         if extra is not None and extra_p is not None:
             window[extra] = float(extra_p)
             if not us_window:
                 # Venue drift alone still scores (US members all missing).
+                us_raw_fold = float(extra_p)
                 ensemble = float(_calibrate_prob(float(extra_p)))
             else:
                 us_raw_fold = _weighted_mean(us_window)[0]
                 ensemble = float(_calibrate_prob((float(us_raw_fold) + float(extra_p)) / 2.0))
+                us_raw_fold = float((float(us_raw_fold) + float(extra_p)) / 2.0)
         else:
             if not us_window:
                 continue
             us_raw_fold = _weighted_mean(us_window)[0]
             ensemble = float(_calibrate_prob(us_raw_fold))
-        scored.append((pos, label_f, window, ensemble))
+        scored.append((pos, label_f, window, float(us_raw_fold), ensemble))
     return scored
 
 
@@ -468,6 +497,7 @@ def build_snapshot(
 
     y_true: list[float] = []
     y_prob: list[float] = []
+    y_raw: list[float] = []
     member_probs: dict[str, list[float]] = {m: [] for m in expected_members}
     member_labels: dict[str, list[float]] = {m: [] for m in expected_members}
     n_feature_rows = len(features)
@@ -481,12 +511,13 @@ def build_snapshot(
                 continue
         except (TypeError, ValueError):
             pass
-        for pos, label_f, window, ensemble in _score_snapshot_fold(
+        for pos, label_f, window, raw_fold, ensemble in _score_snapshot_fold(
             train_idx, test_idx, features, closes_feat,
             labels_full, frame, horizon, extra,
         ):
             y_true.append(label_f)
             y_prob.append(ensemble)
+            y_raw.append(raw_fold)
             for name, proba in window.items():
                 if name in member_probs:
                     member_probs[name].append(float(proba))
@@ -498,18 +529,19 @@ def build_snapshot(
     # The ensemble above only emits clipped finite probabilities, so this is
     # normally a no-op; it guards the Brier/ECE inputs against any future
     # non-finite leak instead of letting NaN poison the snapshot metrics.
-    scored: list[tuple[float, float]] = []
-    for _y, _p in zip(y_true, y_prob):
+    scored: list[tuple[float, float, float]] = []
+    for _y, _p, _r in zip(y_true, y_prob, y_raw):
         try:
-            _yf, _pf = float(_y), float(_p)
+            _yf, _pf, _rf = float(_y), float(_p), float(_r)
         except (TypeError, ValueError):
             continue
-        if math.isfinite(_yf) and math.isfinite(_pf):
-            scored.append((_yf, _pf))
+        if math.isfinite(_yf) and math.isfinite(_pf) and math.isfinite(_rf):
+            scored.append((_yf, _pf, _rf))
     if not scored:
         return zero()
     y_true = [s[0] for s in scored]
     y_prob = [s[1] for s in scored]
+    y_raw = [s[2] for s in scored]
     n_windows = int(len(y_true))
     warning = (
         "insufficient windows (n<10): scores unreliable"
@@ -517,13 +549,33 @@ def build_snapshot(
         else ("small sample (n<30): wide uncertainty" if n_windows < SMALL_SAMPLE_WINDOWS else None)
     )
     table = reliability_table(y_true, y_prob, n_bins=N_BINS)
+    # v3: fit isotonic/Platt on OOF (raw, label) pairs and score the
+    # calibrated probabilities alongside the shrinkage baseline. The stored
+    # calibrator fits ALL OOF pairs (for live application); the reported
+    # calibrated Brier/ECE are 2-fold time-ordered cross-fitted (honest,
+    # not in-sample) so the dashboard never shows optimistic scores.
+    try:
+        from backend.forecasting.calibration.calibrators import cross_fitted_scores
+
+        calibrator, calibrated_brier, calibrated_ece = cross_fitted_scores(
+            y_raw, y_true, n_bins=N_BINS
+        )
+        if calibrator is not None:
+            calibration_method = str(calibrator.get("kind") or "isotonic")
+        else:
+            calibration_method = "shrinkage-0.8"
+    except Exception:
+        calibrator, calibrated_brier, calibrated_ece = None, None, None
+        calibration_method = "shrinkage-0.8"
     members: dict[str, dict] = {}
+    member_brier: dict[str, float | None] = {}
     for name in expected_members:
         probs = member_probs.get(name, [])
         labs = member_labels.get(name, [])
         n = len(probs)
         if n == 0:
-            members[name] = {"hit_rate": None, "n": 0}
+            members[name] = {"hit_rate": None, "n": 0, "brier": None}
+            member_brier[name] = None
             continue
         # Vectorized hit-rate (no per-pair Python loop).
         try:
@@ -532,12 +584,21 @@ def build_snapshot(
             p_arr = _np.asarray(probs, dtype=float)
             y_arr = _np.asarray(labs, dtype=float)
             preds = (p_arr >= 0.5).astype(float)
-            members[name] = {"hit_rate": float((preds == y_arr).mean()), "n": int(n)}
+            hr = float((preds == y_arr).mean())
+            br = float(_np.mean((p_arr - y_arr) ** 2))
         except Exception:
             correct = sum(
                 1 for p, y in zip(probs, labs)
                 if (1.0 if float(p) >= 0.5 else 0.0) == float(y))
-            members[name] = {"hit_rate": float(correct / n), "n": int(n)}
+            hr = float(correct / n)
+            try:
+                br = float(
+                    sum((float(p) - float(y)) ** 2 for p, y in zip(probs, labs)) / n
+                )
+            except Exception:
+                br = None  # type: ignore[assignment]
+        members[name] = {"hit_rate": hr, "n": int(n), "brier": br}
+        member_brier[name] = br
     return {
         "symbol": exchange_symbol,
         "exchange_mic": exchange_mic,
@@ -551,6 +612,51 @@ def build_snapshot(
         "warning": warning,
         "reliability": _reliability_records(table),
         "members": members,
+        "member_brier": dict(member_brier),
+        "calibrated_brier": calibrated_brier,
+        "calibrated_ece": calibrated_ece,
+        "calibrator": calibrator,
+        "calibration_method": calibration_method,
+    }
+
+
+def _snapshot_v3_fields(snapshot: dict) -> dict:
+    """Extract v3 persistence fields (tolerant of legacy dicts/DBs)."""
+    try:
+        member_brier = snapshot.get("member_brier")
+        if not isinstance(member_brier, dict):
+            # Derive from members {name: {brier}} for backward compat.
+            members = snapshot.get("members") or {}
+            member_brier = {
+                k: (v.get("brier") if isinstance(v, dict) else None)
+                for k, v in members.items()
+            } if isinstance(members, dict) else {}
+    except Exception:
+        member_brier = {}
+    try:
+        calibrator = snapshot.get("calibrator")
+        calibrator = dict(calibrator) if isinstance(calibrator, dict) else {}
+    except Exception:
+        calibrator = {}
+    # JSON safety: calibrator xs/ys must be finite lists.
+    try:
+        if calibrator:
+            xs = [float(v) for v in (calibrator.get("xs") or [])]
+            ys = [float(v) for v in (calibrator.get("ys") or [])]
+            import math as _m
+
+            if len(xs) != len(ys) or not xs or not all(
+                _m.isfinite(v) for v in xs + ys
+            ):
+                if str(calibrator.get("kind") or "") == "isotonic":
+                    calibrator = {}
+    except Exception:
+        pass
+    return {
+        "calibrated_brier": snapshot.get("calibrated_brier"),
+        "calibrated_ece": snapshot.get("calibrated_ece"),
+        "member_brier": dict(member_brier or {}),
+        "calibrator": dict(calibrator or {}),
     }
 
 
@@ -581,6 +687,7 @@ def upsert_snapshot(db: Any, snapshot: dict) -> Any:
             .first()
         )
         if row is None:
+            v3 = _snapshot_v3_fields(snapshot)
             row = CalibrationSnapshot(
                 symbol=str(snapshot["symbol"]).upper(),
                 exchange_mic=str(snapshot.get("exchange_mic") or "XNAS"),
@@ -593,6 +700,10 @@ def upsert_snapshot(db: Any, snapshot: dict) -> Any:
                 n_windows=int(snapshot.get("n_windows") or 0),
                 reliability=list(snapshot.get("reliability") or []),
                 members=dict(snapshot.get("members") or {}),
+                calibrated_brier=v3.get("calibrated_brier"),
+                calibrated_ece=v3.get("calibrated_ece"),
+                member_brier=dict(v3.get("member_brier") or {}),
+                calibrator=dict(v3.get("calibrator") or {}),
             )
             db.add(row)
         else:
@@ -602,6 +713,14 @@ def upsert_snapshot(db: Any, snapshot: dict) -> Any:
             row.n_windows = int(snapshot.get("n_windows") or 0)
             row.reliability = list(snapshot.get("reliability") or [])
             row.members = dict(snapshot.get("members") or {})
+            try:
+                v3 = _snapshot_v3_fields(snapshot)
+                row.calibrated_brier = v3.get("calibrated_brier")
+                row.calibrated_ece = v3.get("calibrated_ece")
+                row.member_brier = dict(v3.get("member_brier") or {})
+                row.calibrator = dict(v3.get("calibrator") or {})
+            except Exception:
+                pass
         db.commit()
         try:
             db.refresh(row)

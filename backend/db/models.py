@@ -103,13 +103,16 @@ class Forecast(Base):
 
 
 class CalibrationSnapshot(Base):
-    """Walk-forward calibration snapshot (Phase 2b).
+    """Walk-forward calibration snapshot (Phase 2b + ensemble-v3).
 
     One row per (symbol, horizon_days, model_version, feature_version,
     data_version): Brier/ECE over the trailing ensemble direction
-    probabilities, a JSON reliability table, and per-member hit rates.
-    Mirrors infra/migrations/0002_calibration.sql (Postgres JSONB/NUMERIC
-    map to portable JSON/Numeric here so SQLite tests stay green).
+    probabilities, a JSON reliability table, per-member hit rates AND
+    per-member Brier, plus the fitted isotonic/Platt calibrator and its
+    calibrated Brier/ECE (v3; NULL on old rows / zero-window snapshots).
+    Mirrors infra/migrations/0002_calibration.sql + 0009_ensemble_v3.sql
+    (Postgres JSONB/NUMERIC map to portable JSON/Numeric here so SQLite
+    tests stay green).
     """
 
     __tablename__ = "calibration_snapshots"
@@ -129,6 +132,10 @@ class CalibrationSnapshot(Base):
     reliability: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     members: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     data_version: Mapped[str] = mapped_column(Text, nullable=False)
+    calibrated_brier: Mapped[float | None] = mapped_column(Numeric(6, 5), nullable=True)
+    calibrated_ece: Mapped[float | None] = mapped_column(Numeric(6, 5), nullable=True)
+    member_brier: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    calibrator: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

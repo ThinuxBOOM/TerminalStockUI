@@ -37,6 +37,7 @@ US_MEMBERS = {
     "logistic-direction",
     "gradient-boost-direction",
     "trend-persistence",
+    "mean-reversion",
 }
 
 
@@ -120,7 +121,7 @@ def test_snapshot_math_on_fixture_bars():
     assert first["symbol"] == "AAPL"
     assert first["exchange_mic"] == "XNAS"
     assert first["horizon_days"] == 21
-    assert first["model_version"] == "ensemble-v2"
+    assert first["model_version"] == "ensemble-v3"
     assert first["feature_version"] == "features-v2"
     assert first["data_version"]
     assert first["n_windows"] > 0
@@ -134,9 +135,13 @@ def test_snapshot_math_on_fixture_bars():
     assert sum(r["count"] for r in first["reliability"]) == first["n_windows"]
     assert set(first["members"]) == US_MEMBERS  # keys match the US ensemble
     for name, entry in first["members"].items():
-        assert set(entry) == {"hit_rate", "n"}
+        assert {"hit_rate", "n", "brier"} <= set(entry)
         assert entry["n"] > 0
         assert entry["hit_rate"] is None or 0.0 <= entry["hit_rate"] <= 1.0
+        assert entry["brier"] is None or 0.0 <= entry["brier"] <= 1.0
+    # v3 skill fields present (calibrator None on tiny n -> shrinkage).
+    assert set(first["member_brier"]) == US_MEMBERS
+    assert first["calibration_method"] in ("isotonic", "platt", "shrinkage-0.8")
     second = build_snapshot("AAPL", 21, market_service=market)
     assert second == first  # deterministic: same bars -> same snapshot
 
@@ -201,7 +206,7 @@ def test_upsert_idempotency_on_sqlite(isolated_db):
         assert got is not None
         assert got.n_windows == snap["n_windows"]
         assert list(got.reliability) == snap["reliability"]
-        assert get_latest_snapshot(db, "NOPE", 21, "ensemble-v2") is None
+        assert get_latest_snapshot(db, "NOPE", 21, "ensemble-v3") is None
     finally:
         db.close()
         _teardown()
@@ -228,7 +233,9 @@ def test_model_and_migration_contract(isolated_db):
     cols = {c.name for c in Base.metadata.tables["calibration_snapshots"].columns}
     assert {"snapshot_id", "model_version", "feature_version", "horizon_days",
             "symbol", "exchange_mic", "brier", "ece", "n_windows",
-            "reliability", "members", "data_version", "created_at"} <= cols
+            "reliability", "members", "data_version", "created_at",
+            "calibrated_brier", "calibrated_ece", "member_brier",
+            "calibrator"} <= cols
     root = Path(__file__).resolve().parents[2]
     infra = (root / "infra" / "migrations" / "0002_calibration.sql").read_text()
     supa = (root / "supabase" / "migrations" / "0002_calibration.sql").read_text()
@@ -242,6 +249,13 @@ def test_model_and_migration_contract(isolated_db):
         assert "reliability" in lowered and "members" in lowered
         assert "ix_calibration_snapshots_symbol_horizon" in lowered
     assert "enable row level security" in supa.lower()
+    # v3 skill columns live in the additive 0009 migration (twin).
+    infra_v3 = (root / "infra" / "migrations" / "0009_ensemble_v3.sql").read_text()
+    supa_v3 = (root / "supabase" / "migrations" / "0009_ensemble_v3.sql").read_text()
+    for text in (infra_v3, supa_v3):
+        lowered = text.lower()
+        assert "calibrated_brier" in lowered and "calibrated_ece" in lowered
+        assert "member_brier" in lowered and "calibrator" in lowered
     # sqlite round-trip via init_db already covered by isolated_db + upserts
 
 

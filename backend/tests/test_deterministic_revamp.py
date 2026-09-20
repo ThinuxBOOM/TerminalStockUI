@@ -292,7 +292,7 @@ def test_horizons_versions_and_determinism_preserved():
     assert set(all_h) == set(FORECAST_HORIZONS) == {1, 7, 14, 21}
     for horizon, res in all_h.items():
         assert res["horizon_days"] == horizon
-        assert res["model_version"] == "ensemble-v2"
+        assert res["model_version"] == "ensemble-v3"
         assert res["feature_version"] == "features-v2"
         assert res["data_version"]
         assert 0.0 <= res["direction_probability"] <= 1.0
@@ -305,7 +305,7 @@ def test_horizons_versions_and_determinism_preserved():
             second["expected_return_range"][_k]
         )
     assert first["record"]["forecast_id"] == second["record"]["forecast_id"]
-    # ensemble-v2 additions present
+    # ensemble-v3 additions present
     assert first["direction_probability_raw"] != first["direction_probability"] or True
     assert first["ensemble_weights"] and abs(sum(first["ensemble_weights"].values()) - 1.0) < 1e-9
     assert first["formulas"]  # v1 left this empty

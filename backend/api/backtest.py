@@ -1,11 +1,12 @@
 """Walk-forward backtest API: POST /api/backtest/run + GET /api/backtest/{symbol}.
 
-Each run fits the ensemble-v2 members (drift/momentum/logistic-v3/
-gradient-boost-v1/trend-persistence) on train folds only (point-in-time
-labels, WalkForwardSplitter + assert_no_leakage guard) and scores the
-weighted + shrinkage-calibrated ensemble with Brier/ECE + a reliability
-table. No AI, no network (deterministic stub bars). Runs are kept in an
-in-memory history; GET returns lightweight summaries without the full
+Each run fits the ensemble-v3 members (drift/momentum/logistic-v3/
+gradient-boost-v1/trend-persistence/mean-reversion) on train folds only
+(point-in-time labels, WalkForwardSplitter + assert_no_leakage guard) and
+scores the weighted + shrinkage-calibrated ensemble with Brier/ECE + a
+reliability table, plus the isotonic/Platt-calibrated Brier/ECE on the
+same OOF pairs. No AI, no network (deterministic stub bars). Runs are kept
+in an in-memory history; GET returns lightweight summaries without the full
 reliability tables. Folds stay serial: the GB/logistic fits are CPython
 GIL-bound, so threads add overhead without speedup (measured on the twin
 snapshot path), while processes are off the table for serverless deploys.
@@ -43,6 +44,7 @@ from backend.forecasting.models.momentum import MomentumBaseline
 from backend.forecasting.registry import ENSEMBLE_VERSION
 from backend.forecasting.service import (
     _calibrate_prob,
+    _mean_reversion_signal,
     _trend_persistence_signal,
     _weighted_mean,
 )
@@ -104,7 +106,7 @@ class BacktestRunRequest(BaseModel):
     test_size: int = Field(default=21, ge=1, le=500)
     gap: int = Field(default=21, ge=0, le=500)
     n_bins: int = Field(default=10, ge=2, le=20)
-    limit: int = Field(default=250, ge=100, le=250)
+    limit: int = Field(default=500, ge=100, le=1000)
 
     @field_validator("horizons")
     @classmethod
@@ -173,15 +175,17 @@ def _score_backtest_fold(
     frame: pd.DataFrame | None,
     horizon: int,
     gap: int,
-) -> tuple[list[tuple[int, float, float]], bool]:
-    """Score one backtest fold; returns ([(pos, label, proba)], fold_used). Rows
-    are in pos order.
+) -> tuple[list[tuple[int, float, float, float]], bool]:
+    """Score one backtest fold; returns ([(pos, label, raw, proba)], used).
 
-    Pure function of its slice arguments (shared frames read-only, fixed-seed
-    fits), so folds may run in any order/thread. Skipped positions (tail
-    unobservable / all members missing) are omitted, never imputed. The merge
-    by :func:`_evaluate_horizon` in fold order, making output identical to
-    the legacy inline loop. Returns (rows, fold_used) where fold_used
+    ``raw`` is the fixed-weight mean before calibration (for the v3
+    isotonic fit); ``proba`` is the shrinkage-calibrated score (v2
+    baseline). Pure function of its slice arguments (shared frames
+    read-only, fixed-seed fits), so folds may run in any order/thread.
+    Skipped positions (tail unobservable / all members missing) are
+    omitted, never imputed. The merge by :func:`_evaluate_horizon` in
+    fold order, making output identical to the legacy inline loop
+    (plus the raw field). Returns (rows, fold_used) where fold_used
     mirrors the legacy ``n_folds_used`` increment (any member fitted, even
     if every position later skips as unobservable).
     """
@@ -226,7 +230,15 @@ def _score_backtest_fold(
             trend_fold = None
     except Exception:
         trend_fold = None
-    if drift_p is None and mom_p is None and logreg is None and gb_fold is None and trend_fold is None:
+    try:
+        mr_fold = _mean_reversion_signal(
+            frame if frame is not None else train_feat, _ext=train_feat
+        )
+        if mr_fold is not None and not 0.0 <= float(mr_fold) <= 1.0:
+            mr_fold = None
+    except Exception:
+        mr_fold = None
+    if drift_p is None and mom_p is None and logreg is None and gb_fold is None and trend_fold is None and mr_fold is None:
         return [], False
     # Batched ML predicts: one predict_proba per fold (not per row).
     logreg_probs: dict[int, float] = {}
@@ -253,7 +265,7 @@ def _score_backtest_fold(
                     gb_probs[pos] = proba
         except (ValueError, IndexError, KeyError):
             gb_probs = {}
-    scored: list[tuple[int, float, float]] = []
+    scored: list[tuple[int, float, float, float]] = []
     for pos in test_idx:
         pos = int(pos)
         label = labels_full.iloc[pos]
@@ -288,10 +300,12 @@ def _score_backtest_fold(
                 pass
         if trend_fold is not None:
             window["trend-persistence"] = float(trend_fold)
+        if mr_fold is not None:
+            window["mean-reversion"] = float(mr_fold)
         if not window:
             continue
         raw = _weighted_mean(window)[0]
-        scored.append((pos, float(label), float(_calibrate_prob(raw))))
+        scored.append((pos, float(label), float(raw), float(_calibrate_prob(raw))))
     return scored, True
 
 
@@ -319,6 +333,7 @@ def _evaluate_horizon(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     y_true: list[float] = []
     y_prob: list[float] = []
+    y_raw: list[float] = []
     n_folds_used = 0
     for train_idx, test_idx in folds:
         scored, fold_used = _score_backtest_fold(
@@ -327,8 +342,9 @@ def _evaluate_horizon(
         )
         if fold_used:
             n_folds_used += 1
-        for pos, label_f, proba in scored:
+        for pos, label_f, raw_f, proba in scored:
             y_true.append(float(label_f))
+            y_raw.append(float(raw_f))
             y_prob.append(float(proba))
     if not y_true:
         raise HTTPException(
@@ -341,6 +357,21 @@ def _evaluate_horizon(
         brier = float(brier_score(y_true, y_prob))
         ece = float(calibration_error(y_true, y_prob, n_bins=n_bins))
         reliability = _reliability_records(table)
+        # v3: isotonic/Platt on OOF raw pairs (same folds, no extra fits).
+        # Cross-fitted scores are honest (not in-sample); the stored
+        # calibrator fits all OOF pairs for live application.
+        try:
+            from backend.forecasting.calibration.calibrators import cross_fitted_scores
+
+            _cal, calibrated_brier, calibrated_ece = cross_fitted_scores(
+                y_raw, y_true, n_bins=n_bins
+            )
+            calibration_method = (
+                str(_cal.get("kind") or "isotonic") if _cal else "shrinkage-0.8"
+            )
+        except Exception:
+            _cal, calibrated_brier, calibrated_ece = None, None, None
+            calibration_method = "shrinkage-0.8"
     except HTTPException:
         raise
     except ValueError as exc:
@@ -360,6 +391,10 @@ def _evaluate_horizon(
         "ece": ece,
         "ece_formula": "ECE = sum_b (|bin_b|/n * |mean_p_b - frac_pos_b|) over equal-width bins",
         "reliability": reliability,
+        "calibrated_brier": calibrated_brier,
+        "calibrated_ece": calibrated_ece,
+        "calibrator": _cal,
+        "calibration_method": calibration_method,
     }
 
 

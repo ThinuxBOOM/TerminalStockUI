@@ -182,7 +182,7 @@ def test_sse_routing_versions_and_direction_blend():
 
     svc = ForecastService(market_service=_FakeMarket(make_sse_limit_up()))
     res = svc.forecast("600519.SS", 21, as_of=FIXED_AS_OF)
-    assert res["model_version"] == SSE_BLEND_VERSION == "ensemble-v2+sse-drift-v1"
+    assert res["model_version"] == SSE_BLEND_VERSION == "ensemble-v3+sse-drift-v1"
     assert res["feature_version"] == SSE_FEATURE_VERSION == "sse-features-v1"
     assert "sse" in res["data_version"]
     assert res["record"]["model_version"] == SSE_BLEND_VERSION
@@ -190,7 +190,7 @@ def test_sse_routing_versions_and_direction_blend():
     assert "sse" in res["record"]["data_version"]
     assert set(res["components"]) >= {"historical-drift", "momentum", "sse-drift"}
     assert SSE_DRIFT_VERSION in res["model_members"]
-    # ensemble-v2: weighted US mean (raw) blended 50/50 with sse-drift on RAW,
+    # ensemble-v3: weighted US mean (raw) blended 50/50 with sse-drift on RAW,
     # then shrinkage-calibrated.
     us_window = {k: v for k, v in res["components"].items() if k != "sse-drift"}
     us_raw = _weighted_mean(us_window)[0]
@@ -222,7 +222,7 @@ def test_sse_routing_via_mic_without_suffix_and_us_preserved():
     us = ForecastService(
         market_service=_FakeMarket(make_ohlcv(), instrument_id="XNAS-AAPL")
     ).forecast("AAPL", 21, as_of=FIXED_AS_OF)
-    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v2"
+    assert us["model_version"] == ENSEMBLE_VERSION == "ensemble-v3"
     assert us["feature_version"] == "features-v2"
     assert "sse" not in us["data_version"]
     assert "sse-drift" not in us["components"]
@@ -274,7 +274,7 @@ def test_sse_horizons_only_and_deterministic():
 
 def test_registry_exposes_both_models():
     models = {(m["name"], m["version"]) for m in list_models()}
-    assert ("ensemble", "ensemble-v2") in models
+    assert ("ensemble", "ensemble-v3") in models
     assert ("ensemble", "ensemble-v1") in models  # legacy retained
     assert ("sse-drift", "sse-drift-v1") in models
     by_key = {(m["name"], m["version"]): m for m in list_models()}
