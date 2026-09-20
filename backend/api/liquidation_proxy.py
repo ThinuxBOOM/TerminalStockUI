@@ -26,6 +26,19 @@ from backend.security.validation import sanitize_error, validate_symbol
 
 router = APIRouter(prefix="/api/markets", tags=["markets-liquidation"])
 
+#: Envelope cache: the full-MIC quote scan + up to 2x limit second-pass
+#: 60-bar fetches dominate wall time (same pattern as screener/markets
+#: overview). Anonymous deterministic response (varies only by mic/limit/
+#: sort), so the key is unscoped. TTL 60s mirrors the quote cache.
+_LIQ_PROXY_TTL_S = 60
+
+
+def _liq_proxy_cache_key(mic: str, limit: int, sort: str) -> str:
+    try:
+        return f"markets:liq-proxy:{str(mic).upper()}:{int(limit)}:{str(sort).lower()}"
+    except Exception:
+        return f"markets:liq-proxy:{mic}:{limit}:{sort}"
+
 DISCLOSURE = (
     "PROXY — volume-anomaly x ATR-range heuristic, NOT exchange liquidation data. "
     "Not investment advice."
@@ -101,6 +114,18 @@ def market_liquidation_proxy(
     sort_key = str(sort or "intensity").strip().lower()
     if sort_key not in ("intensity", "symbol"):
         raise HTTPException(status_code=422, detail="sort must be intensity|symbol")
+    # Envelope cache: identical scans within TTL skip the quote fan-out +
+    # second-pass bar fetches entirely.
+    _ck: str | None = None
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _ck = _liq_proxy_cache_key(clean_mic, int(limit), sort_key)
+        _cached = _get_cache().get(_ck)
+        if isinstance(_cached, dict) and isinstance(_cached.get("rows"), list):
+            return _cached
+    except Exception:
+        _ck = None
     try:
         registry = get_registry()
         skipped_rows: list[dict] = []
@@ -159,7 +184,7 @@ def market_liquidation_proxy(
     long_n = sum(1 for r in rows if r.get("side") == "long_proxy")
     short_n = sum(1 for r in rows if r.get("side") == "short_proxy")
     intensities = [float(r.get("intensity") or 0.0) for r in rows]
-    return {
+    out = {
         "mic": clean_mic,
         "rows": rows,
         "aggregates": {
@@ -174,6 +199,14 @@ def market_liquidation_proxy(
         "disclosure": DISCLOSURE,
         "provenance": provenance,
     }
+    try:
+        if _ck:
+            from backend.cache import get_cache as _get_cache2
+
+            _get_cache2().set(_ck, out, ttl_s=_LIQ_PROXY_TTL_S)
+    except Exception:
+        pass
+    return out
 
 
 # Keep validate_symbol import used (contract parity with markets router).

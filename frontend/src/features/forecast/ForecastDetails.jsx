@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import {
   AI_PROFILES,
   FORECAST_HORIZONS,
@@ -29,7 +29,6 @@ const MAX_ANALYTICS_CELLS = 12;
 function ForecastDetails({ symbol }) {
   const [horizon, setHorizon] = useState(21);
   const [aiProfile, setAiProfile] = useState("Forecast Assist");
-  const queryClient = useQueryClient();
   const forecastQ = useQuery({
     queryKey: ["forecast", symbol, horizon],
     queryFn: ({ signal }) => getForecast(symbol, horizon, { signal }),
@@ -40,36 +39,10 @@ function ForecastDetails({ symbol }) {
     gcTime: 600000,
     placeholderData: keepPreviousData,
   });
-  // Prefetch adjacent horizons in the background (warm cache, no waterfall).
-  // Lifetime-linked: each prefetch is raced against unmount/horizon-change
-  // via an AbortController, and rejections are swallowed so background
-  // warmups never surface as unhandled rejections.
-  useEffect(() => {
-    const ctrl = new AbortController();
-    for (const h of FORECAST_HORIZONS) {
-      if (h === horizon) continue;
-      if (ctrl.signal.aborted) break;
-      void queryClient
-        .prefetchQuery({
-          queryKey: ["forecast", symbol, h],
-          queryFn: ({ signal }) => {
-            if (ctrl.signal.aborted) throw new Error("prefetch aborted");
-            return getForecast(symbol, h, { signal });
-          },
-          staleTime: 300000,
-        })
-        .catch(() => {
-          // background warmup only — never surface
-        });
-    }
-    return () => {
-      try {
-        ctrl.abort();
-      } catch {
-        // never throws
-      }
-    };
-  }, [queryClient, symbol, horizon]);
+  // No adjacent-horizon prefetch: each horizon costs a full 500-bar
+  // ensemble run server-side (2 sklearn fits). Horizon switches fetch
+  // on demand and keepPreviousData covers the transition; the backend
+  // 300s forecast cache makes repeats instant.
   const analyticsQ = useQuery({
     queryKey: ["analytics", symbol],
     queryFn: ({ signal }) => getAnalytics(symbol, { signal }),

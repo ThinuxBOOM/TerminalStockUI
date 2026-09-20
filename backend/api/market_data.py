@@ -21,6 +21,19 @@ router = APIRouter(prefix="/api/market_data", tags=["market_data"])
 
 INDICATOR_MAX_POINTS = 1000
 
+#: Chart response cache (anonymous, identical for all callers): the
+#: quote+bars dual fetch + stitch dominates per-view cost. TTL 60s mirrors
+#: the quote cache. The calendar enrichment stays OUTSIDE the cache (it
+#: reads wall-clock now) so market_state never goes stale.
+_CHART_TTL_S = 60
+
+
+def _chart_cache_key(symbol: str, timeframe: str, limit: int) -> str:
+    try:
+        return f"market_data:chart:{str(symbol).upper()}:{str(timeframe)}:{int(limit)}"
+    except Exception:
+        return f"market_data:chart:{symbol}:{timeframe}:{limit}"
+
 #: Contract alias router: /api/securities/{instrument_id}/quote|bars
 securities_router = APIRouter(prefix="/api/securities", tags=["securities"])
 
@@ -125,6 +138,22 @@ def chart(
     """
     symbol = validate_symbol(symbol)
     timeframe = validate_timeframe(timeframe)
+    # Response cache: identical charts within TTL skip the dual fetch.
+    _ck: str | None = None
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _ck = _chart_cache_key(symbol, timeframe, int(limit))
+        _cached = _get_cache().get(_ck)
+        if isinstance(_cached, dict) and isinstance(_cached.get("bars"), list):
+            try:
+                if isinstance(_cached.get("quote"), dict):
+                    _cached["quote"] = _enrich_market_state(dict(_cached["quote"]))
+            except Exception:
+                pass
+            return _cached
+    except Exception:
+        _ck = None
     try:
         out = svc.get_chart(symbol, timeframe, limit)
     except HTTPException:
@@ -135,6 +164,13 @@ def chart(
         raise HTTPException(status_code=422, detail=sanitize_error(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="chart failed")) from exc
+    try:
+        if _ck:
+            from backend.cache import get_cache as _get_cache2
+
+            _get_cache2().set(_ck, out, ttl_s=_CHART_TTL_S)
+    except Exception:
+        pass
     try:
         if isinstance(out.get("quote"), dict):
             out["quote"] = _enrich_market_state(out["quote"])

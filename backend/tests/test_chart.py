@@ -73,8 +73,24 @@ def _service(bars=None, quote=None, bars_error=None, quote_error=None):
     return svc
 
 
+def _clear_response_caches() -> None:
+    """Start cold: the chart endpoint cache is keyed by symbol/timeframe/
+    limit only, so per-test stubs with different prints would otherwise
+    read a previous test's envelope (same convention as screener tests)."""
+    try:
+        from backend.cache import get_cache
+
+        _c = get_cache()
+        _clear = getattr(_c, "clear", None)
+        if callable(_clear):
+            _clear()
+    except Exception:
+        pass
+
+
 def _client(svc) -> TestClient:
     reset_deps()
+    _clear_response_caches()
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: svc
     return TestClient(app)
@@ -82,6 +98,7 @@ def _client(svc) -> TestClient:
 
 def _teardown() -> None:
     reset_deps()
+    _clear_response_caches()
 
 
 # --- stitch matrix ----------------------------------------------------------

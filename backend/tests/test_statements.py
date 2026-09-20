@@ -375,6 +375,19 @@ def test_resolver_total_failure_returns_empty_never_raises():
 def _analytics_client() -> TestClient:
     from backend.tests.auth_helpers import inject_admin_auth
 
+    # Start cold: the analytics endpoint cache is keyed by
+    # symbol/indicators only, so per-test get_statements monkeypatches
+    # would otherwise read a previous test's bundle (same convention as
+    # screener/chart tests).
+    try:
+        from backend import cache as cache_module
+
+        _c = cache_module.get_cache()
+        _clear = getattr(_c, "clear", None)
+        if callable(_clear):
+            _clear()
+    except Exception:
+        pass
     app = FastAPI()
     app.include_router(analytics_router)
     inject_admin_auth(app)

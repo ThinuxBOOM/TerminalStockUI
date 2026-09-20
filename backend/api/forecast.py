@@ -622,6 +622,41 @@ def _snapshot_wire(row) -> dict:
     }
 
 
+def _latest_snapshot_row(
+    symbol: str, horizon: int, model_version: str, market_service=None
+):
+    """One best-effort snapshot read shared by skill + calibration paths.
+
+    A forecast used to pay init_db + Session + canonical-resolve + snapshot
+    query TWICE per request (``_latest_skill`` then ``_latest_calibration``);
+    this does it once and both callers derive from the row. Returns None on
+    miss/thin/DB-down (callers fall back). Never raises.
+    """
+    try:
+        from backend.db.session import get_session_factory, init_db
+        from backend.forecasting.calibration.snapshots import (
+            canonical_symbol,
+            get_latest_snapshot,
+        )
+
+        try:
+            init_db()
+        except Exception:
+            pass
+        Session = get_session_factory()
+        db = Session()
+        try:
+            canonical = canonical_symbol(symbol, market_service)
+            return get_latest_snapshot(db, canonical, int(horizon), model_version)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
 def _latest_skill(
     symbol: str, horizon: int, market_service=None
 ) -> tuple[dict | None, dict | None, float | None, float | None]:
@@ -634,57 +669,39 @@ def _latest_skill(
     best-effort read.
     """
     try:
-        from backend.db.session import get_session_factory, init_db
-        from backend.forecasting.calibration.snapshots import (
-            MIN_SCORED_WINDOWS,
-            canonical_symbol,
-            get_latest_snapshot,
-        )
+        from backend.forecasting.calibration.snapshots import MIN_SCORED_WINDOWS
         from backend.forecasting.registry import ENSEMBLE_VERSION
 
+        row = _latest_snapshot_row(symbol, int(horizon), ENSEMBLE_VERSION, market_service)
+        if row is None:
+            return None, None, None, None
         try:
-            init_db()
+            n_w = int(getattr(row, "n_windows", 0) or 0)
+        except (TypeError, ValueError):
+            n_w = 0
+        if n_w < MIN_SCORED_WINDOWS:
+            return None, None, None, None
+        try:
+            mb = getattr(row, "member_brier", None)
+            member_brier = dict(mb) if isinstance(mb, dict) and mb else None
         except Exception:
-            pass
-        Session = get_session_factory()
-        db = Session()
+            member_brier = None
         try:
-            canonical = canonical_symbol(symbol, market_service)
-            row = get_latest_snapshot(db, canonical, int(horizon), ENSEMBLE_VERSION)
-            if row is None:
-                return None, None, None, None
-            try:
-                n_w = int(getattr(row, "n_windows", 0) or 0)
-            except (TypeError, ValueError):
-                n_w = 0
-            if n_w < MIN_SCORED_WINDOWS:
-                return None, None, None, None
-            try:
-                mb = getattr(row, "member_brier", None)
-                member_brier = dict(mb) if isinstance(mb, dict) and mb else None
-            except Exception:
-                member_brier = None
-            try:
-                cal = getattr(row, "calibrator", None)
-                calibrator = dict(cal) if isinstance(cal, dict) and cal else None
-            except Exception:
-                calibrator = None
-            try:
-                sb = getattr(row, "brier", None)
-                skill_brier = None if sb is None else float(sb)
-            except (TypeError, ValueError):
-                skill_brier = None
-            try:
-                se = getattr(row, "ece", None)
-                skill_ece = None if se is None else float(se)
-            except (TypeError, ValueError):
-                skill_ece = None
-            return member_brier, calibrator, skill_brier, skill_ece
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
+            cal = getattr(row, "calibrator", None)
+            calibrator = dict(cal) if isinstance(cal, dict) and cal else None
+        except Exception:
+            calibrator = None
+        try:
+            sb = getattr(row, "brier", None)
+            skill_brier = None if sb is None else float(sb)
+        except (TypeError, ValueError):
+            skill_brier = None
+        try:
+            se = getattr(row, "ece", None)
+            skill_ece = None if se is None else float(se)
+        except (TypeError, ValueError):
+            skill_ece = None
+        return member_brier, calibrator, skill_brier, skill_ece
     except Exception:
         return None, None, None, None
 
@@ -694,33 +711,14 @@ def _latest_calibration(
 ) -> tuple[list, dict | None, dict | None]:
     """Best-effort (reliability rows, member accuracy, calibration_meta)."""
     try:
-        from backend.db.session import get_session_factory, init_db
-        from backend.forecasting.calibration.snapshots import (
-            canonical_symbol,
-            get_latest_snapshot,
-        )
-
-        try:
-            init_db()
-        except Exception:
-            pass
-        Session = get_session_factory()
-        db = Session()
-        try:
-            canonical = canonical_symbol(symbol, market_service)
-            row = get_latest_snapshot(db, canonical, int(horizon), model_version)
-            if row is None:
-                return [], None, None
-            reliability = getattr(row, "reliability", None)
-            rows = list(reliability) if isinstance(reliability, list) else []
-            members = getattr(row, "members", None)
-            acc = dict(members) if isinstance(members, dict) and members else None
-            return rows, acc, _snapshot_meta(row)
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
+        row = _latest_snapshot_row(symbol, int(horizon), model_version, market_service)
+        if row is None:
+            return [], None, None
+        reliability = getattr(row, "reliability", None)
+        rows = list(reliability) if isinstance(reliability, list) else []
+        members = getattr(row, "members", None)
+        acc = dict(members) if isinstance(members, dict) and members else None
+        return rows, acc, _snapshot_meta(row)
     except Exception:
         return [], None, None
 

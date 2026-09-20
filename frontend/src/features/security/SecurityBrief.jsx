@@ -122,19 +122,19 @@ function SecurityBrief({ symbol }) {
     queryKey: ["chart", symbol, preset.timeframe, preset.limit],
     queryFn: ({ signal }) => getChart(symbol, preset.timeframe, preset.limit, { signal }),
     retry: 1,
-    staleTime: 30000,
+    staleTime: 120000,
   });
   const forecastQ = useQuery({
     queryKey: ["forecast", symbol, forecastHorizon],
     queryFn: ({ signal }) => getForecast(symbol, forecastHorizon, { signal }),
     retry: 1,
-    staleTime: 60000,
+    staleTime: 300000,
   });
   const analyticsQ = useQuery({
     queryKey: ["analytics", symbol, selectedIndicators.join(",")],
     queryFn: ({ signal }) => getAnalytics(symbol, { signal, indicators: selectedIndicators }),
     retry: false,
-    staleTime: 60000,
+    staleTime: 300000,
   });
   const barsQ = quote; // alias: bars now ride the same chart response (candles/provenance below)
   const forecast = forecastQ.data ?? null;

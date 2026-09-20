@@ -267,7 +267,26 @@ def cron_ingest_post(
         }
 
 
-def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
+#: Tick budget for GET /api/cron/calibrate (seconds). A full 30-symbol x
+#: 4-horizon walk-forward replay (~120 snapshots x ~76 folds x 2 sklearn
+#: fits) is ~10min of CPU — an unbounded nightly tick always dies at
+#: maxDuration 60, burning the full minute for partial (prefix-only)
+#: progress. The budgeted slice below burns at most ~45s/night AND rotates
+#: coverage by day so every pair lands within a few nights instead of the
+#: same prefix re-running forever. POST (manual) stays unbounded.
+_CALIBRATE_TICK_BUDGET_S = 45.0
+
+#: Rotation stride (pairs/day): with ~120 (symbol, horizon) pairs a stride
+#: of 30 gives full coverage roughly every 4 nights within budget.
+_CALIBRATE_ROTATION_STRIDE = 30
+
+
+def _run_calibrate(
+    symbols: list[str],
+    market: MarketDataService,
+    budget_s: float | None = None,
+    start_offset: int = 0,
+) -> dict:
     """Build + upsert one snapshot row per (symbol, horizon).
 
     Per-pair failures are reported in ``errors`` (keyed ``"SYM:horizon"``);
@@ -321,37 +340,62 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
     errors: dict[str, str] = {}
     calibrated = 0
     unscored = 0
+    truncated = 0
+    # Rotation: start the pair order at start_offset so consecutive
+    # budgeted ticks cover different slices (full coverage over days
+    # instead of the same prefix every night).
     try:
-        for raw in wanted:
-            for horizon in FORECAST_HORIZONS:
-                key = f"{raw.strip().upper()}:{int(horizon)}"
+        pairs: list[tuple[str, int]] = [
+            (raw, int(h)) for raw in wanted for h in FORECAST_HORIZONS
+        ]
+    except Exception:
+        pairs = []
+    if pairs and start_offset:
+        try:
+            rot = int(start_offset) % len(pairs)
+            pairs = pairs[rot:] + pairs[:rot]
+        except Exception:
+            pass
+    try:
+        import time as _time
+
+        _tick_start = _time.monotonic()
+        for raw, horizon in pairs:
+            if budget_s is not None:
                 try:
-                    snap = build_snapshot(raw, int(horizon), market_service=market)
-                    upsert_snapshot(db, snap)
-                    n_windows = int(snap.get("n_windows") or 0)
-                    snapshots[key] = n_windows
-                    # Zero-window rows are written (honest NULL metrics) but
-                    # must not read as scored skill. Single-digit windows
-                    # (n<10) are written + flagged weak, not counted.
-                    if n_windows >= 10:
-                        calibrated += 1
-                    else:
-                        unscored += 1
-                except Exception as exc:
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-                    errors[key] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                    logger.warning("calibrate snapshot failed")
+                    if _time.monotonic() - _tick_start >= float(budget_s):
+                        truncated += 1
+                        continue
+                except Exception:
+                    pass
+            key = f"{raw.strip().upper()}:{int(horizon)}"
+            try:
+                snap = build_snapshot(raw, int(horizon), market_service=market)
+                upsert_snapshot(db, snap)
+                n_windows = int(snap.get("n_windows") or 0)
+                snapshots[key] = n_windows
+                # Zero-window rows are written (honest NULL metrics) but
+                # must not read as scored skill. Single-digit windows
+                # (n<10) are written + flagged weak, not counted.
+                if n_windows >= 10:
+                    calibrated += 1
+                else:
+                    unscored += 1
+            except Exception as exc:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                errors[key] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                logger.warning("calibrate snapshot failed")
     finally:
         try:
             db.close()
         except Exception:
             pass
     logger.info(
-        "calibrate done calibrated=%d unscored=%d errors=%d",
-        calibrated, unscored, len(errors),
+        "calibrate done calibrated=%d unscored=%d errors=%d truncated=%d",
+        calibrated, unscored, len(errors), truncated,
     )
     return {
         "ok": not errors,
@@ -359,6 +403,7 @@ def _run_calibrate(symbols: list[str], market: MarketDataService) -> dict:
         "unscored": unscored,
         "snapshots": snapshots,
         "errors": errors,
+        "truncated": truncated,
         "provenance": _cron_provenance(bool(errors)),
     }
 
@@ -371,13 +416,45 @@ def cron_calibrate_get(
     ),
     market: MarketDataService = Depends(get_market_service),
 ) -> dict:
-    """Vercel Cron entry: ``GET /api/cron/calibrate[?symbol=AAPL]``."""
+    """Vercel Cron entry: ``GET /api/cron/calibrate[?symbol=AAPL]``.
+
+    Bounded nightly slice: at most ``_CALIBRATE_TICK_BUDGET_S`` of replay
+    work, rotating by day so the whole universe is covered over consecutive
+    nights (an unbounded tick always dies at maxDuration 60 for partial
+    prefix-only progress). Single-symbol runs always complete (fast).
+    ``POST /api/cron/calibrate`` (manual) stays unbounded.
+    """
     _check_cron_auth(request)
     symbols = (
         [symbol] if (symbol or "").strip() else ingest_module.default_universe()
     )
+    if (symbol or "").strip():
+        # Single-symbol probe: complete it, no budget/rotation.
+        try:
+            return _run_calibrate(symbols, market)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.warning("cron calibrate batch failed")
+            return {
+                "ok": False,
+                "calibrated": 0,
+                "snapshots": {},
+                "errors": {"_batch": "calibrate failed"},
+                "provenance": _cron_provenance(True),
+            }
     try:
-        return _run_calibrate(symbols, market)
+        from datetime import date as _date
+
+        _doy = _date.today().toordinal()
+    except Exception:
+        _doy = 0
+    try:
+        return _run_calibrate(
+            symbols, market,
+            budget_s=_CALIBRATE_TICK_BUDGET_S,
+            start_offset=_doy * _CALIBRATE_ROTATION_STRIDE,
+        )
     except HTTPException:
         raise
     except Exception:

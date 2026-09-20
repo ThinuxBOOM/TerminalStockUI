@@ -87,6 +87,19 @@ router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 BAR_LIMIT = 120
 INDICATOR_MAX_POINTS = 1000
+
+#: Response cache: the bundle is deterministic per (symbol, overlays) and
+#: identical for every tier, so the key is unscoped. TTL 300s mirrors the
+#: frontend staleTime — repeat views within 5min skip the 120-bar fetch +
+#: pandas bundle entirely.
+_ANALYTICS_TTL_S = 300
+
+
+def _analytics_cache_key(symbol: str, indicators: str | None) -> str:
+    try:
+        return f"analytics:{str(symbol).upper()}:{str(indicators or '').upper()}"
+    except Exception:
+        return f"analytics:{symbol}:{indicators}"
 EMPTY_STATEMENTS: dict = {}
 NOTE_UNAVAILABLE = (
     "Statement feed not wired in M3: fundamentals/quality/valuation report "
@@ -293,6 +306,17 @@ def get_analytics(
             wanted = parse_indicators(indicators)
         except ValueError as exc:
             raise _HTTPException(status_code=422, detail=str(exc)) from exc
+    # Response cache: identical bundles within TTL skip bars + bundle.
+    _ck: str | None = None
+    try:
+        from backend.cache import get_cache as _get_cache
+
+        _ck = _analytics_cache_key(sym, indicators)
+        _cached = _get_cache().get(_ck)
+        if isinstance(_cached, dict) and isinstance(_cached.get("technical"), dict):
+            return _cached
+    except Exception:
+        _ck = None
     try:
         bars = svc.get_bars(sym, timeframe="1d", limit=BAR_LIMIT)
     except _HTTPException:
@@ -413,4 +437,11 @@ def get_analytics(
         payload: dict = dict(computed)
         payload["provenance"] = provenance
         out["indicators"] = payload
+    try:
+        if _ck:
+            from backend.cache import get_cache as _get_cache2
+
+            _get_cache2().set(_ck, out, ttl_s=_ANALYTICS_TTL_S)
+    except Exception:
+        pass
     return out
