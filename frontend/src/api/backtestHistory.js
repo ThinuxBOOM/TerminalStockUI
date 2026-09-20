@@ -25,7 +25,11 @@ function normalizeRun(raw) {
         n_folds: m.n_folds !== void 0 ? numOrNull(m.n_folds ?? m.nFolds) : null,
         n_points: m.n_points !== void 0 ? numOrNull(m.n_points ?? m.nPoints ?? m.n) : numOrNull(m.n_points ?? m.n),
         brier: m.brier !== void 0 ? numOrNull(m.brier ?? m.brier_score) : numOrNull(m.brier ?? m.brier_score),
-        ece: m.ece !== void 0 ? numOrNull(m.ece ?? m.calibration_error) : numOrNull(m.ece ?? m.calibration_error)
+        ece: m.ece !== void 0 ? numOrNull(m.ece ?? m.calibration_error) : numOrNull(m.ece ?? m.calibration_error),
+        // ensemble-v3 additions (null on old runs; backward compatible)
+        calibrated_brier: numOrNull(m.calibrated_brier ?? m.calibratedBrier ?? null),
+        calibrated_ece: numOrNull(m.calibrated_ece ?? m.calibratedEce ?? null),
+        calibration_method: typeof m.calibration_method === "string" ? m.calibration_method : (typeof m.calibrationMethod === "string" ? m.calibrationMethod : null),
       };
     }
   }

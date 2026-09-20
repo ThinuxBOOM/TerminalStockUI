@@ -219,6 +219,14 @@ function ForecastDetails({ symbol }) {
             {f.ensemble_weights && typeof f.ensemble_weights === "object" ? (
               <div className="col-span-2 md:col-span-4">Weights: <span className="text-term-muted">{Object.entries(f.ensemble_weights).map(([k, v]) => `${k}=${Number.isFinite(Number(v)) ? Number(v).toFixed(2) : "—"}`).join(" · ")}</span></div>
             ) : null}
+            {(f.calibration_method || f.adaptive_weights !== null || typeof f.skill_brier === "number" || typeof f.skill_ece === "number") ? (
+              <div className="col-span-2 md:col-span-4 text-term-muted">
+                Calibration: <b className="text-term-text">{f.calibration_method ?? "shrinkage-0.8"}</b>
+                {typeof f.adaptive_weights === "boolean" ? <span> · {f.adaptive_weights ? "adaptive weights" : "fixed weights"}</span> : null}
+                {typeof f.skill_brier === "number" && Number.isFinite(f.skill_brier) ? <span> · skill Brier {f.skill_brier.toFixed(4)}</span> : null}
+                {typeof f.skill_ece === "number" && Number.isFinite(f.skill_ece) ? <span> · ECE {f.skill_ece.toFixed(4)}</span> : null}
+              </div>
+            ) : null}
           </dl>
           {(f.confidence_reasons ?? []).length > 0 ? (
             <p className="mt-1 text-[11px] text-term-muted">Confidence penalties: {(f.confidence_reasons ?? []).join("; ")}</p>
@@ -343,7 +351,7 @@ function ForecastDetails({ symbol }) {
           </div>
           {latestMeta ? (
             <p className="mt-1 text-[10px] text-term-muted">
-              Brier/ECE above are from the persisted calibration snapshot{latestMeta.created_at ? ` (${new Date(latestMeta.created_at).toLocaleString()})` : ""}{latestMeta.model_version ? ` · model ${latestMeta.model_version}` : ""} — not computed from the live forecast above.
+              Brier/ECE above are from the persisted calibration snapshot{latestMeta.created_at ? ` (${new Date(latestMeta.created_at).toLocaleString()})` : ""}{latestMeta.model_version ? ` · model ${latestMeta.model_version}` : ""}{latestMeta.calibration_method ? ` · ${latestMeta.calibration_method}` : ""}{typeof latestMeta.calibrated_brier === "number" && Number.isFinite(latestMeta.calibrated_brier) ? ` · calibrated Brier ${Number(latestMeta.calibrated_brier).toFixed(4)}` : ""}{typeof latestMeta.calibrated_ece === "number" && Number.isFinite(latestMeta.calibrated_ece) ? ` · ECE ${Number(latestMeta.calibrated_ece).toFixed(4)}` : ""} — not computed from the live forecast above.
             </p>
           ) : (
             <p className="mt-1 text-[10px] text-term-muted">No persisted calibration snapshot yet — Brier/ECE unavailable.</p>
@@ -409,7 +417,7 @@ function ForecastDetails({ symbol }) {
                     <div key={`${h.created_at ?? "snapshot"}-${i}`} className="text-[11px]">
                       <div className="flex justify-between gap-2 text-term-muted">
                         <span>{h.created_at ? formatDateTime(h.created_at) : `snapshot ${i + 1}`}</span>
-                        <span>Brier {h.brier === null ? "—" : Number(h.brier).toFixed(4)} · ECE {h.ece === null ? "—" : Number(h.ece).toFixed(4)}{h.n_windows !== null ? ` · n=${h.n_windows}` : ""}</span>
+                        <span>Brier {h.brier === null ? "—" : Number(h.brier).toFixed(4)} · ECE {h.ece === null ? "—" : Number(h.ece).toFixed(4)}{h.n_windows !== null ? ` · n=${h.n_windows}` : ""}{typeof h.calibrated_brier === "number" && Number.isFinite(h.calibrated_brier) ? ` · cal ${Number(h.calibrated_brier).toFixed(4)}` : ""}{h.calibration_method ? ` · ${h.calibration_method}` : ""}</span>
                       </div>
                       <div className="mt-0.5 h-1 w-full rounded bg-term-border">
                         <div className="h-1 rounded bg-term-green" style={{ width: `${bWidth}%` }} title={`Brier ${h.brier ?? "—"} (0 = perfect, 0.25 = coin-flip)`} />

@@ -194,7 +194,42 @@ def get_session_factory(url: str | None = None):
 
 
 def init_db(url: str | None = None) -> None:
-    Base.metadata.create_all(get_engine(url))
+    engine = get_engine(url)
+    Base.metadata.create_all(engine)
+    # Self-heal long-lived SQLite files created before ensemble-v3:
+    # create_all never ALTERs existing tables, so a stale onemarket.db
+    # would lack calibrated_brier/ece + member_brier/calibrator and every
+    # upsert would fail. Best-effort ADD COLUMN (fresh DBs are no-ops).
+    try:
+        if str(getattr(engine, "url", "")).startswith("sqlite"):
+            from sqlalchemy import text as _text
+
+            with engine.begin() as conn:
+                existing = {
+                    row[1]
+                    for row in conn.execute(
+                        _text("PRAGMA table_info(calibration_snapshots)")
+                    ).fetchall()
+                }
+                if existing:
+                    if "calibrated_brier" not in existing:
+                        conn.execute(
+                            _text("ALTER TABLE calibration_snapshots ADD COLUMN calibrated_brier NUMERIC NULL")
+                        )
+                    if "calibrated_ece" not in existing:
+                        conn.execute(
+                            _text("ALTER TABLE calibration_snapshots ADD COLUMN calibrated_ece NUMERIC NULL")
+                        )
+                    if "member_brier" not in existing:
+                        conn.execute(
+                            _text("ALTER TABLE calibration_snapshots ADD COLUMN member_brier JSON NOT NULL DEFAULT '{}'")
+                        )
+                    if "calibrator" not in existing:
+                        conn.execute(
+                            _text("ALTER TABLE calibration_snapshots ADD COLUMN calibrator JSON NOT NULL DEFAULT '{}'")
+                        )
+    except Exception:
+        pass
 
 
 def get_db():

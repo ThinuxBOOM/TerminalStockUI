@@ -233,6 +233,9 @@ function BacktestLabPage() {
                         <td className="py-1 pr-2 text-right term-num">
                           {first?.brier === null || first?.brier === undefined ? "—" : Number(first.brier).toFixed(4)}
                           {scored !== null && <span className="ml-1 text-[10px] text-term-muted">·{scored}d</span>}
+                          {first?.calibrated_brier !== null && first?.calibrated_brier !== undefined && Number.isFinite(Number(first.calibrated_brier)) && (
+                            <span className="ml-1 text-[10px] text-term-muted" title={`Calibrated Brier (${first.calibration_method ?? "calibrated"})`}>·cal {Number(first.calibrated_brier).toFixed(4)}</span>
+                          )}
                         </td>
                         <td className="py-1 pr-2 text-right term-num">{first?.ece === null || first?.ece === undefined ? "—" : Number(first.ece).toFixed(4)}</td>
                         <td className="py-1 pr-2 text-right term-num">{first?.n_points ?? "—"}</td>
@@ -316,6 +319,11 @@ function LabResults({ r }) {
             <SourceBadge source="SOURCE: DETERMINISTIC" />
           </div>
           <p className="mt-1 text-2xl font-bold">{r.ece === null || r.ece === undefined ? "—" : r.ece.toFixed(4)}</p>
+          {(typeof r.calibrated_brier === "number" || typeof r.calibrated_ece === "number" || typeof r.calibration_method === "string") && (
+            <p className="mt-1 text-[11px] text-term-muted">
+              Calibrated{typeof r.calibration_method === "string" && r.calibration_method ? ` · ${r.calibration_method}` : ""}{typeof r.calibrated_brier === "number" && Number.isFinite(r.calibrated_brier) ? ` · Brier ${r.calibrated_brier.toFixed(4)}` : ""}{typeof r.calibrated_ece === "number" && Number.isFinite(r.calibrated_ece) ? ` · ECE ${r.calibrated_ece.toFixed(4)}` : ""} (cross-fitted, honest).
+            </p>
+          )}
           <div className="mt-1 flex flex-wrap gap-1">
             <ProvenanceBadge p={r.provenance} />
             <FreshnessBadge p={r.provenance} />

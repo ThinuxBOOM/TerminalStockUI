@@ -47,6 +47,15 @@ function normalizeEntry(raw) {
   const modelVersion = (typeof r.model_version === "string" ? r.model_version : null) ?? (typeof meta.model_version === "string" ? meta.model_version : null);
   const dataVersion = (typeof r.data_version === "string" ? r.data_version : null) ?? (typeof meta.data_version === "string" ? meta.data_version : null);
   const createdAt = (typeof r.created_at === "string" ? r.created_at : null) ?? (typeof r.as_of === "string" ? r.as_of : null) ?? (typeof meta.created_at === "string" ? meta.created_at : null) ?? (typeof meta.as_of === "string" ? meta.as_of : null);
+  // ensemble-v3 additions (all optional for backward compat with v1/v2 rows)
+  const calibratedBrier = numOrNull(r.calibrated_brier ?? r.calibratedBrier ?? meta.calibrated_brier);
+  const calibratedEce = numOrNull(r.calibrated_ece ?? r.calibratedEce ?? r.calibrated_ece_score ?? meta.calibrated_ece);
+  const memberBrierRaw = r.member_brier ?? r.memberBrier ?? meta.member_brier ?? null;
+  const memberBrier = memberBrierRaw && typeof memberBrierRaw === "object" && !Array.isArray(memberBrierRaw) ? memberBrierRaw : null;
+  const calibratorRaw = r.calibrator ?? meta.calibrator ?? null;
+  const calibrationMethod = (typeof r.calibration_method === "string" ? r.calibration_method : null)
+    ?? (typeof meta.calibration_method === "string" ? meta.calibration_method : null)
+    ?? (calibratorRaw && typeof calibratorRaw === "object" && typeof calibratorRaw.kind === "string" ? calibratorRaw.kind : null);
   if (brier === null && ece === null && nWindows === null && reliability.length === 0 && !modelVersion && !dataVersion) {
     return null;
   }
@@ -58,7 +67,11 @@ function normalizeEntry(raw) {
     reliability,
     model_version: modelVersion,
     data_version: dataVersion,
-    created_at: createdAt
+    created_at: createdAt,
+    calibrated_brier: calibratedBrier,
+    calibrated_ece: calibratedEce,
+    member_brier: memberBrier,
+    calibration_method: calibrationMethod,
   };
 }
 function extractList(data) {
