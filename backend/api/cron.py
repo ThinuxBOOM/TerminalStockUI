@@ -51,11 +51,17 @@ router = APIRouter(prefix="/api/cron", tags=["cron"])
 _SNAPSHOT_BUDGET_S = 40.0
 
 #: Total tick budget for sharded ingest calls (?universe=sp500&shards=20,
-#: curled with --max-time 50). Covers fetch AND persist (DB-connect time
+#: curled with --max-time 58). Covers fetch AND persist (DB-connect time
 #: included); the fetch pool keeps budget minus elapsed minus the ingest
 #: persist reserve. Same orphan-stragglers discipline as snapshots
 #: (see backend/market_data/ingest.py).
-_INGEST_TICK_BUDGET_S = 45.0
+#: 32s (not 45s): Vercel cold import (pandas/sklearn/yfinance, ~10-20s)
+#: runs BEFORE this clock starts, so total = import + budget must stay
+#: under curl 58s AND Vercel maxDuration 60s. 45s + 15s import = 60s+ ->
+#: curl exit 28 on every shard (the 2026-09-22 all-shards failure:
+#: 4 attempts x 50s + sleeps = 4m38s). Snapshots uses 40/55 (15s
+#: headroom) and stays green; ingest now uses 32/58 (26s headroom).
+_INGEST_TICK_BUDGET_S = 32.0
 
 #: Test seam: when set, the cron endpoints ingest via this fetch callable
 #: instead of yfinance (cleared by :func:`reset_cron`).

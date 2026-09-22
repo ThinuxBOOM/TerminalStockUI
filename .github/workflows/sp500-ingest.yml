@@ -1,15 +1,20 @@
 # OneMarket Analyzer — S&P 500 bars warm schedule (GitHub Actions)
 #
 # Why sharded: 500 symbols x ~2-12s live fetch each can never fit one
-# serverless tick (Vercel maxDuration 60s). Twenty parallel jobs x ~25 symbols
-# stay inside the 45s tick budget once warm (10 x 50 routinely overran it
-# under Yahoo throttle + slow-DB cold starts -> curl exit 28 on all shards);
+# serverless tick (Vercel maxDuration 60s). Twenty jobs x ~25 symbols
+# stay inside the 32s tick budget once warm (10 x 50 routinely overran it
+# under Yahoo throttle + slow-DB cold starts -> curl exit 28 on all shards;
+# 20 x 45s still failed 2026-09-22 with only 5s headroom for the ~10-20s
+# Vercel cold import that runs BEFORE the server budget clock — total
+# 60s+ > curl 50s on every shard, 4 attempts x 50s + sleeps = 4m38s);
 # cold ticks truncate to partial 200 ("fetch budget exceeded" / "persist
 # deferred" per-symbol errors) and the next daily tick warms the rest — bars
 # persist per symbol, so progress accumulates.
 # Cadence: daily 06:00 UTC (after the default-universe ingest 05:30 UTC).
 # Manual: workflow_dispatch, optionally one shard via inputs.
 # Setup (once): same APP_URL + CRON_SECRET secrets as snapshots.yml.
+# Requires Vercel Pro (maxDuration 60). On Hobby (10s cap) every shard
+# times out — either upgrade or warm via a long-lived host instead.
 
 name: Warm S&P 500 bars
 
@@ -24,17 +29,14 @@ on:
         default: ""
 
 jobs:
-  warm:
-    name: ingest sp500 shard ${{ matrix.shard }}
+  warmup:
+    name: warm serverless function
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    timeout-minutes: 5
+    # Single-shard manual runs skip the warmup (one tick warms itself).
+    if: ${{ inputs.shard == '' }}
     steps:
-      - name: Trigger shard ingest
-        if: ${{ inputs.shard == '' || format('{0}', matrix.shard) == inputs.shard }}
+      - name: Warm with single-symbol probe
         run: |
           : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
           : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
@@ -42,22 +44,69 @@ jobs:
           APP_URL="${APP_URL%/}"
           echo "Target host check only (secret never printed):"
           printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
-          # The shard endpoint caps the whole tick at 45s (fetch + persist,
+          # Cheap single-symbol tick (~1 fetch, no 25-symbol fan-out) pays the
+          # Vercel cold import once so the 20 shard jobs below hit warm
+          # instances. Failure here is advisory — shards retry on their own.
+          for attempt in 1 2 3; do
+            curl_exit=0
+            code=""
+            code=$(curl -s --max-time 58 --connect-timeout 10 -o /tmp/warm.json -w "%{http_code}" \
+              -H "Authorization: Bearer $CRON_SECRET" \
+              "$APP_URL/api/cron/ingest?symbol=AAPL") || curl_exit=$?
+            echo "warm attempt $attempt: curl exit: $curl_exit HTTP: ${code:-<none>}"
+            if [ -f /tmp/warm.json ]; then head -c 1000 /tmp/warm.json; echo ""; fi
+            if [ "$curl_exit" = "0" ] && [ "$code" = "200" ]; then echo "warm ok"; break; fi
+            if [ "$attempt" != "3" ]; then echo "sleeping 15s before retry..."; sleep 15; fi
+          done
+          exit 0
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+
+  warm:
+    name: ingest sp500 shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [warmup]
+    # Manual single-shard runs skip warmup above: run even if it was skipped.
+    if: ${{ always() && (inputs.shard == '' || format('{0}', matrix.shard) == inputs.shard) }}
+    strategy:
+      fail-fast: false
+      # Thundering-herd guard: 20 concurrent cold starts stampede Vercel
+      # (per-instance cold import), Supabase pooler (:6543 connection storm)
+      # and Yahoo (IP throttle) at once. 5-wide waves stagger cold starts
+      # and keep each wave inside the server budget.
+      max-parallel: 5
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - name: Trigger shard ingest
+        run: |
+          : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
+          : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
+          APP_URL="$(printf '%s' "$APP_URL" | tr -d '[:space:]')"
+          APP_URL="${APP_URL%/}"
+          echo "Target host check only (secret never printed):"
+          printf '%s\n' "$APP_URL" | sed -E 's#(https?://[^/]+).*#\1#'
+          # The shard endpoint caps the whole tick at 32s (fetch + persist,
           # DB-connect time included) and returns partial 200 instead of
           # hanging (stragglers orphaned, remainder retried next daily tick
-          # — bars persist per symbol so progress accumulates). Attempt 1 may
-          # still time out on a Vercel cold start (import runs before endpoint
-          # code, outside the server budget) — it warms the function, so
-          # retry up to 4 times. 401/403 is an auth misconfig (retrying is
-          # pointless) so fail fast with a clear message.
+          # — bars persist per symbol so progress accumulates). curl 58s
+          # leaves ~26s headroom for the Vercel cold import that runs before
+          # the server budget clock (45s budget + 15s import = 60s+ was the
+          # 2026-09-22 all-shards curl-28 cause). 401/403 is an auth
+          # misconfig (retrying is pointless) so fail fast with a clear
+          # message. 5xx / empty body: log it, retry — then fail the job so
+          # the red annotation stays visible (partial progress is already
+          # durable per symbol).
           ok=0
           for attempt in 1 2 3 4; do
             curl_exit=0
             code=""
-            code=$(curl -s --max-time 50 --connect-timeout 10 -o /tmp/sp500.json -w "%{http_code}" \
+            code=$(curl -s --max-time 58 --connect-timeout 10 -o /tmp/sp500.json -w "%{http_code}" \
               -H "Authorization: Bearer $CRON_SECRET" \
               "$APP_URL/api/cron/ingest?universe=sp500&shard=${{ matrix.shard }}&shards=20") || curl_exit=$?
-            echo "attempt $attempt: curl exit: $curl_exit shard: ${{ matrix.shard }} (28 = timeout after 50s)"
+            echo "attempt $attempt: curl exit: $curl_exit shard: ${{ matrix.shard }} (28 = timeout after 58s)"
             echo "attempt $attempt: HTTP status: ${code:-<none>}"
             if [ -f /tmp/sp500.json ]; then head -c 2000 /tmp/sp500.json; echo ""; else echo "<no response body>"; fi
             if [ "$code" = "401" ] || [ "$code" = "403" ]; then
@@ -66,9 +115,10 @@ jobs:
             fi
             if [ "$curl_exit" = "0" ] && [ "$code" = "200" ]; then ok=1; break; fi
             if [ "$curl_exit" = "28" ]; then
-              echo "Shard request timed out: backend slower than 50s (cold start / vendor throttle). Warms the function; retrying."
+              echo "Shard request timed out: backend slower than 58s (cold start / vendor throttle). Warms the function; retrying."
+              echo "If EVERY shard times out every day: check (1) Vercel plan is Pro (Hobby caps maxDuration 10s), (2) Vercel function logs for /api/cron/ingest duration, (3) Supabase pooler slowness, (4) missing ALPACA keys (US symbols fall back to slow yfinance scrape)."
             fi
-            if [ "$attempt" != "4" ]; then echo "sleeping 25s before retry..."; sleep 25; fi
+            if [ "$attempt" != "4" ]; then echo "sleeping 20s before retry..."; sleep 20; fi
           done
           test "$ok" = "1"
         env:
