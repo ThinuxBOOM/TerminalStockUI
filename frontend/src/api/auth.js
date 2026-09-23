@@ -136,7 +136,13 @@ function redirectToLogin() {
   try {
     if (typeof window !== "undefined" && window.location) {
       const path = window.location.pathname || "";
-      if (!path.startsWith("/login")) window.location.assign("/login");
+      if (path.startsWith("/login")) return;
+      // Guest (no token) must never be force-redirected: public data
+      // endpoints may 401 when backend requires auth — let the page show
+      // ErrorState instead of bouncing guest back to /login in a loop.
+      // Only redirect when a (possibly expired) token was present.
+      if (!getAccessToken()) return;
+      window.location.assign("/login");
     }
   } catch {
     // never throw out of an interceptor

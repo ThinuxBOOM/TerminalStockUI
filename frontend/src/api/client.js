@@ -109,7 +109,10 @@ function defaultUnauthorized() {
   try {
     if (typeof window !== "undefined" && window.location) {
       const path = window.location.pathname || "";
-      if (!path.startsWith("/login")) window.location.assign("/login");
+      if (path.startsWith("/login")) return;
+      // Same guest guard as auth.js: no token -> no force redirect.
+      if (!readAuthToken()) return;
+      window.location.assign("/login");
     }
   } catch {
     // never throw out of an interceptor

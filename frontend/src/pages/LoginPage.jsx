@@ -30,7 +30,14 @@ function LoginPage() {
   const { login, register } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [mode, setMode] = useState("login");
+  const [mode, setMode] = useState(() => {
+    try {
+      const params = new URLSearchParams(location.search || "");
+      return params.get("mode") === "register" ? "register" : "login";
+    } catch {
+      return "login";
+    }
+  });
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
