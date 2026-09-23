@@ -24,7 +24,7 @@ function InteractiveTerminalDemo() {
             <DemoTerminal />
           </div>
           <p style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <Link to="/" className="lp-btn" style={{ fontSize: "0.78rem", padding: "0.6rem 1.1rem" }}>Open the live terminal →</Link>
+            <Link to="/app" className="lp-btn" style={{ fontSize: "0.78rem", padding: "0.6rem 1.1rem" }}>Open the live terminal →</Link>
             <span className="mut" style={{ fontSize: "0.75rem" }}>Same design language, live numbers inside.</span>
           </p>
         </Reveal>

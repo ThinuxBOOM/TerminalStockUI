@@ -37,7 +37,7 @@ function FinalCTA() {
                 <li><Check aria-hidden="true" style={{ width: 13, height: 13, color: "#3ddc84", flexShrink: 0 }} />Plain-words forecasts + charts</li>
                 <li><Check aria-hidden="true" style={{ width: 13, height: 13, color: "#3ddc84", flexShrink: 0 }} />My List watchlist</li>
               </ul>
-              <p style={{ marginTop: 14 }}><Link to="/" className="lp-btn" style={{ fontSize: "0.78rem" }}>Start exploring →</Link></p>
+              <p style={{ marginTop: 14 }}><Link to="/app" className="lp-btn" style={{ fontSize: "0.78rem" }}>Start exploring →</Link></p>
             </Reveal>
             <Reveal delay={100} className="lp-panel lp-plan" style={{ borderColor: "#3ddc84" }}>
               <h3 style={{ margin: 0, color: "#3ddc84" }}>Pro <span className="lp-demo-tag">SOON</span></h3>
@@ -101,7 +101,7 @@ function FinalCTA() {
                 source of truth — every number shows its source and age.
               </p>
               <p style={{ marginTop: 22, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-                <Link to="/" className="lp-btn">Open Terminal <ArrowRight aria-hidden="true" style={{ width: 15, height: 15 }} /></Link>
+                <Link to="/app" className="lp-btn">Open Terminal <ArrowRight aria-hidden="true" style={{ width: 15, height: 15 }} /></Link>
                 <Link to="/screener" className="lp-btn-ghost">See Top Picks</Link>
               </p>
               <p className="mut" style={{ fontSize: "0.7rem", marginTop: 14 }}>Not investment advice. For learning and research only.</p>

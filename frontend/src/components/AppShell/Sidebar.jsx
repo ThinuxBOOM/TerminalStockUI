@@ -2,7 +2,6 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   Activity,
-  BookOpen,
   Crown,
   FileText,
   FlaskConical,
@@ -22,7 +21,7 @@ const GROUPS = [
     id: "workspace",
     title: "WORKSPACE",
     items: [
-      { to: "/", end: true, label: "Overview", Icon: LayoutDashboard, hint: "Terminal home" },
+      { to: "/app", end: true, label: "Overview", Icon: LayoutDashboard, hint: "Terminal home" },
       { to: "/screener", label: "Markets", Icon: Globe, hint: "Markets overview — top picks" },
       { to: "/watchlist", label: "Watchlist", Icon: Star, hint: "Stocks you follow" },
     ],
@@ -49,16 +48,15 @@ const GROUPS = [
     title: "DATA",
     items: [
       { to: "/providers", label: "Data Health", Icon: Activity, hint: "Is the data fresh?" },
-      { to: "/#news", matchHash: "#news", label: "News", Icon: Newspaper, hint: "Latest headlines on home" },
+      { to: "/app#news", matchHash: "#news", label: "News", Icon: Newspaper, hint: "Latest headlines on home" },
       { to: "/account", label: "Account", Icon: User, hint: "Account and session" },
       { to: "/pricing", label: "Pricing", Icon: Crown, hint: "Plans and upgrades" },
-      { to: "/welcome", label: "Guide", Icon: BookOpen, hint: "Learn in 2 minutes" },
     ],
   },
 ];
 
 function isItemActive(item, pathname, hash) {
-  if (item.matchHash) return hash === item.matchHash && (pathname === "/" || pathname === "");
+  if (item.matchHash) return hash === item.matchHash && (pathname === "/app" || pathname === "");
   if (item.matchPrefix) return pathname.startsWith(item.matchPrefix);
   if (item.end) return pathname === item.to;
   return pathname === item.to || pathname.startsWith(`${item.to}/`);
@@ -151,9 +149,11 @@ function Sidebar({ collapsed = false, mobileOpen = false, onCloseMobile, onToggl
           onClick={onToggleCollapse}
           aria-expanded={!collapsed}
           aria-controls={id}
-          className="term-btn-sm w-full"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="term-btn-sm w-full whitespace-nowrap"
         >
-          {collapsed ? "EXPAND »" : "« COLLAPSE"}
+          {collapsed ? "»" : "« COLLAPSE"}
         </button>
       </div>
     </div>

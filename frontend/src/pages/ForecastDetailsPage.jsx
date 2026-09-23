@@ -24,7 +24,7 @@ function ForecastDetailsPage() {
   return (
     <div className="min-w-0">
       <nav className="mb-3 flex flex-wrap items-center gap-2 text-xs" aria-label="Breadcrumb">
-        <Link to="/" className="text-term-muted hover:text-term-text">← Home</Link>
+        <Link to="/app" className="text-term-muted hover:text-term-text">← Home</Link>
         <span className="text-term-muted" aria-hidden="true">/</span>
         <Link to={`/security/${enc}`} className="text-term-muted hover:text-term-text">Security Brief</Link>
         <span className="text-term-muted" aria-hidden="true">/</span>

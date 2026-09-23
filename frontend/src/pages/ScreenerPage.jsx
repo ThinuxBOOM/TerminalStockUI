@@ -128,7 +128,7 @@ function ScreenerPage() {
   );
   return (
     <div className="max-w-full">
-      <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/" className="text-term-muted hover:text-term-text">← Home</Link></nav>
+      <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/app" className="text-term-muted hover:text-term-text">← Home</Link></nav>
       <h1 className="text-lg font-extrabold text-term-text">Discover — Screener</h1>
       <p className="mt-0.5 text-xs text-term-muted">Search + filters + ranked results. Forecasts are research starting points, never guarantees.</p>
       <div className="mt-3 grid min-w-0 items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">

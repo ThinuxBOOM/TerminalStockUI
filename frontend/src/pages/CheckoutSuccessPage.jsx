@@ -33,7 +33,7 @@ function CheckoutSuccessPage() {
         <Link to="/account" className="term-btn text-xs">
           CHECK MY SUBSCRIPTION →
         </Link>
-        <Link to="/" className="term-btn-ghost text-xs">
+        <Link to="/app" className="term-btn-ghost text-xs">
           BACK TO TERMINAL →
         </Link>
       </div>

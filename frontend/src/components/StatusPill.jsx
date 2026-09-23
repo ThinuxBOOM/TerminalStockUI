@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 import { deriveMarketState, freshnessOf } from "../api/client";
 import { formatDateTime } from "../utils/format";
@@ -120,6 +121,66 @@ function StatusPill({
   now,
 }) {
   const [open, setOpen] = useState(false);
+  const btnRef = useRef(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  // Viewport-aware placement: portal to body (escapes overflow-x-auto table
+  // containers that used to clip the box in corners), prefer below the
+  // button, flip above when there is no room, and clamp horizontally so the
+  // 224px box never runs off the right/left edge.
+  const place = () => {
+    const el = btnRef.current;
+    if (!el || typeof window === "undefined") return;
+    const r = el.getBoundingClientRect();
+    const W = 224;
+    const gap = 6;
+    const margin = 8;
+    const vw = window.innerWidth || 1024;
+    const vh = window.innerHeight || 768;
+    const estH = 150;
+    const below = vh - r.bottom - gap;
+    const top = below >= estH || r.top < estH + gap
+      ? r.bottom + gap
+      : Math.max(margin, r.top - gap - estH);
+    const left = Math.min(
+      Math.max(margin, r.left),
+      Math.max(margin, vw - W - margin),
+    );
+    setPos({ top: Math.min(top, Math.max(margin, vh - margin - 40)), left });
+  };
+
+  useLayoutEffect(() => {
+    if (open) place();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open ]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    place();
+    function onPointer(e) {
+      if (btnRef.current && !btnRef.current.contains(e.target)) {
+        const dlg = document.getElementById("statuspill-dialog");
+        if (dlg && !dlg.contains(e.target)) setOpen(false);
+      }
+    }
+    function onKey(e) {
+      if (e.key === "Escape") {
+        setOpen(false);
+        btnRef.current?.focus();
+      }
+    }
+    window.addEventListener("pointerdown", onPointer, { passive: true });
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", place, { passive: true, capture: true });
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", place, { capture: true });
+      window.removeEventListener("resize", place);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open ]);
 
   const provInput =
     provenance ??
@@ -175,16 +236,9 @@ function StatusPill({
           {grade}
         </sup>
       ) : null}
-      <span
-        className="relative inline-flex items-center"
-        onBlur={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") setOpen(false);
-        }}
-      >
+      <span className="relative inline-flex items-center">
         <button
+          ref={btnRef}
           type="button"
           aria-label="Data provenance details"
           aria-expanded={open}
@@ -193,26 +247,31 @@ function StatusPill({
         >
           <Info className="h-3 w-3" aria-hidden="true" />
         </button>
-        {open ? (
-          <div
-            role="dialog"
-            aria-label="Data provenance details"
-            className="term-panel-nested absolute left-0 top-full z-10 mt-1 w-56 p-2 text-left text-[10px] font-normal normal-case leading-relaxed tracking-normal text-term-muted shadow-panel-lg"
-          >
-            <div>
-              src: <b className="text-term-text">{prov ? prov.source : "unavailable"}</b>
-            </div>
-            <div>as_of: {prov ? formatDateTime(prov.as_of) : "—"}</div>
-            <div>delay: {prov ? `${prov.delay_minutes}m` : "—"}</div>
-            <div>
-              Q: <b className="text-term-cyan">{grade ?? "U"}</b>
-            </div>
-            {prov?.fallback_used ? <div className="text-term-amber">fallback</div> : null}
-            {missing.length > 0 ? (
-              <div className="text-term-red">missing: {missing.join(", ")}</div>
-            ) : null}
-          </div>
-        ) : null}
+        {open && typeof document !== "undefined"
+          ? createPortal(
+              <div
+                id="statuspill-dialog"
+                role="dialog"
+                aria-label="Data provenance details"
+                style={{ top: pos.top, left: pos.left }}
+                className="term-panel-nested fixed z-50 mt-0 w-56 max-w-[calc(100vw-16px)] break-words p-2 text-left text-[10px] font-normal normal-case leading-relaxed tracking-normal text-term-muted shadow-panel-lg"
+              >
+                <div className="break-all">
+                  src: <b className="text-term-text">{prov ? prov.source : "unavailable"}</b>
+                </div>
+                <div className="break-all">as_of: {prov ? formatDateTime(prov.as_of) : "—"}</div>
+                <div>delay: {prov ? `${prov.delay_minutes}m` : "—"}</div>
+                <div>
+                  Q: <b className="text-term-cyan">{grade ?? "U"}</b>
+                </div>
+                {prov?.fallback_used ? <div className="text-term-amber">fallback</div> : null}
+                {missing.length > 0 ? (
+                  <div className="break-all text-term-red">missing: {missing.join(", ")}</div>
+                ) : null}
+              </div>,
+              document.body,
+            )
+          : null}
       </span>
     </span>
   );

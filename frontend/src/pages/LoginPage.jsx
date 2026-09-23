@@ -143,7 +143,7 @@ function LoginPage() {
         <Link to="/pricing" className="term-btn-ghost text-xs">
           PRICING →
         </Link>
-        <Link to="/" className="term-btn-ghost text-xs">
+        <Link to="/app" className="term-btn-ghost text-xs">
           CONTINUE AS GUEST →
         </Link>
       </div>

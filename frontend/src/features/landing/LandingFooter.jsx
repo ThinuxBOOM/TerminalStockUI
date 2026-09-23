@@ -20,7 +20,7 @@ function LandingFooter() {
           </div>
           <nav aria-label="Product">
             <h3>PRODUCT</h3>
-            <Link to="/">Open Terminal</Link>
+            <Link to="/app">Open Terminal</Link>
             <Link to="/screener">Top Picks</Link>
             <Link to="/watchlist">My List</Link>
             <a href="#demo">Interactive Demo</a>

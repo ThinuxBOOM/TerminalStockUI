@@ -6,7 +6,6 @@ import { useScrollProgress } from "./useScrollProgress.js";
 const LINKS = [
   { href: "#product", label: "Product" },
   { href: "#research", label: "Research" },
-  { href: "#how", label: "Guide" },
   { href: "#markets", label: "Markets" },
   { href: "#pricing", label: "Pricing" },
   { href: "#faq", label: "FAQ" },
@@ -41,12 +40,6 @@ function LandingNav({ fromHref, fromLabel }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open ]);
 
-  function scrollToDemo(e) {
-    e.preventDefault();
-    setOpen(false);
-    document.getElementById("demo")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
   return (
     <>
       <div className="lp-progress" aria-hidden="true">
@@ -65,6 +58,9 @@ function LandingNav({ fromHref, fromLabel }) {
             ))}
           </nav>
           <div className="lp-nav-cta">
+            <Link to="/app" className="lp-btn-ghost lp-explore" style={{ padding: "0.55rem 1rem", fontSize: "0.78rem" }}>
+              Explore
+            </Link>
             <Link to="/login" className="lp-btn-ghost lp-explore" style={{ padding: "0.55rem 1rem", fontSize: "0.78rem" }}>
               Sign in
             </Link>
@@ -91,7 +87,7 @@ function LandingNav({ fromHref, fromLabel }) {
             {LINKS.map((l) => (
               <a key={l.href} href={l.href} onClick={() => setOpen(false)}>{l.label}</a>
             ))}
-            <a href="#demo" onClick={scrollToDemo}>Explore the demo</a>
+            <Link to="/app" onClick={() => setOpen(false)}>Explore as guest</Link>
             <Link to="/login" onClick={() => setOpen(false)}>Sign in</Link>
             <Link to="/login?mode=register" onClick={() => setOpen(false)}>Sign up</Link>
             {fromHref ? (

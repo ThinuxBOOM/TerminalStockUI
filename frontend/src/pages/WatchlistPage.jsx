@@ -193,7 +193,7 @@ function WatchlistPage() {
   if (symbols.length === 0) {
     return (
       <div className="max-w-full">
-        <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/" className="text-term-muted hover:text-term-text">← Home</Link></nav>
+        <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/app" className="text-term-muted hover:text-term-text">← Home</Link></nav>
         <h1 className="mb-1 text-lg font-extrabold text-term-text">Watchlist</h1>
         <p className="mb-3 text-xs text-term-muted">Monitoring workspace — track prices, 21D forecasts and freshness in one table.</p>
         <EmptyState
@@ -212,7 +212,7 @@ function WatchlistPage() {
 
   return (
     <div className="max-w-full">
-      <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/" className="text-term-muted hover:text-term-text">← Home</Link></nav>
+      <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/app" className="text-term-muted hover:text-term-text">← Home</Link></nav>
       <h1 className="text-lg font-extrabold text-term-text">Watchlist</h1>
       <p className="mt-0.5 text-xs text-term-muted">Monitoring workspace — search, sort, open research. {gated ? "Native prices (FX gated)." : `Ranked in ${rankQuery.data?.target_ccy ?? targetCcy}.`}</p>
 

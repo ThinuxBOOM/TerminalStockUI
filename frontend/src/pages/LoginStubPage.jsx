@@ -80,7 +80,7 @@ function LoginStubPage() {
 
       <div className="mt-4 flex flex-wrap gap-2 text-xs">
         <Link to="/welcome" className="term-btn-ghost text-xs">← WELCOME</Link>
-        <Link to="/" className="term-btn-ghost text-xs">HOME →</Link>
+        <Link to="/app" className="term-btn-ghost text-xs">HOME →</Link>
       </div>
     </div>
   );

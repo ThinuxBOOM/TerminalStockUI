@@ -26,8 +26,9 @@ const SearchBar = memo(function SearchBar({ q, setQ, onSubmit, searchRef }) {
         <input
           ref={searchRef}
           id="global-search"
-          className="term-input w-full min-w-0 pl-9 pr-12"
-          placeholder="Search ticker / company  (e.g. AAPL, 600519.SS, ASML.AS)…  [ / ]"
+          className="term-input w-full min-w-0 truncate pl-9 pr-12"
+          placeholder="Search ticker or company…"
+          title="Search ticker / company (e.g. AAPL, 600519.SS, ASML.AS)"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           aria-label="Global search"
@@ -37,7 +38,7 @@ const SearchBar = memo(function SearchBar({ q, setQ, onSubmit, searchRef }) {
         />
         <kbd
           aria-hidden="true"
-          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded border border-term-border px-1 text-2xs text-term-muted"
+          className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 rounded border border-term-border px-1 text-2xs text-term-muted sm:block"
         >
           ⌘K
         </kbd>
@@ -74,7 +75,7 @@ function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, on
         >
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
-        <Link to="/" className="flex shrink-0 items-center gap-2" aria-label="OneMarket home">
+        <Link to="/app" className="flex shrink-0 items-center gap-2" aria-label="OneMarket home">
           <img src="/logo.svg" alt="OneMarket logo" className="h-8 w-8 rounded-lg" width="32" height="32" />
           <span className="font-sans text-base font-black tracking-tight text-term-green">
             ONE<span className="text-term-text">MARKET</span>

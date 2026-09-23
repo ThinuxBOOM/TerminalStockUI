@@ -104,7 +104,7 @@ function PricingPage() {
               <li>✓ Plain-words forecasts + charts</li>
               <li>✓ My List watchlist</li>
             </ul>
-            <Link to="/" className="term-btn mt-4 text-center text-xs">
+            <Link to="/app" className="term-btn mt-4 text-center text-xs">
               START EXPLORING →
             </Link>
           </li>

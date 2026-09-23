@@ -87,7 +87,7 @@ function HeroSection() {
             focused workspace — every number showing its source and age.
           </p>
           <div className="lp-hero-ctas">
-            <Link to="/" className="lp-btn">
+            <Link to="/app" className="lp-btn">
               Open Terminal <ArrowRight aria-hidden="true" style={{ width: 15, height: 15 }} />
             </Link>
             <a href="#demo" onClick={scrollToDemo} className="lp-btn-ghost">

@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import { Routes, Route, useLocation } from "react-router-dom";
+import { Navigate, Routes, Route, useLocation } from "react-router-dom";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Skeleton from "./components/Skeleton";
 import UpgradeModal from "./components/UpgradeModal";
@@ -23,21 +23,27 @@ const PricingPage = lazy(() => import("./pages/PricingPage"));
 const CheckoutSuccessPage = lazy(() => import("./pages/CheckoutSuccessPage"));
 const AccountPage = lazy(() => import("./pages/AccountPage"));
 
-// Shell switch (BrowserRouter is provided by main.jsx): /welcome renders
-// WITHOUT any AppShell chrome — WelcomePage owns its full cinematic shell
-// (src/features/landing/LandingShell.jsx: FloatingNav + Hero + stories +
-// Footer). Wrapping it here would double header/footer and constrain width.
-// Every other terminal route renders in AppShell.
-// All route paths and ?q=/?symbol=/?from=/?next=/?session_id= contracts are
-// owned by the pages below and unchanged. lazy(), ErrorBoundary, Suspense,
-// UpgradeModal, and the AdSlot budget (inside AppShell) are preserved.
+// Shell switch (BrowserRouter is provided by main.jsx): "/" is the single
+// canonical landing (WelcomePage owns its full cinematic shell —
+// src/features/landing/LandingShell.jsx). "/welcome/*" is a dead alias that
+// bounces to "/" (preserving ?query) so old GUIDE links/bookmarks keep
+// working. "/app" and every other terminal route renders in AppShell.
+// All ?q=/?symbol=/?from=/?next=/?session_id= contracts are owned by the
+// pages below and unchanged. lazy(), ErrorBoundary, Suspense, UpgradeModal,
+// and the AdSlot budget (inside AppShell) are preserved.
+function WelcomeRedirect() {
+  const location = useLocation();
+  return <Navigate to={{ pathname: "/", search: location.search }} replace />;
+}
+
 function ShellRoutes() {
   const location = useLocation();
-  const isLanding = location.pathname === "/welcome" || location.pathname.startsWith("/welcome/");
+  const isLanding = location.pathname === "/" || location.pathname === "/welcome" || location.pathname.startsWith("/welcome/");
   const routes = (
     <Routes>
-      <Route path="/" element={<HomePage />} />
-      <Route path="/welcome" element={<WelcomePage />} />
+      <Route path="/" element={<WelcomePage />} />
+      <Route path="/welcome/*" element={<WelcomeRedirect />} />
+      <Route path="/app" element={<HomePage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/pricing" element={<PricingPage />} />
       <Route path="/checkout/success" element={<CheckoutSuccessPage />} />
