@@ -26,7 +26,8 @@ const SearchBar = memo(function SearchBar({ q, setQ, onSubmit, searchRef }) {
         <input
           ref={searchRef}
           id="global-search"
-          className="term-input w-full min-w-0 truncate pl-9 pr-12"
+          className="term-input w-full min-w-0 truncate"
+          style={{ paddingLeft: "2.25rem", paddingRight: "3rem" }}
           placeholder="Search ticker or company…"
           title="Search ticker / company (e.g. AAPL, 600519.SS, ASML.AS)"
           value={q}
