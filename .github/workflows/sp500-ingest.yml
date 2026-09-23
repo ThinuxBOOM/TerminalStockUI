@@ -34,7 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Single-shard manual runs skip the warmup (one tick warms itself).
-    if: ${{ inputs.shard == '' }}
+    # NOTE: `inputs` is empty on schedule runs, so test event_name first.
+    if: ${{ github.event_name == 'schedule' || inputs.shard == '' }}
     steps:
       - name: Warm with single-symbol probe
         run: |
@@ -69,7 +70,11 @@ jobs:
     timeout-minutes: 10
     needs: [warmup]
     # Manual single-shard runs skip warmup above: run even if it was skipped.
-    if: ${{ always() && (inputs.shard == '' || format('{0}', matrix.shard) == inputs.shard) }}
+    # NOTE: `matrix` is NOT a valid context in a job-level `if` (that was the
+    # "Unrecognized named-value: 'matrix'" invalid-workflow error) — so the
+    # job gate only decides all-vs-one, and per-shard filtering happens on
+    # the step below where `matrix` is allowed.
+    if: ${{ always() && (github.event_name == 'schedule' || inputs.shard == '') }}
     strategy:
       fail-fast: false
       # Thundering-herd guard: 20 concurrent cold starts stampede Vercel
@@ -81,6 +86,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - name: Trigger shard ingest
+        # `matrix` IS valid here (step-level). Non-matching shards succeed
+        # with this step skipped.
+        if: ${{ github.event_name == 'schedule' || inputs.shard == '' || format('{0}', matrix.shard) == inputs.shard }}
         run: |
           : "${APP_URL:?APP_URL secret not set (repo Settings -> Secrets and variables -> Actions)}"
           : "${CRON_SECRET:?CRON_SECRET secret not set (must match Vercel env)}"
