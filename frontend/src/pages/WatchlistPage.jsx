@@ -1,22 +1,24 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import useWatchlist from "../hooks/useWatchlist";
-import { TARGET_CURRENCIES, extractFxGateProvenance, getQuote, isFreshFxProvenance, normalizeTargetCcy, rankCrossMarket } from "../api/client";
+import { TARGET_CURRENCIES, extractFxGateProvenance, getForecast, getQuote, isFreshFxProvenance, normalizeTargetCcy, rankCrossMarket } from "../api/client";
 import CurrencyValue from "../components/CurrencyValue";
 import ErrorState from "../components/ErrorState";
+import EmptyState from "../components/EmptyState";
+import Skeleton from "../components/Skeleton";
+import StatusPill from "../components/StatusPill";
 import FXProvenanceBanner from "../components/FXProvenanceBanner";
-import Loading from "../components/Loading";
-import MarketStateBadge from "../components/MarketStateBadge";
-import ProvenanceBadge from "../components/ProvenanceBadge";
-const GATE_MESSAGE = "Cross-market comparison unavailable \u2014 FX provenance missing";
+import { changeArrow, changeColor, formatPct1, formatDateTime } from "../utils/format";
+
+const GATE_MESSAGE = "Cross-market comparison unavailable — FX provenance missing";
 const MAX_WATCHLIST_ROWS = 100;
+
 function normalizeSymbolInput(v) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
 }
+
 async function fetchNativeQuotes(symbols, signal) {
-  // Per-row error preserved (not swallowed to null) so rows can render a
-  // retry with the backend detail instead of a bare "unavailable".
   const settled = await Promise.all(
     symbols.map(async (s) => {
       try {
@@ -36,12 +38,51 @@ async function fetchNativeQuotes(symbols, signal) {
   );
   return settled;
 }
+
+function forecastSignal(prob) {
+  if (typeof prob !== "number" || !Number.isFinite(prob)) return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
+  if (prob >= 0.55) return { word: "RISING", arrow: "↑", cls: "text-term-green" };
+  if (prob <= 0.45) return { word: "FALLING", arrow: "↓", cls: "text-term-red" };
+  return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
+}
+
+function ForecastCells({ symbol }) {
+  const f = useQuery({
+    queryKey: ["forecast", symbol, 21],
+    queryFn: ({ signal }) => getForecast(symbol, 21, { signal }),
+    retry: false,
+    staleTime: 300000,
+  });
+  const prob = typeof f.data?.probability === "number" ? f.data.probability : null;
+  const sig = forecastSignal(prob);
+  if (f.isLoading) {
+    return (
+      <>
+        <td className="tnum term-num p-2 text-right text-term-muted">…</td>
+        <td className="p-2 text-xs text-term-muted">…</td>
+      </>
+    );
+  }
+  return (
+    <>
+      <td className="tnum term-num p-2 text-right font-semibold text-term-text">
+        {prob === null ? "—" : `${(prob * 100).toFixed(0)}%`}
+      </td>
+      <td className={`p-2 text-xs font-bold ${sig.cls}`} title={f.data ? `21D forecast ${prob !== null ? `${(prob * 100).toFixed(0)}%` : ""}` : "Forecast unavailable"}>
+        {prob === null ? "—" : `${sig.arrow}${sig.word}`}
+      </td>
+    </>
+  );
+}
+
 function WatchlistPage() {
+  const navigate = useNavigate();
   const { symbols, add, remove, clear } = useWatchlist();
   const [draft, setDraft] = useState("");
   const [targetCcy, setTargetCcy] = useState("USD");
-  // Sorted key: reordering the watchlist must not bust the query cache.
-  // Use the SAME sorted array in queryFn so rows[i] always aligns.
+  const [filterText, setFilterText] = useState("");
+  const [sortKey, setSortKey] = useState("symbol");
+  const [sortDir, setSortDir] = useState(1);
   const sortedSymbols = useMemo(() => [...symbols].sort(), [symbols]);
   const symbolsKey = sortedSymbols.join(",");
   const quotesQuery = useQuery({
@@ -62,34 +103,77 @@ function WatchlistPage() {
     placeholderData: keepPreviousData,
     retry: false
   });
-  // The 423 gate body carries the combined envelope (error.provenance) —
-  // surface it so the banner shows the real as_of/grade, not "missing".
   const errGateProvenance = extractFxGateProvenance(rankQuery.error);
   const fxProvenance = rankQuery.data?.fx_provenance ?? errGateProvenance ?? null;
   const fxFresh = isFreshFxProvenance(fxProvenance);
   const rankLoading = rankQuery.isLoading && !rankQuery.data;
   const gated = !rankLoading && (rankQuery.isError || !rankQuery.data || !fxFresh);
-  const visibleSymbols = useMemo(
-    () => sortedSymbols.slice(0, MAX_WATCHLIST_ROWS),
-    [sortedSymbols]
-  );
-  const symbolsOverflow = symbols.length > visibleSymbols.length;
-  const rankedRows = useMemo(() => {
-    const list = rankQuery.data?.ranking ?? [];
-    return [...list].sort((a, b) => {
-      const av = a.converted_price ?? null;
-      const bv = b.converted_price ?? null;
-      if (av === null && bv === null) return 0;
-      if (av === null) return 1;
-      if (bv === null) return -1;
-      return bv - av;
+
+  const quoteBySymbol = useMemo(() => {
+    const m = new Map();
+    (quotesQuery.data ?? []).forEach((q, i) => {
+      const sym = sortedSymbols[i] ?? q?.symbol;
+      if (sym) m.set(String(sym).toUpperCase(), q);
     });
+    return m;
+  }, [quotesQuery.data, sortedSymbols]);
+
+  const rankBySymbol = useMemo(() => {
+    const m = new Map();
+    (rankQuery.data?.ranking ?? []).forEach((r) => {
+      if (r?.symbol) m.set(String(r.symbol).toUpperCase(), r);
+    });
+    return m;
   }, [rankQuery.data]);
-  const visibleRanked = useMemo(
-    () => rankedRows.slice(0, MAX_WATCHLIST_ROWS),
-    [rankedRows]
-  );
-  const rankedOverflow = rankedRows.length > visibleRanked.length;
+
+  const displaySymbols = useMemo(() => {
+    let list = [...sortedSymbols].slice(0, MAX_WATCHLIST_ROWS);
+    const ft = filterText.trim().toUpperCase();
+    if (ft) {
+      list = list.filter((s) => {
+        const q = quoteBySymbol.get(String(s).toUpperCase());
+        const name = String(q?.instrument?.company_name ?? "").toUpperCase();
+        return String(s).toUpperCase().includes(ft) || name.includes(ft);
+      });
+    }
+    const priceOf = (s) => {
+      const key = String(s).toUpperCase();
+      if (!gated) {
+        const r = rankBySymbol.get(key);
+        return r?.converted_price ?? r?.price ?? null;
+      }
+      return quoteBySymbol.get(key)?.price ?? null;
+    };
+    const changeOf = (s) => {
+      const key = String(s).toUpperCase();
+      if (!gated) {
+        const r = rankBySymbol.get(key);
+        if (r && typeof r.change_pct === "number") return r.change_pct;
+      }
+      return quoteBySymbol.get(key)?.change_pct ?? null;
+    };
+    list = [...list].sort((a, b) => {
+      if (sortKey === "price") {
+        const av = priceOf(a); const bv = priceOf(b);
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        return sortDir * (av - bv);
+      }
+      if (sortKey === "change") {
+        const av = changeOf(a) ?? -Infinity; const bv = changeOf(b) ?? -Infinity;
+        return sortDir * (av - bv);
+      }
+      return sortDir * String(a).localeCompare(String(b));
+    });
+    return list;
+  }, [sortedSymbols, filterText, sortKey, sortDir, gated, quoteBySymbol, rankBySymbol]);
+
+  const lastUpdate = useMemo(() => {
+    const ts = Math.max(quotesQuery.dataUpdatedAt ?? 0, rankQuery.dataUpdatedAt ?? 0);
+    return ts > 0 ? formatDateTime(new Date(ts).toISOString()) : null;
+  }, [quotesQuery.dataUpdatedAt, rankQuery.dataUpdatedAt]);
+
   function addSymbol() {
     const sym = normalizeSymbolInput(draft);
     if (!sym) return;
@@ -98,128 +182,162 @@ function WatchlistPage() {
   }
   const removeSymbol = useCallback((sym) => remove(sym), [remove]);
   const clearWatchlist = useCallback(() => clear(), [clear]);
-  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "mb-3 text-sm tracking-widest text-term-muted" }, "WATCHLIST \xB7 CROSS-MARKET (FX-GATED)"), /* @__PURE__ */ React.createElement("div", { className: "mb-3 flex flex-wrap items-center gap-2" }, /* @__PURE__ */ React.createElement("label", { htmlFor: "target-ccy", className: "text-xs text-term-muted" }, "Target currency"), /* @__PURE__ */ React.createElement(
-    "select",
-    {
-      id: "target-ccy",
-      className: "term-input",
-      value: targetCcy,
-      onChange: (e) => setTargetCcy(normalizeTargetCcy(e.target.value)),
-      "aria-label": "Target currency for cross-market comparison"
-    },
-    TARGET_CURRENCIES.map((c) => /* @__PURE__ */ React.createElement("option", { key: c, value: c }, c))
-  ), /* @__PURE__ */ React.createElement(
-    "form",
-    {
-      className: "flex flex-wrap gap-2",
-      onSubmit: (e) => {
-        e.preventDefault();
-        addSymbol();
-      }
-    },
-    /* @__PURE__ */ React.createElement(
-      "input",
-      {
-        className: "term-input min-w-0 flex-1",
-        value: draft,
-        onChange: (e) => setDraft(e.target.value),
-        placeholder: "Add symbol (e.g. MC.PA)",
-        "aria-label": "Add symbol to watchlist"
-      }
-    ),
-    /* @__PURE__ */ React.createElement("button", { className: "term-btn", type: "submit" }, "ADD")
-  ), symbols.length > 0 && /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      className: "term-btn-ghost text-xs",
-      type: "button",
-      onClick: clearWatchlist,
-      "aria-label": "Clear watchlist"
-    },
-    "CLEAR"
-  )), /* @__PURE__ */ React.createElement(
-    FXProvenanceBanner,
-    {
-      provenance: fxProvenance,
-      targetCcy,
-      loading: rankQuery.isLoading,
-      error: rankQuery.error
-    }
-  ), gated ? /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(
-    "div",
-    {
-      className: "term-panel border-term-red p-4 text-sm text-term-red",
-      role: "alert"
-    },
-    GATE_MESSAGE,
-    rankQuery.error ? /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-xs text-term-muted" }, rankQuery.error instanceof Error ? rankQuery.error.message : "FX rank endpoint unreachable.", " ", "Showing native-currency quotes only; no conversion applied.") : /* @__PURE__ */ React.createElement("span", { className: "mt-1 block text-xs text-term-muted" }, "Ranked conversion needs fresh FX (grade A/B, current daily fix, no fallback). Showing native-currency quotes only; no conversion applied.")
-  ), /* @__PURE__ */ React.createElement("div", { className: "mt-4" }, renderNativeQuotes())) : /* @__PURE__ */ React.createElement("div", null, renderRanked()));
-  function renderNativeQuotes() {
-    if (quotesQuery.isLoading) return /* @__PURE__ */ React.createElement(Loading, { label: "loading watchlist quotes\u2026" });
-    if (quotesQuery.isError) {
-      return /* @__PURE__ */ React.createElement(
-        ErrorState,
-        {
-          title: "Watchlist quotes unavailable",
-          detail: quotesQuery.error instanceof Error ? quotesQuery.error.message : "Backend unreachable. Check VITE_API_BASE_URL.",
-          onRetry: () => void quotesQuery.refetch()
-        }
-      );
-    }
-    const rows = quotesQuery.data ?? [];
-    if (rows.length === 0) {
-      return /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Watchlist is empty. Add a symbol (e.g. MC.PA, ASML.AS, UCB.BR).");
-    }
-    return /* @__PURE__ */ React.createElement("ul", { className: "term-panel-hero divide-y divide-term-border" }, symbolsOverflow && /* @__PURE__ */ React.createElement("li", { className: "p-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleSymbols.length, " of ", symbols.length, " \u2014 remove symbols to narrow the list."), visibleSymbols.map((sym, i) => {
-      const q = rows[i] ?? null;
-      if (!q || q._error || q.price === null || q.price === void 0) {
-        return /* @__PURE__ */ React.createElement("li", { key: sym, className: "flex items-center justify-between p-3 even:bg-term-panel2 transition-colors duration-150" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(sym)}`, className: "font-bold text-term-green hover:underline" }, sym), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, "unavailable")), /* @__PURE__ */ React.createElement(
-          "button",
-          {
-            className: "term-btn-ghost text-xs",
-            type: "button",
-            onClick: () => removeSymbol(sym),
-            "aria-label": `Remove ${sym}`
-          },
-          "REMOVE"
-        ));
-      }
-      return /* @__PURE__ */ React.createElement("li", { key: `${sym}-${q.instrument?.exchange_mic ?? ""}`, className: "p-3 even:bg-term-panel2 transition-colors duration-150" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(q.symbol)}`, className: "font-bold text-term-green hover:underline" }, q.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, q.instrument?.company_name ?? "", " ", q.instrument?.exchange_mic ? `\xB7 ${q.instrument.exchange_mic}` : "", " ", q.currency ? `\xB7 ${q.currency}` : ""), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-sm" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: q.price, currency: q.currency ?? null })), /* @__PURE__ */ React.createElement("span", { className: "ml-2" }, /* @__PURE__ */ React.createElement(MarketStateBadge, { state: q.market_state, provenance: q.provenance }))), /* @__PURE__ */ React.createElement(
-        "button",
-        {
-          className: "term-btn-ghost text-xs",
-          type: "button",
-          onClick: () => removeSymbol(sym),
-          "aria-label": `Remove ${sym}`
-        },
-        "REMOVE"
-      )), /* @__PURE__ */ React.createElement("div", { className: "mt-1" }, /* @__PURE__ */ React.createElement(ProvenanceBadge, { p: q.provenance })));
-    }));
+  function toggleSort(k) {
+    if (sortKey === k) setSortDir((d) => -d);
+    else { setSortKey(k); setSortDir(1); }
   }
-  function renderRanked() {
-    if (rankQuery.isLoading && !rankQuery.data) return /* @__PURE__ */ React.createElement(Loading, { label: `ranking in ${targetCcy}\u2026` });
-    const data = rankQuery.data;
-    if (!data) return null;
-    if (!isFreshFxProvenance(data.fx_provenance)) {
-      return /* @__PURE__ */ React.createElement("div", { className: "term-panel border-term-red p-4 text-sm text-term-red", role: "alert" }, GATE_MESSAGE);
-    }
-    const rows = visibleRanked;
-    return /* @__PURE__ */ React.createElement("div", { className: "term-panel-hero overflow-x-auto" }, rankedOverflow && /* @__PURE__ */ React.createElement("p", { className: "p-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleRanked.length, " of ", rankedRows.length, " \u2014 remove symbols to narrow the list."), /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("caption", { className: "sr-only" }, "Watchlist ranked by converted price"), /* @__PURE__ */ React.createElement("thead", { className: "sticky top-0 bg-term-panel z-10" }, /* @__PURE__ */ React.createElement("tr", { className: "border-b border-term-border text-left text-xs text-term-muted" }, /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "#"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "Symbol"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2 text-right" }, "Native"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2 text-right" }, "Converted (", data.target_ccy, ")"), /* @__PURE__ */ /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, "FX provenance"), /* @__PURE__ */ React.createElement("th", { scope: "col", className: "p-2" }, /* @__PURE__ */ React.createElement("span", { className: "sr-only" }, "Remove")))), /* @__PURE__ */ React.createElement("tbody", null, rows.map((r, idx) => /* @__PURE__ */ React.createElement("tr", { key: `${r.symbol}-${idx}`, className: "border-b border-term-border even:bg-term-panel2 transition-colors duration-150" }, /* @__PURE__ */ React.createElement("td", { className: "p-2 text-term-muted" }, idx + 1), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(Link, { to: `/security/${encodeURIComponent(r.symbol)}`, className: "font-bold text-term-green hover:underline" }, r.symbol), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, r.instrument?.company_name ?? "", " ", r.instrument?.exchange_mic ? `\xB7 ${r.instrument.exchange_mic}` : "")), /* @__PURE__ */ React.createElement("td", { className: "p-2 text-right term-num" }, /* @__PURE__ */ React.createElement(CurrencyValue, { value: r.price ?? null, currency: r.currency ?? "USD" })), /* @__PURE__ */ React.createElement("td", { className: "p-2 text-right term-num" }, /* @__PURE__ */ React.createElement("b", null, /* @__PURE__ */ React.createElement(
-      CurrencyValue,
-      {
-        value: r.converted_price ?? null,
-        currency: data.target_ccy
-      }
-    ))), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(ProvenanceBadge, { p: data.fx_provenance ?? r.provenance })), /* @__PURE__ */ React.createElement("td", { className: "p-2" }, /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        className: "term-btn-ghost text-xs",
-        type: "button",
-        onClick: () => removeSymbol(r.symbol),
-        "aria-label": `Remove ${r.symbol}`
-      },
-      "REMOVE"
-    )))))), /* @__PURE__ */ React.createElement("p", { className: "p-2 text-[11px] text-term-muted" }, "Ranked by converted price in ", data.target_ccy, " \xB7 FX", " ", data.fx_provenance ? `${data.fx_provenance.source} as_of ${data.fx_provenance.as_of}` : "provenance unavailable", " ", "\xB7 provenance badge is the conversion FX envelope; native quotes per symbol."));
+  function openSecurity(sym) {
+    navigate(`/security/${encodeURIComponent(sym)}`);
   }
+
+  if (symbols.length === 0) {
+    return (
+      <div className="max-w-full">
+        <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/" className="text-term-muted hover:text-term-text">← Home</Link></nav>
+        <h1 className="mb-1 text-lg font-extrabold text-term-text">Watchlist</h1>
+        <p className="mb-3 text-xs text-term-muted">Monitoring workspace — track prices, 21D forecasts and freshness in one table.</p>
+        <EmptyState
+          title="No watchlist symbols yet..."
+          detail="Follow your first security to start monitoring — prices, forecasts and freshness will appear here."
+          actionLabel="Add Security"
+          onAction={() => navigate("/search")}
+        />
+        <form className="mt-3 flex max-w-md gap-2" onSubmit={(e) => { e.preventDefault(); addSymbol(); }}>
+          <input className="term-input min-w-0 flex-1" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Add symbol (e.g. AAPL)" aria-label="Add symbol to watchlist" spellCheck={false} />
+          <button className="term-btn" type="submit">ADD</button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-full">
+      <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/" className="text-term-muted hover:text-term-text">← Home</Link></nav>
+      <h1 className="text-lg font-extrabold text-term-text">Watchlist</h1>
+      <p className="mt-0.5 text-xs text-term-muted">Monitoring workspace — search, sort, open research. {gated ? "Native prices (FX gated)." : `Ranked in ${rankQuery.data?.target_ccy ?? targetCcy}.`}</p>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <label htmlFor="target-ccy" className="text-xs text-term-muted">Target currency</label>
+        <select id="target-ccy" className="term-input" value={targetCcy} onChange={(e) => setTargetCcy(normalizeTargetCcy(e.target.value))} aria-label="Target currency for cross-market comparison">
+          {TARGET_CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <input className="term-input min-w-0 flex-1 sm:max-w-[220px]" value={filterText} onChange={(e) => setFilterText(e.target.value)} placeholder="Filter by symbol or company…" aria-label="Filter watchlist" spellCheck={false} />
+        <div className="flex gap-1" role="group" aria-label="Sort watchlist">
+          {[["symbol", "Symbol"], ["price", "Price"], ["change", "Change"]].map(([k, label]) => (
+            <button key={k} type="button" onClick={() => toggleSort(k)} aria-pressed={sortKey === k} className={sortKey === k ? "term-btn px-2 py-1 text-xs" : "term-btn-ghost px-2 py-1 text-xs"}>
+              {label}{sortKey === k ? (sortDir === 1 ? " ▲" : " ▼") : ""}
+            </button>
+          ))}
+        </div>
+        <form className="flex min-w-0 flex-1 gap-2 sm:max-w-[280px]" onSubmit={(e) => { e.preventDefault(); addSymbol(); }}>
+          <input className="term-input min-w-0 flex-1" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Add symbol (e.g. MC.PA)" aria-label="Add symbol to watchlist" spellCheck={false} />
+          <button className="term-btn shrink-0" type="submit">ADD</button>
+        </form>
+        <button className="term-btn-ghost text-xs" type="button" onClick={clearWatchlist} aria-label="Clear watchlist">CLEAR</button>
+      </div>
+
+      <div className="mt-3">
+        <FXProvenanceBanner provenance={fxProvenance} targetCcy={targetCcy} loading={rankQuery.isLoading} error={rankQuery.error} />
+      </div>
+
+      {gated && (
+        <div className="term-panel mb-2 border-term-red/40 p-3 text-sm" role="alert">
+          <p className="font-bold text-term-red">{GATE_MESSAGE}</p>
+          <p className="mt-1 text-xs text-term-muted">Showing native-currency quotes only; no conversion applied. {rankQuery.error ? (rankQuery.error instanceof Error ? rankQuery.error.message : "FX rank endpoint unreachable.") : ""}</p>
+        </div>
+      )}
+
+      {(quotesQuery.isLoading && !quotesQuery.data) || (rankLoading) ? (
+        <Skeleton label="loading watchlist…" lines={6} variant="table" />
+      ) : quotesQuery.isError && (!quotesQuery.data || quotesQuery.data.length === 0) ? (
+        <ErrorState
+          title="Watchlist quotes unavailable"
+          detail={`${quotesQuery.error instanceof Error ? quotesQuery.error.message : "Backend unreachable."}${lastUpdate ? ` Last successful update: ${lastUpdate}.` : ""}`}
+          onRetry={() => { void quotesQuery.refetch(); void rankQuery.refetch(); }}
+        />
+      ) : (
+        <div className="term-panel-hero overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <caption className="sr-only">Watchlist — symbol, price, change, forecast, signal, freshness</caption>
+            <thead className="sticky top-0 z-10 bg-term-panel">
+              <tr className="border-b border-term-border text-left text-xs text-term-muted">
+                <th scope="col" className="p-2">Symbol</th>
+                <th scope="col" className="p-2 text-right">Price{gated ? "" : ` (${rankQuery.data?.target_ccy ?? targetCcy})`}</th>
+                <th scope="col" className="p-2 text-right">Change</th>
+                <th scope="col" className="p-2 text-right">Forecast 21D</th>
+                <th scope="col" className="p-2">Signal</th>
+                <th scope="col" className="p-2">Freshness</th>
+                <th scope="col" className="p-2"><span className="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {displaySymbols.map((sym) => {
+                const key = String(sym).toUpperCase();
+                const q = quoteBySymbol.get(key);
+                const r = rankBySymbol.get(key);
+                const errRow = q?._error || q?.price == null;
+                const price = !gated && r ? (r.converted_price ?? r.price) : q?.price;
+                const ccy = !gated && r ? (rankQuery.data?.target_ccy ?? targetCcy) : (q?.currency ?? null);
+                const chg = (!gated && r && typeof r.change_pct === "number") ? r.change_pct : q?.change_pct;
+                const prov = q?.provenance ?? r?.provenance ?? null;
+                if (errRow && gated) {
+                  return (
+                    <tr key={sym} className="border-b border-term-border last:border-0 hover:bg-term-panel2">
+                      <td className="p-2 font-bold text-term-text">{sym}</td>
+                      <td colSpan={4} className="p-2 text-xs text-term-muted">unavailable — {String(q?._error ?? "quote failed").slice(0, 120)} <button type="button" className="ml-2 text-term-green underline" onClick={() => { void quotesQuery.refetch(); }}>Retry</button></td>
+                      <td className="p-2"><StatusPill provenance={null} /></td>
+                      <td className="p-2 text-right"><button type="button" className="term-btn-ghost text-xs" onClick={() => removeSymbol(sym)} aria-label={`Remove ${sym}`}>REMOVE</button></td>
+                    </tr>
+                  );
+                }
+                return (
+                  <tr
+                    key={sym}
+                    className="group cursor-pointer border-b border-term-border transition-colors last:border-0 hover:bg-term-panel2 focus-within:bg-term-panel2"
+                    tabIndex={0}
+                    onClick={() => openSecurity(q?.symbol ?? sym)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openSecurity(q?.symbol ?? sym); }}
+                    aria-label={`${sym} open security brief`}
+                  >
+                    <td className="p-2">
+                      <Link to={`/security/${encodeURIComponent(q?.symbol ?? sym)}`} onClick={(e) => e.stopPropagation()} className="font-bold text-term-green hover:underline">
+                        {q?.symbol ?? sym}
+                      </Link>
+                      <span className="ml-2 hidden text-[11px] text-term-muted lg:inline">{q?.instrument?.company_name ?? r?.instrument?.company_name ?? ""}</span>
+                    </td>
+                    <td className="tnum term-num p-2 text-right font-semibold text-term-text">
+                      <CurrencyValue value={price} currency={ccy} />
+                    </td>
+                    <td className={`tnum term-num p-2 text-right font-semibold ${changeColor(chg)}`}>
+                      {typeof chg === "number" && Number.isFinite(chg) ? `${changeArrow(chg)} ${formatPct1(Math.abs(chg) / 100)}` : "—"}
+                    </td>
+                    <ForecastCells symbol={q?.symbol ?? sym} />
+                    <td className="p-2"><StatusPill provenance={prov} marketState={q?.market_state ?? r?.market_state} /></td>
+                    <td className="p-2 text-right">
+                      <span className="inline-flex gap-1 opacity-100 focus-within:opacity-100 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100">
+                        <Link to={`/security/${encodeURIComponent(q?.symbol ?? sym)}`} onClick={(e) => e.stopPropagation()} className="term-btn-sm" aria-label={`Open ${sym}`}>OPEN</Link>
+                        <Link to={`/forecast/${encodeURIComponent(q?.symbol ?? sym)}`} onClick={(e) => e.stopPropagation()} className="term-btn-sm" aria-label={`Research ${sym}`}>RESEARCH</Link>
+                        <button type="button" className="term-btn-sm" onClick={(e) => { e.stopPropagation(); removeSymbol(sym); }} aria-label={`Remove ${sym}`}>✕</button>
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2 text-[11px] text-term-muted">
+            <span role="status">{displaySymbols.length} of {symbols.length} shown{filterText ? ` (filter “${filterText}”)` : ""}{gated ? " · native prices" : ` · in ${rankQuery.data?.target_ccy ?? targetCcy}`}</span>
+            {lastUpdate && <span>Last successful update: {lastUpdate}</span>}
+            <span className="flex gap-2">
+              <button type="button" className="term-btn-ghost text-xs" onClick={() => { void quotesQuery.refetch(); void rankQuery.refetch(); }}>RETRY</button>
+            </span>
+          </div>
+        </div>
+      )}
+      {symbols.length > MAX_WATCHLIST_ROWS && (
+        <p className="mt-1 text-[11px] text-term-muted" role="status">showing first {MAX_WATCHLIST_ROWS} of {symbols.length} — remove symbols to narrow the list.</p>
+      )}
+    </div>
+  );
 }
 export { WatchlistPage as default };

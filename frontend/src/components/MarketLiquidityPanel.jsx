@@ -319,7 +319,7 @@ function MarketLiquidityPanel({ data, isLoading, isError, error, onRetry }) {
       </div>
       <p className="mt-2 text-[10px] text-term-muted">
         Breadth = advancers/decliners from latest screener change_pct per MIC. Turnover in native
-        currency (no FX) — cross-currency totals aren&apos;t comparable. Not investment advice.
+        currency (no FX) — cross-currency totals aren&apos;t comparable. Grouped under the market / research workflow. Not investment advice.
       </p>
     </section>
   );

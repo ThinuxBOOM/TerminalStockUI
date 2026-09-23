@@ -162,7 +162,7 @@ function StatusPill({
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 text-2xs font-semibold tracking-wide text-term-muted ${className}`}
+      className={`inline-flex items-center gap-1.5 text-2xs font-semibold tracking-wide tabular-nums text-term-muted ${className}`}
       title={title}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden="true" />

@@ -56,7 +56,7 @@ function BackendConnectionCard() {
   }
 
   return (
-    <section className="term-panel p-4" aria-labelledby="backend-connection">
+    <section className="term-panel min-w-0 p-4" aria-labelledby="backend-connection">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 id="backend-connection" className="term-label">
           Backend connection (no rebuild needed)
@@ -67,9 +67,9 @@ function BackendConnectionCard() {
       </div>
       <p className="mt-1 text-xs text-term-muted">
         Currently talking to:{" "}
-        <code className="term-num text-term-text">{effective === "" ? "(same origin — /api on this host)" : effective}</code>
+        <code className="term-num break-all text-term-text">{effective === "" ? "(same origin — /api on this host)" : effective}</code>
       </p>
-      <form onSubmit={onSave} className="mt-2 flex flex-col gap-2 sm:flex-row">
+      <form onSubmit={onSave} className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row">
         <label htmlFor="backend-url" className="sr-only">
           Backend base URL
         </label>
@@ -83,7 +83,7 @@ function BackendConnectionCard() {
           autoComplete="off"
           inputMode="url"
         />
-        <span className="flex gap-2">
+        <span className="flex shrink-0 gap-2">
           <button type="submit" className="term-btn shrink-0 text-xs">
             SAVE + RELOAD
           </button>
@@ -99,7 +99,7 @@ function BackendConnectionCard() {
       ) : null}
       {saved && !error ? (
         <p className="mt-1 text-xs text-term-green" role="status">
-          Saved — reloading…
+          ✓ Saved — reloading…
         </p>
       ) : null}
       <p className="mt-2 text-[11px] leading-relaxed text-term-muted">

@@ -22,10 +22,12 @@ function timeAgo(iso) {
   }
 }
 
+// Contextual news: Headline / Source / Time inside security + research.
+// Never dominates market data — compact list, capped rows, no hero art.
 function NewsPanel({ data, isLoading, isError, error, onRetry }) {
   const articles = data?.articles ?? [];
   return (
-    <div>
+    <div className="min-w-0">
       <p className="text-[11px] text-term-muted">
         Fresh headlines from Alpaca News (US stocks). Mood is counted from words like “beats” vs “misses” — simple and explainable.
       </p>
@@ -49,24 +51,31 @@ function NewsPanel({ data, isLoading, isError, error, onRetry }) {
       {!isLoading && !isError && articles.length > 0 && (
         <ul className="mt-2 space-y-2">
           {articles.slice(0, 12).map((a, i) => (
-            <li key={`${a.url || a.title}-${i}`} className="border-b border-term-border pb-2">
-              <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <span className={`font-bold uppercase ${sentimentColor(a.sentiment_label)}`}>
-                  {a.sentiment_label === "bullish" ? "▲ Positive" : a.sentiment_label === "bearish" ? "▼ Negative" : "● Neutral"}
-                </span>
-                {a.symbols?.length > 0 && (
-                  <span className="text-term-muted">{a.symbols.slice(0, 4).join(" · ")}</span>
+            <li key={`${a.url || a.title}-${i}`} className="min-w-0 border-b border-term-border pb-2">
+              <article aria-label={a.title}>
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className={`font-bold uppercase ${sentimentColor(a.sentiment_label)}`}>
+                    {a.sentiment_label === "bullish" ? "▲ Positive" : a.sentiment_label === "bearish" ? "▼ Negative" : "● Neutral"}
+                  </span>
+                  {a.symbols?.length > 0 && (
+                    <span className="term-num text-term-muted">{a.symbols.slice(0, 4).join(" · ")}</span>
+                  )}
+                  {a.created_at && (
+                    <time className="term-num text-term-muted" dateTime={a.created_at} title={a.created_at}>
+                      {timeAgo(a.created_at)}
+                    </time>
+                  )}
+                  {a.author && <span className="truncate text-term-muted">· {a.author}</span>}
+                </div>
+                {a.url ? (
+                  <a href={a.url} target="_blank" rel="noreferrer" className="mt-0.5 block text-sm font-semibold text-term-text hover:text-term-green hover:underline">
+                    {a.title}
+                  </a>
+                ) : (
+                  <p className="mt-0.5 text-sm font-semibold text-term-text">{a.title}</p>
                 )}
-                {a.created_at && <span className="text-term-muted">{timeAgo(a.created_at)}</span>}
-              </div>
-              {a.url ? (
-                <a href={a.url} target="_blank" rel="noreferrer" className="mt-0.5 block text-sm font-semibold text-term-text hover:text-term-green hover:underline">
-                  {a.title}
-                </a>
-              ) : (
-                <p className="mt-0.5 text-sm font-semibold text-term-text">{a.title}</p>
-              )}
-              {a.summary && <p className="mt-0.5 line-clamp-2 text-xs text-term-muted">{a.summary}</p>}
+                {a.summary && <p className="mt-0.5 line-clamp-2 text-xs text-term-muted">{a.summary}</p>}
+              </article>
             </li>
           ))}
         </ul>

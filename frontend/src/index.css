@@ -4,6 +4,25 @@
 
 :root {
   color-scheme: dark;
+  /* Phase 1-2 design tokens (centralized surfaces + semantic states).
+   * Tailwind `term.*` remains the source of truth for hex values;
+   * these vars mirror them for non-Tailwind / inline-style consumers. */
+  --term-bg: #0a0e14;
+  --term-panel: #0f141d;
+  --term-elevated: #1a2230;
+  --term-input: #0c1119;
+  --term-overlay: #0a0e14E5;
+  --term-border: #1c2433;
+  --term-text: #d7deea;
+  --term-muted: #8b94a7;
+  --term-positive: #3ddc84;
+  --term-negative: #ff5c5c;
+  --term-warning: #ffb454;
+  --term-info: #56c8ff;
+  --term-focus: #3ddc84;
+  --term-radius-sm: 0.375rem;
+  --term-radius-md: 0.5rem;
+  --term-radius-lg: 0.625rem;
 }
 
 body {
@@ -45,6 +64,64 @@ body {
 .term-icon-btn {
   @apply rounded p-1 text-term-muted hover:bg-term-panel2 hover:text-term-red transition-colors duration-150;
 }
+
+/* Phase 1-2 surfaces: App bg, Panel, Elevated, Input, Overlay, Border. */
+.term-surface-app {
+  @apply bg-term-bg text-term-text;
+}
+
+.term-surface-elevated {
+  @apply bg-term-elevated border border-term-border rounded-md shadow-panel;
+}
+
+.term-surface-overlay {
+  @apply bg-term-overlay border border-term-border2 rounded-lg shadow-overlay;
+}
+
+.term-surface-input {
+  @apply bg-term-input border border-term-border rounded px-3 py-2 text-sm text-term-text placeholder-term-muted outline-none focus:border-term-focus;
+}
+
+/* Phase 1-2 typography scale (terminal compact; Display reserved for landing).
+ * Page 28-36, Section 20-24, Body 14-16, Metadata 11-13. */
+.type-page {
+  @apply font-sans font-extrabold tracking-tight text-term-text;
+  font-size: 1.75rem;
+  line-height: 2.125rem;
+}
+
+.type-section {
+  @apply font-sans font-bold tracking-tight text-term-text;
+  font-size: 1.25rem;
+  line-height: 1.625rem;
+}
+
+.type-body {
+  @apply font-sans text-term-text;
+  font-size: 0.875rem;
+  line-height: 1.375rem;
+}
+
+.type-meta {
+  @apply font-sans text-term-muted;
+  font-size: 0.75rem;
+  line-height: 1.0625rem;
+}
+
+/* Semantic number coloring (tabular-nums everywhere numbers appear). */
+.num-positive { @apply font-mono tabular-nums text-term-green; }
+.num-negative { @apply font-mono tabular-nums text-term-red; }
+.num-warning { @apply font-mono tabular-nums text-term-amber; }
+.num-neutral { @apply font-mono tabular-nums text-term-text; }
+.num-muted { @apply font-mono tabular-nums text-term-muted; }
+
+/* Semantic state text helpers. */
+.state-positive { @apply text-term-green; }
+.state-negative { @apply text-term-red; }
+.state-warning { @apply text-term-amber; }
+.state-info { @apply text-term-cyan; }
+.state-neutral { @apply text-term-muted; }
+.state-error { @apply text-term-red; }
 
 .term-label {
   @apply text-2xs uppercase tracking-widest text-term-muted font-sans;
@@ -88,6 +165,17 @@ body {
   overflow-wrap: break-word;
   content-visibility: auto;
   contain-intrinsic-size: auto 200px;
+}
+
+/* Polish: sticky table headers inside horizontal scroll containers.
+ * Covers tables that omit explicit sticky classes (provider health/perf,
+ * liquidation proxy, calibration reliability, DataTable) without touching JSX. */
+.overflow-x-auto > table thead,
+.overflow-auto > table thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--term-panel);
 }
 
 ::selection {

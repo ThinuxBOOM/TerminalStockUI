@@ -36,13 +36,14 @@ function SourceBadge({ source }) {
 
 // Blended forecast bar: blended = (1-w)*quant + w*ai, w <= AI_WEIGHT_CAP.
 // Never overrides quant with AI; malformed AI degrades to quant alone.
+// Numbers via shared formatPct1 (one decimal) + tabular-nums for stability.
 function BlendedForecastBar({ quantProb, aiProb, aiWeight }) {
   const w = clampAIWeight(aiWeight);
   const q = typeof quantProb === "number" && Number.isFinite(quantProb) ? quantProb : null;
   const a = typeof aiProb === "number" && Number.isFinite(aiProb) ? aiProb : null;
   const blended = blendProbs(q, a, w);
   if (q === null || blended === null) return null;
-  const pct = (v) => `${(v * 100).toFixed(1)}%`;
+  const pct = (v) => formatPct1(v);
   const quantWidth = Math.min(100, Math.max(0, q * 100));
   const blendedWidth = Math.min(100, Math.max(0, blended * 100));
   return (

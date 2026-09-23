@@ -33,8 +33,8 @@ function loadRecent() {
 function glyphFor(currency) {
   const c = (currency ?? "").trim().toUpperCase();
   if (c === "USD") return "$";
-  if (c === "CNY") return "\xA5";
-  if (c === "EUR") return "\u20AC";
+  if (c === "CNY") return "¥";
+  if (c === "EUR") return "€";
   return "";
 }
 function useInstrumentSearch(query, market, enabled, limit = 50, offset = 0) {
@@ -147,119 +147,97 @@ function SearchBox({
     }
   }
   const expanded = submitted.length >= 2 && (data?.length ?? 0) > 0;
-  return /* @__PURE__ */ React.createElement("div", { className: "max-w-full" }, /* @__PURE__ */ React.createElement("form", { onSubmit: handleSubmit, className: "flex max-w-full gap-2", role: "search" }, /* @__PURE__ */ React.createElement(
-    "input",
-    {
-      ref: inputRef,
-      className: "term-input min-w-0 flex-1",
-      value: q,
-      onChange: (e) => setQ(e.target.value),
-      onKeyDown: handleKeyDown,
-      placeholder: "AAPL \xB7 Moutai \xB7 600519.SS \xB7 ASML.AS \u2026",
-      "aria-label": "Search instruments",
-      role: "combobox",
-      "aria-expanded": expanded,
-      "aria-controls": "search-listbox",
-      "aria-autocomplete": "list",
-      "aria-activedescendant": activeIndex >= 0 ? `search-option-${activeIndex}` : void 0,
-      spellCheck: false,
-      autoComplete: "off"
-    }
-  ), /* @__PURE__ */ React.createElement(
-    "select",
-    {
-      className: "term-input shrink-0",
-      value: market,
-      onChange: (e) => setMarket(e.target.value),
-      "aria-label": "Filter by market"
-    },
-    MARKET_OPTIONS.map((m) => /* @__PURE__ */ React.createElement("option", { key: m.label, value: m.value }, m.label))
-  ), /* @__PURE__ */ React.createElement("button", { className: "term-btn shrink-0", type: "submit" }, "SEARCH")), !submitted && recent.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "mt-2 flex flex-wrap items-center gap-2 text-xs" }, /* @__PURE__ */ React.createElement("span", { className: "text-term-muted" }, "Recent:"), recent.map((r) => /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      key: r,
-      type: "button",
-      className: "term-btn-ghost px-2 py-1 text-xs",
-      onClick: () => setQ(r),
-      "aria-label": `Re-run recent search ${r}`
-    },
-    r
-  )), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "text-[11px] text-term-muted hover:text-term-text",
-      onClick: clearRecent,
-      "aria-label": "Clear recent searches"
-    },
-    "clear"
-  )), /* @__PURE__ */ React.createElement("div", { className: "mt-4 min-w-0" }, !submitted && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type a ticker or company name. Search is exchange-aware (XNYS / XNAS / XSHG / XPAR / XAMS / XBRU). Try ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "AAPL"), " or", " ", /* @__PURE__ */ React.createElement("b", { className: "text-term-text" }, "Moutai"), "."), submitted && submitted.length < 2 && /* @__PURE__ */ React.createElement("div", { className: "term-panel p-6 text-sm text-term-muted" }, "Type 2+ characters to search."), submitted && submitted.length >= 2 && isLoading && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && submitted.length >= 2 && data && isFetching && !isLoading && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "refreshing\u2026"), submitted && submitted.length >= 2 && isError && data && data.length > 0 && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, `search refresh failed (${error instanceof Error ? error.message : "backend unreachable"}) \u2014 showing last loaded results.`), submitted && submitted.length >= 2 && isError && (!data || data.length === 0) && /* @__PURE__ */ React.createElement(
-    ErrorState,
-    {
-      title: "Search unavailable",
-      detail: error instanceof Error ? error.message : "Backend unreachable. Check VITE_API_BASE_URL.",
-      onRetry: () => void refetch()
-    }
-  ), submitted && submitted.length >= 2 && !isLoading && !isFetching && !isError && (data?.length ?? 0) === 0 && data !== void 0 && /* @__PURE__ */ React.createElement(
-    EmptyState,
-    {
-      title: `No instruments found for \u201C${submitted}\u201D`,
-      detail: "Check spelling or exchange suffix (.SS / .PA / .AS / .BR)."
-    }
-  ), submitted && submitted.length >= 2 && !isLoading && !isFetching && !isError && data === void 0 && /* @__PURE__ */ React.createElement(Loading, { label: `searching \u201C${submitted}\u201D\u2026` }), submitted && submitted.length >= 2 && !isLoading && !isError && (data?.length ?? 0) > 1 && /* @__PURE__ */ React.createElement(
-    "div",
-    {
-      className: "mb-2 rounded border border-term-amber p-2 text-xs text-term-amber",
-      role: "status"
-    },
-    "Ambiguous \u2014 ",
-    data?.length,
-    " candidates for \u201C",
-    submitted,
-    "\u201D. Not auto-resolved; pick the exact symbol or narrow with the market filter."
-  ), submitted && data && data.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, totalResults > visibleResults.length && /* @__PURE__ */ React.createElement("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "showing first ", visibleResults.length, " of ", totalResults, " \u2014 refine the query or market filter."), /* @__PURE__ */ React.createElement(
-    "ul",
-    {
-      id: "search-listbox",
-      role: "listbox",
-      "aria-label": "Search results",
-      className: "term-panel divide-y divide-term-border"
-    },
-    visibleResults.map((r, i) => {
-      const sym = displaySymbol(r);
-      if (!sym) return null;
-      const curr = (r.currency ?? "").toUpperCase();
-      const active = i === activeIndex;
-      return /* @__PURE__ */ React.createElement(
-        "li",
-        {
-          key: `${sym}-${r.exchange_mic ?? ""}-${i}`,
-          id: `search-option-${i}`,
-          role: "option",
-          "aria-selected": active,
-          className: `flex items-center justify-between gap-2 p-3 ${active ? "bg-term-border" : ""}`
-        },
-        /* @__PURE__ */ React.createElement("div", { className: "min-w-0" }, /* @__PURE__ */ React.createElement(
-          Link,
-          {
-            to: `/security/${encodeURIComponent(sym)}`,
-            className: "font-bold text-term-green hover:underline",
-            onClick: () => saveRecent(submitted)
-          },
-          sym
-        ), /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-xs text-term-muted" }, r.company_name ?? "", " ", r.exchange_mic ? `\xB7 ${r.exchange_mic}` : "", " ", curr ? `\xB7 ${curr}${glyphFor(curr)}` : "")),
-        /* @__PURE__ */ React.createElement(
-          Link,
-          {
-            className: "term-btn-ghost shrink-0 text-xs",
-            to: `/security/${encodeURIComponent(sym)}`,
-            onClick: () => saveRecent(submitted),
-            "aria-label": `Open Security Brief for ${sym}`
-          },
-          "BRIEF \u2192"
-        )
-      );
-    })
-  ))));
+  return (
+    <div className="max-w-full">
+      <section className="term-panel p-4" aria-label="Search and filters">
+        <form onSubmit={handleSubmit} className="flex max-w-full flex-col gap-2 sm:flex-row" role="search">
+          <div className="min-w-0 flex-1">
+            <label htmlFor="discover-q" className="term-label">Symbol or company</label>
+            <input
+              id="discover-q"
+              ref={inputRef}
+              className="term-input mt-1 min-w-0 w-full"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="AAPL · Moutai · 600519.SS · ASML.AS …"
+              aria-label="Search instruments"
+              role="combobox"
+              aria-expanded={expanded}
+              aria-controls="search-listbox"
+              aria-autocomplete="list"
+              aria-activedescendant={activeIndex >= 0 ? `search-option-${activeIndex}` : void 0}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          <div className="shrink-0 sm:w-52">
+            <label htmlFor="discover-market" className="term-label">Market</label>
+            <select id="discover-market" className="term-input mt-1 w-full" value={market} onChange={(e) => setMarket(e.target.value)} aria-label="Filter by market">
+              {MARKET_OPTIONS.map((m) => <option key={m.label} value={m.value}>{m.label}</option>)}
+            </select>
+          </div>
+          <div className="flex shrink-0 items-end">
+            <button className="term-btn w-full sm:w-auto" type="submit">SEARCH</button>
+          </div>
+        </form>
+        {!submitted && recent.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <span className="term-label">Recent:</span>
+            {recent.map((r) => (
+              <button key={r} type="button" className="term-btn-ghost px-2 py-1 text-xs" onClick={() => setQ(r)} aria-label={`Re-run recent search ${r}`}>{r}</button>
+            ))}
+            <button type="button" className="text-[11px] text-term-muted hover:text-term-text" onClick={clearRecent} aria-label="Clear recent searches">clear</button>
+          </div>
+        )}
+      </section>
+      <div className="mt-4 min-w-0" role="region" aria-label="Search results" aria-live="polite">
+        {!submitted && (
+          <div className="term-panel p-6 text-sm text-term-muted">Type a ticker or company name. Search is exchange-aware (XNYS / XNAS / XSHG / XPAR / XAMS / XBRU). Try <b className="text-term-text">AAPL</b> or <b className="text-term-text">Moutai</b>.</div>
+        )}
+        {submitted && submitted.length < 2 && <div className="term-panel p-6 text-sm text-term-muted">Type 2+ characters to search.</div>}
+        {submitted && submitted.length >= 2 && isLoading && <Loading label={`searching “${submitted}”…`} />}
+        {submitted && submitted.length >= 2 && data && isFetching && !isLoading && <p className="mb-2 text-[11px] text-term-muted" role="status">refreshing…</p>}
+        {submitted && submitted.length >= 2 && isError && data && data.length > 0 && <p className="mb-2 text-[11px] text-term-muted" role="status">{`search refresh failed (${error instanceof Error ? error.message : "backend unreachable"}) — showing last loaded results.`}</p>}
+        {submitted && submitted.length >= 2 && isError && (!data || data.length === 0) && (
+          <ErrorState title="Search unavailable" detail={error instanceof Error ? error.message : "Backend unreachable. Check VITE_API_BASE_URL."} onRetry={() => void refetch()} />
+        )}
+        {submitted && submitted.length >= 2 && !isLoading && !isFetching && !isError && (data?.length ?? 0) === 0 && data !== void 0 && (
+          <EmptyState title={`No instruments found for “${submitted}”`} detail="Check spelling or exchange suffix (.SS / .PA / .AS / .BR)." />
+        )}
+        {submitted && submitted.length >= 2 && !isLoading && !isFetching && !isError && data === void 0 && <Loading label={`searching “${submitted}”…`} />}
+        {submitted && submitted.length >= 2 && !isLoading && !isError && (data?.length ?? 0) > 1 && (
+          <div className="mb-2 rounded border border-term-border p-2 text-xs text-term-amber" role="status">
+            Ambiguous — {data?.length} candidates for “{submitted}”. Not auto-resolved; pick the exact symbol or narrow with the market filter.
+          </div>
+        )}
+        {submitted && data && data.length > 0 && (
+          <>
+            {totalResults > visibleResults.length && <p className="mb-2 text-[11px] text-term-muted" role="status">showing first {visibleResults.length} of {totalResults} — refine the query or market filter.</p>}
+            <p className="mb-2 text-[11px] text-term-muted" role="status">{visibleResults.length} result{visibleResults.length === 1 ? "" : "s"} for “{submitted}”{mic ? ` in ${mic}` : ""} — ↑↓ to highlight, Enter to open.</p>
+            <div className="term-panel-hero overflow-x-auto">
+              <ul id="search-listbox" role="listbox" aria-label="Search results" className="min-w-[560px] divide-y divide-term-border">
+                {visibleResults.map((r, i) => {
+                  const sym = displaySymbol(r);
+                  if (!sym) return null;
+                  const curr = (r.currency ?? "").toUpperCase();
+                  const active = i === activeIndex;
+                  return (
+                    <li key={`${sym}-${r.exchange_mic ?? ""}-${i}`} id={`search-option-${i}`} role="option" aria-selected={active} className={`flex items-center justify-between gap-2 p-3 transition-colors hover:bg-term-panel2 focus-within:bg-term-panel2 ${active ? "bg-term-panel2 outline outline-1 outline-term-green" : ""}`}>
+                      <div className="min-w-0">
+                        <Link to={`/security/${encodeURIComponent(sym)}`} className="font-bold text-term-green hover:underline focus-visible:underline" onClick={() => saveRecent(submitted)}>{sym}</Link>
+                        <span className="ml-2 truncate text-xs text-term-muted">{r.company_name ?? ""} {r.exchange_mic ? `· ${r.exchange_mic}` : ""} {curr ? `· ${curr}${glyphFor(curr)}` : ""}</span>
+                      </div>
+                      <Link className="term-btn-ghost shrink-0 text-xs" to={`/security/${encodeURIComponent(sym)}`} onClick={() => saveRecent(submitted)} aria-label={`Open Security Brief for ${sym}`}>BRIEF →</Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 export { MARKET_OPTIONS, SearchBox as default, useInstrumentSearch };

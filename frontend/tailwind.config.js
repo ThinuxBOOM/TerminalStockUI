@@ -11,6 +11,9 @@ export default {
           bg: '#0a0e14',
           panel: '#0f141d',
           panel2: '#141a24',
+          elevated: '#1a2230',
+          input: '#0c1119',
+          overlay: '#0a0e14E5',
           border: '#1c2433',
           border2: '#2a3448',
           muted: '#8b94a7',
@@ -22,6 +25,11 @@ export default {
           amber: '#ffb454',
           amberDim: '#4a3a1c',
           cyan: '#56c8ff',
+          focus: '#3ddc84',
+          chartYellow: '#f5c518',
+          chartPurple: '#a78bfa',
+          chartOrange: '#ff8a3d',
+          chartTeal: '#2dd4bf',
         },
       },
       fontFamily: {
@@ -36,8 +44,11 @@ export default {
       boxShadow: {
         panel: '0 1px 2px rgba(0,0,0,0.4)',
         'panel-lg': '0 4px 24px rgba(0,0,0,0.5)',
+        overlay: '0 8px 40px rgba(0,0,0,0.6)',
       },
       borderRadius: {
+        sm: '0.375rem',
+        md: '0.5rem',
         lg: '0.625rem',
       },
     },

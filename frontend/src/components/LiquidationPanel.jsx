@@ -179,7 +179,7 @@ function LiquidationSection({ mics }) {
       </div>
       <p className="mt-1 text-[11px] text-term-muted">
         Deterministic heuristic per market (volume-anomaly x ATR-range) — NOT exchange liquidation data. Collapsed by
-        default so 6 markets never fan out on page load.
+        default so 6 markets never fan out on page load. Grouped under the market / research workflow, not top-level nav.
       </p>
       {open && (
         <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">

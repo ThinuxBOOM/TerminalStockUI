@@ -18,7 +18,7 @@ function CalibrationSparkline({ rows, height = 64, title = "Calibration history 
     return (
       <div role="status">
         {title && <p className="term-label mb-1">{title}</p>}
-        <p className="text-xs text-term-muted">No calibration bins yet — run the Backtest Lab.</p>
+        <p className="text-xs text-term-muted">No calibration bins yet — what: no scored windows; why: walk-forward history hasn&apos;t landed; next: run the Backtest Lab.</p>
       </div>
     );
   }
@@ -70,7 +70,7 @@ function CalibrationChart({ rows, height = 190, title = "Calibration", variant }
     <figure>
       {title && <figcaption className="term-label mb-1">{title}</figcaption>}
       {safeRows.length === 0 ? (
-        <p className="text-xs text-term-muted" role="status">No calibration bins yet — run the Backtest Lab.</p>
+        <p className="text-xs text-term-muted" role="status">No calibration bins yet — what: no scored windows; why: walk-forward history hasn&apos;t landed; next: run the Backtest Lab.</p>
       ) : (
         <svg
           viewBox={`0 0 ${W} ${H}`}

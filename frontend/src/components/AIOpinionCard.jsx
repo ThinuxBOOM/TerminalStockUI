@@ -1,6 +1,7 @@
 import React from "react";
 import ProvenanceBadge from "./ProvenanceBadge";
 import { AI_DISABLED_LABEL, DISAGREE_TOL, sourceLabelForAIOpinion } from "../api/client";
+import { formatPct1 } from "../utils/format";
 
 const DISAGREE_TOL_EXPORT = DISAGREE_TOL;
 
@@ -129,8 +130,8 @@ function AIOpinionCard({
           </span>
         )}
       </p>
-      <p className="mt-1 text-2xl font-bold">
-        {(prob * 100).toFixed(1)}%
+      <p className="term-num mt-1 text-2xl font-bold text-term-text">
+        {formatPct1(prob)}
         <span className="ml-2 align-middle text-[10px] font-normal text-term-muted">
           AI-only figure — blended forecast moves at most 20% of the way toward it
         </span>
