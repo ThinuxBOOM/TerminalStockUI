@@ -2,6 +2,7 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   Activity,
+  ArrowLeft,
   Crown,
   FileText,
   FlaskConical,
@@ -143,7 +144,21 @@ function Sidebar({ collapsed = false, mobileOpen = false, onCloseMobile, onToggl
           </nav>
         </div>
       ))}
-      <div className="mt-auto hidden px-2 py-2 lg:block">
+      <div className="mt-auto px-2 py-2">
+        <Link
+          to="/"
+          onClick={onCloseMobile}
+          aria-label="Back to landing page"
+          title="Back to landing page"
+          className="term-btn-sm flex w-full items-center justify-center gap-1.5 whitespace-nowrap"
+        >
+          <ArrowLeft className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          {collapsed ? (
+            <span className="sr-only">Back to landing page</span>
+          ) : (
+            <span>LANDING</span>
+          )}
+        </Link>
         <button
           type="button"
           onClick={onToggleCollapse}
@@ -151,7 +166,7 @@ function Sidebar({ collapsed = false, mobileOpen = false, onCloseMobile, onToggl
           aria-controls={id}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="term-btn-sm w-full whitespace-nowrap"
+          className="term-btn-sm mt-2 hidden w-full whitespace-nowrap lg:block"
         >
           {collapsed ? "»" : "« COLLAPSE"}
         </button>
