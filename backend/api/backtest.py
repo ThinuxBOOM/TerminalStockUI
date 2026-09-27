@@ -51,7 +51,7 @@ from backend.forecasting.service import (
 from backend.market_data.service import MarketDataService
 
 try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier  # type: ignore
+    from backend.auth.guards import require_tier_optional  # type: ignore
 except ImportError:  # pragma: no cover - fallback until Phase 2 lands
     from typing import Any as _Any
 
@@ -87,6 +87,35 @@ except ImportError:  # pragma: no cover - fallback until Phase 2 lands
             raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
 
         return _dep
+
+    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
+        import os as _os
+
+        need = _norm(min_tier)
+
+        async def _dep_opt(request: _Request) -> dict[str, _Any]:
+            try:
+                auth = (request.headers.get("authorization") or "").strip()
+            except Exception:
+                auth = ""
+            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            user = _TEST_TOKENS.get(token)
+            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
+            if user is None:
+                if enforced:
+                    raise HTTPException(status_code=401, detail="unauthorized")
+                if need == "free":
+                    return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
+                raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+            if bool(user.get("is_admin")):
+                return dict(user)
+            if not enforced:
+                return dict(user)
+            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
+                return dict(user)
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep_opt
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -521,11 +550,12 @@ def _run_backtest(req: BacktestRunRequest, market: MarketDataService) -> dict:
 def run_backtest(
     req: BacktestRunRequest,
     market: MarketDataService = Depends(get_market_service),
-    user: dict = Depends(require_tier("gold")),
+    user: dict = Depends(require_tier_optional("gold")),
 ) -> dict:
     """Run a walk-forward calibration backtest (no leakage by construction).
 
-    V2 HARD gate: gold+ (free/silver -> 402, admin bypasses).
+    Soft-launch gate (gold): BILLING_ENFORCED=false → any authed user
+    passes, guests 402; true → gold+ only (free/silver -> 402, admin bypasses).
     """
     return _run_backtest(req, market)
 
@@ -538,7 +568,7 @@ def backtest_history(
         description="Include reliability tables (+ brier/ece) per horizon",
     ),
     market: MarketDataService = Depends(get_market_service),
-    user: dict = Depends(require_tier("gold")),
+    user: dict = Depends(require_tier_optional("gold")),
 ) -> dict:
     """Lightweight calibration history for one symbol (summaries only).
 

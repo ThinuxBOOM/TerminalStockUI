@@ -45,7 +45,7 @@ from backend.api.deps import get_market_service
 from backend.market_data.service import MarketDataService
 
 try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier  # type: ignore
+    from backend.auth.guards import require_tier_optional  # type: ignore
 except ImportError:  # pragma: no cover - fallback until Phase 2 lands
     from typing import Any as _Any
 
@@ -82,6 +82,35 @@ except ImportError:  # pragma: no cover - fallback until Phase 2 lands
             raise _HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
 
         return _dep
+
+    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
+        import os as _os
+
+        need = _norm(min_tier)
+
+        async def _dep_opt(request: _Request) -> dict[str, _Any]:
+            try:
+                auth = (request.headers.get("authorization") or "").strip()
+            except Exception:
+                auth = ""
+            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            user = _TEST_TOKENS.get(token)
+            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
+            if user is None:
+                if enforced:
+                    raise _HTTPException(status_code=401, detail="unauthorized")
+                if need == "free":
+                    return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
+                raise _HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+            if bool(user.get("is_admin")):
+                return dict(user)
+            if not enforced:
+                return dict(user)
+            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
+                return dict(user)
+            raise _HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep_opt
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -280,7 +309,7 @@ def get_analytics(
         description="Comma-separated overlays, e.g. SMA20,EMA12,RSI14,MACD,BB20,VWAP,ATR14",
     ),
     svc: MarketDataService = Depends(get_market_service),
-    user: dict = Depends(require_tier("free")),
+    user: dict = Depends(require_tier_optional("free")),
 ) -> dict:
     """Deterministic analytics for one symbol (technical live, statements unavailable)."""
     from fastapi import HTTPException as _HTTPException

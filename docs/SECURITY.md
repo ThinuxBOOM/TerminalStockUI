@@ -108,3 +108,24 @@ routes are unauthenticated and CORS falls back to localhost Vite origins.
 - **Ops:** same `SECRET_KEY` strength rules as provider secrets
   (`openssl rand -hex 32`, rotation invalidates all tokens); no password
   or hash material in audit payloads (redact via `redact_mapping`).
+
+## RLS posture + rotation (Phase 5 hardening — `0010_rls_hardening.sql`)
+
+- **Posture:** `ENABLE ROW LEVEL SECURITY` on all 16 tables
+  (`instruments`, `price_bars`, `forecasts`, `audit_logs`,
+  `calibration_snapshots`, `alerts`, `alert_events`, `provider_secrets`,
+  `provider_budgets`, `quote_snapshots`, `market_snapshots`,
+  `forecast_accuracy`, `ai_token_ledger`, `provider_health_history`,
+  `indicator_cache`, `users`); `REVOKE ALL ... FROM anon, authenticated`
+  on each; zero policies for browser roles except `users_read_own`
+  (authenticated SELECT own `users` row). Anon reads zero rows everywhere.
+- **Backend bypass:** the server connects via `DATABASE_URL` owner /
+  `service_role` credentials, which bypass RLS — app reads/writes keep full
+  access. The anon key must never appear in backend code/config.
+  `is_admin` is enforced in the app (`backend/auth/guards.py`), never as an
+  RLS policy (no recursive admin policy by design).
+- **Rotation:** same as §5 key rotation — regenerate the leaked key in the
+  dashboard (API keys) or reset the database password (then update
+  `DATABASE_URL` in Vercel + local `.env` and redeploy); re-apply
+  `0010_rls_hardening.sql` after any manual policy change to re-assert the
+  deny-by-default posture (idempotent, safe to re-run).

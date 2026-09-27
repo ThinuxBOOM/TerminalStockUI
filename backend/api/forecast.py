@@ -20,7 +20,7 @@ from backend.market_data.provenance import build_provenance
 from backend.security.validation import sanitize_error, validate_symbol
 
 try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier  # type: ignore
+    from backend.auth.guards import require_tier_optional  # type: ignore
 except ImportError:  # pragma: no cover - fallback until Phase 2 lands
     from typing import Any as _Any
 
@@ -56,6 +56,37 @@ except ImportError:  # pragma: no cover - fallback until Phase 2 lands
             raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
 
         return _dep
+
+    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
+        # Fallback soft-launch mirror (guards missing): guests free-only,
+        # authed pass when BILLING_ENFORCED=false.
+        import os as _os
+
+        need = _norm(min_tier)
+
+        async def _dep_opt(request: _Request) -> dict[str, _Any]:
+            try:
+                auth = (request.headers.get("authorization") or "").strip()
+            except Exception:
+                auth = ""
+            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            user = _TEST_TOKENS.get(token)
+            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
+            if user is None:
+                if enforced:
+                    raise HTTPException(status_code=401, detail="unauthorized")
+                if need == "free":
+                    return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
+                raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+            if bool(user.get("is_admin")):
+                return dict(user)
+            if not enforced:
+                return dict(user)
+            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
+                return dict(user)
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep_opt
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
@@ -289,7 +320,7 @@ def calibration_history(
     horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     limit: int = Query(default=20, ge=1, le=50, description="Max snapshots (cap 50)"),
     svc: ForecastService = Depends(get_forecast_service),
-    user: dict = Depends(require_tier("free")),
+    user: dict = Depends(require_tier_optional("free")),
 ) -> dict:
     """Calibration snapshot history for (symbol, horizon), newest first.
 
@@ -371,7 +402,7 @@ def get_forecast(
     background_tasks: BackgroundTasks,
     horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     svc: ForecastService = Depends(get_forecast_service),
-    user: dict = Depends(require_tier("free")),
+    user: dict = Depends(require_tier_optional("free")),
 ) -> dict:
     """Forecast one symbol/horizon (ensemble direction + bands + risk)."""
     if int(horizon) not in FORECAST_HORIZONS:

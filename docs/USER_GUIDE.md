@@ -213,3 +213,31 @@ No live trading, no portfolio construction (the frontend `portfolio/` entry is a
 explicit placeholder), no autonomous agents, no deep learning, no full OpenBB
 dependency, no large backtesting suite. Scheduled AI reports are the only non-explicit
 AI call path.
+
+## 11. Phase 8 — balanced terminal expansion (frontend only)
+
+No forecasting/backend changes — the deterministic engine and AI 20% cap are untouched.
+
+- **Command palette (Ctrl/⌘+K):** `components/AppShell/CommandPalette.jsx`
+  (re-exported at `components/CommandPalette.jsx`, mounted via `AppShell` which
+  `App.jsx` renders). Type a ticker (e.g. `NVDA`) for pinned
+  `Security Brief / Forecast / Search` targets; pages (`Overview, Search,
+  Screener, Backtest, Watchlist, Data Health`); actions (`Retry current view`,
+  `Toggle theme` dark-first stub, `Clear recent searches`). Accessible
+  `dialog + combobox/listbox`, ↑↓/Enter/Esc, no new deps.
+- **Watchlist polish:** still localStorage-only, guest-first (no login required;
+  Home previews the first 10). `WatchlistPage` adds `EXPORT JSON` (blob download
+  of `watchlist.json`) + `IMPORT JSON` (file picker, validates a JSON array or
+  `{"symbols": [...]}` via the hook's dedupe/cap, inline fail-closed error).
+  Server sync is a stub comment in `hooks/useWatchlist.js` only
+  (`POST /api/watchlist/sync` when a backend table lands — no table required yet).
+- **Screener polish:** `Prob {horizon}d` column already reflects the active horizon;
+  `402` still renders `TierLockedPanel` (never a generic error); empty results use
+  `EmptyState` with reset. New `EXPORT CSV` button downloads the current page
+  (`screener-h{horizon}.csv`, client-side blob, fail-hidden).
+- **Premarket strip:** `components/PremarketStrip.jsx` fetches
+  `GET /api/sentiment/premarket` best-effort (60s stale, no retry) and shows
+  aggregate mood (mean sentiment, bullish/bearish counts, sources) plus headlines
+  / futures only when the payload carries them. Fail-hidden: loading, 404,
+  disabled, empty, or error unmounts silently. Mounted on `HomePage` directly
+  below `MarketStatusStrip`.

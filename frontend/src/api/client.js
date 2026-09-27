@@ -179,6 +179,37 @@ function isEndpointMissingError(err) {
   const s = httpStatus(err);
   return s === 404 || s === 501;
 }
+// PHASE 3: persistent tier-locked UI. 402 = backend require_tier denial.
+// Must stay a pure httpStatus check so callers can branch BEFORE generic
+// ErrorState without affecting 423/502/404 handling. Never throws.
+function isUpgradeRequiredError(err) {
+  try {
+    return httpStatus(err) === 402;
+  } catch {
+    return false;
+  }
+}
+// Normalize a 402 payload into panel copy. Backend sends
+// { upgrade_required, min_tier, tier, message/detail/feature }.
+// Returns { minTier, feature, tier } — tier is the caller's current tier
+// when the backend echoes it, else null (caller falls back to useAuth).
+// Never throws; always returns display-safe strings.
+function upgradeInfoFromError(err, fallbackFeature = "This feature") {
+  const fallback = String(fallbackFeature ?? "This feature") || "This feature";
+  try {
+    const data = err?.response?.data;
+    const obj = data && typeof data === "object" ? data : {};
+    const minTierRaw = obj.min_tier ?? obj.minTier ?? "silver";
+    const featureRaw = obj.feature ?? obj.message ?? obj.detail ?? fallback;
+    const tierRaw = obj.tier ?? obj.current_tier ?? obj.currentTier ?? null;
+    const minTier = String(minTierRaw ?? "silver").trim() || "silver";
+    const featureStr = String(featureRaw ?? fallback).trim() || fallback;
+    const tier = tierRaw === null || tierRaw === undefined || tierRaw === "" ? null : String(tierRaw).trim() || null;
+    return { minTier, feature: featureStr, tier };
+  } catch {
+    return { minTier: "silver", feature: fallback, tier: null };
+  }
+}
 // Shared backend-detail extractor: prefers the FastAPI {detail} payload over
 // the generic axios message, so 502s render the throttle/warmup hint instead
 // of "Request failed with status code 502". Gateway HTML (Vercel cold
@@ -1865,6 +1896,6 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
     }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, setAuthErrorHandlers, setAuthTokenProvider, testProviderHealth };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, httpStatus, isEndpointMissingError, isFreshFxProvenance, isFxProvenanceMissingError, isUpgradeRequiredError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, setAuthErrorHandlers, setAuthTokenProvider, testProviderHealth, upgradeInfoFromError };
 
 export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };

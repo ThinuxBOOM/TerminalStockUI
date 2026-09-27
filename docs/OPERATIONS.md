@@ -19,6 +19,14 @@ compose-level placeholders. Runtime provider keys live in the encrypted server-s
 store (`backend/security/secrets.py`, Fernet over `SECRET_KEY`), set via the Provider
 Settings flow — never in code, docs, logs, audit rows, or the browser.
 
+Feature flags (live readers: `is_billing_enforced()` in `backend/auth/tiers.py`,
+`_enabled()` in `backend/market_data/providers/investopedia.py` — unset/empty = disabled):
+
+| Var | Purpose | Default |
+|---|---|---|
+| `BILLING_ENFORCED` | Master kill-switch for billing/tier gates | unset = off |
+| `INVESTOPEDIA_ENABLED` | Investopedia premarket scrape toggle (best-effort, grade C, never raises) | unset = off |
+
 ## 2. Bring-up
 
 ```powershell

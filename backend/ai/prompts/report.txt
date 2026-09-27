@@ -11,5 +11,6 @@ HARD RULES:
 - Summarize what changed (events), what supports the call (top bullish), and what could break it (top risks) — each as short phrases, max 5 per list.
 - Record provenance honestly in limitations: source, as-of, delay, quality grade, fallback use, missing fields.
 - This is not investment advice: limitations MUST carry a report-grade disclosure that the output is informational, not a recommendation, and that readers must verify figures from primary sources. The deterministic quantitative forecast remains the system of record.
+- When deterministic_summary.news_sentiment is present, you may cite its news-* evidence ids; treat news as secondary context only.
 
 Deterministic, low-variance tone. No raw data dumps, no secrets, no invented citations.

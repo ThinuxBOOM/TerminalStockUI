@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { FORECAST_HORIZONS, auditForecastsUrl, extractBackendDetail, runBacktest } from "../api/client";
+import { FORECAST_HORIZONS, auditForecastsUrl, extractBackendDetail, isUpgradeRequiredError, runBacktest } from "../api/client";
 import { getBacktestHistory, getRecentBacktests, saveRecentBacktest } from "../api/backtestHistory";
 import { formatDateTime } from "../utils/format";
 import useWatchlist from "../hooks/useWatchlist";
@@ -13,6 +13,7 @@ import { SourceBadge } from "../components/ResearchSection";
 import Skeleton from "../components/Skeleton";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
+import TierLockedPanel from "../components/TierLockedPanel";
 
 const MAX_HISTORY_ROWS = 20;
 const MAX_RELIABILITY_ROWS = 20;
@@ -150,11 +151,15 @@ function BacktestLabPage() {
           </div>
         )}
         {lab.isError && (
-          <ErrorState
-            title="Backtest failed"
-            detail={`provider didn't return fresh data (${extractBackendDetail(lab.error, "Backend /api/backtest rejected")}), ${lastSuccessText(lab.dataUpdatedAt)} — backend /api/backtest unreachable or rejected.`}
-            onRetry={run}
-          />
+          isUpgradeRequiredError(lab.error) ? (
+            <TierLockedPanel error={lab.error} feature="Backtest" />
+          ) : (
+            <ErrorState
+              title="Backtest failed"
+              detail={`provider didn't return fresh data (${extractBackendDetail(lab.error, "Backend /api/backtest rejected")}), ${lastSuccessText(lab.dataUpdatedAt)} — backend /api/backtest unreachable or rejected.`}
+              onRetry={run}
+            />
+          )
         )}
         {!lab.isPending && !lab.isError && !r && (
           <EmptyState
@@ -224,11 +229,15 @@ function BacktestLabPage() {
             <div className="mt-2"><Skeleton label="loading run history…" lines={4} variant="table" /></div>
           )}
           {historyQ.isError && (
-            <ErrorState
-              title="Run history unavailable"
-              detail={`provider didn't return fresh data (${extractBackendDetail(historyQ.error, `backend /api/backtest/${trimmedSymbol || "…"} unreachable`)}), ${lastSuccessText(historyQ.dataUpdatedAt)}`}
-              onRetry={() => void historyQ.refetch()}
-            />
+            isUpgradeRequiredError(historyQ.error) ? (
+              <TierLockedPanel error={historyQ.error} feature="Backtest" />
+            ) : (
+              <ErrorState
+                title="Run history unavailable"
+                detail={`provider didn't return fresh data (${extractBackendDetail(historyQ.error, `backend /api/backtest/${trimmedSymbol || "…"} unreachable`)}), ${lastSuccessText(historyQ.dataUpdatedAt)}`}
+                onRetry={() => void historyQ.refetch()}
+              />
+            )
           )}
           {!historyQ.isLoading && !historyQ.isError && historyRows.length === 0 && (
             <EmptyState

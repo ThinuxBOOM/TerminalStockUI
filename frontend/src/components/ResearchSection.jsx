@@ -3,6 +3,7 @@ import ProvenanceBadge from "./ProvenanceBadge";
 import FreshnessBadge from "./FreshnessBadge";
 import CalibrationChart from "./CalibrationChart";
 import AIOpinionCard from "./AIOpinionCard";
+import TierLockedPanel from "./TierLockedPanel";
 import {
   AI_DISABLED_LABEL,
   AI_WEIGHT_CAP,
@@ -11,6 +12,7 @@ import {
   auditForecastsUrl,
   blendProbs,
   clampAIWeight,
+  isUpgradeRequiredError,
   sourceLabelForAIOpinion,
 } from "../api/client";
 import { formatPct1 } from "../utils/format";
@@ -218,6 +220,7 @@ function ResearchSection({
   onRequestAI,
   requestingAI = false,
   aiRequestError = null,
+  aiError = null,
 }) {
   const f = forecast ?? null;
   const w = clampAIWeight(aiWeight ?? f?.ai_weight ?? 0);
@@ -238,17 +241,22 @@ function ResearchSection({
           <p className="term-label">(B) AI Opinion</p>
           <SourceBadge source={aiLabel} />
         </div>
-        <AIOpinionCard
-          opinion={aiOpinion}
-          deterministicProbability={quantProb ?? undefined}
-          deterministicDirection={dirWord}
-          deterministicEvidence={f?.evidence_ids ?? []}
-          provenance={f?.provenance}
-          aiWeight={w}
-          onRequest={onRequestAI}
-          requesting={requestingAI}
-          requestError={aiRequestError}
-        />
+        {isUpgradeRequiredError(aiError) ? (
+          <TierLockedPanel error={aiError} feature="AI Opinion" />
+        ) : (
+          <AIOpinionCard
+            opinion={aiOpinion}
+            deterministicProbability={quantProb ?? undefined}
+            deterministicDirection={dirWord}
+            deterministicEvidence={f?.evidence_ids ?? []}
+            provenance={f?.provenance}
+            aiWeight={w}
+            onRequest={onRequestAI}
+            requesting={requestingAI}
+            requestError={aiRequestError}
+            requestErrorObj={aiError}
+          />
+        )}
       </div>
       {/* Tier-gated stubs — always unlocked (locked=false), no enforcement. */}
       <div className="grid gap-2 md:grid-cols-2">

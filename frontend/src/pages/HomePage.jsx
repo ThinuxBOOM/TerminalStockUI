@@ -11,6 +11,7 @@ import MarketLiquidityPanel from "../components/MarketLiquidityPanel";
 import MarketIndicesSection, { AspiChart } from "../components/AspiChart";
 import LiquidationSection from "../components/LiquidationPanel";
 import MarketStatusStrip from "../components/MarketStatusStrip";
+import PremarketStrip from "../components/PremarketStrip";
 import CollapsibleSection from "../components/CollapsibleSection";
 import TopSignals from "../components/TopSignals";
 import NewsPanel from "../components/NewsPanel";
@@ -396,6 +397,9 @@ function HomePage() {
       </section>
 
       <MarketStatusStrip />
+
+      {/* Phase 8: premarket mood (fail-hidden when disabled/404). */}
+      <PremarketStrip />
 
       {/* Market snapshot — dense horizontal strip, click → detail */}
       <section className="term-panel min-w-0 p-4" aria-labelledby="snapshot-h">

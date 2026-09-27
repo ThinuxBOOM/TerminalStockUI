@@ -30,7 +30,7 @@ from backend.ai.schemas import DISCLAIMER, EvidencePacket
 from backend.security.secrets import redact_mapping
 
 try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import get_current_user, require_tier  # type: ignore
+    from backend.auth.guards import get_current_user, require_tier_optional  # type: ignore
 except ImportError:  # pragma: no cover - fallback until Phase 2 lands
     from fastapi import Request as _Request
 
@@ -74,6 +74,35 @@ except ImportError:  # pragma: no cover - fallback until Phase 2 lands
 
         return _dep
 
+    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
+        import os as _os
+
+        need = _norm(min_tier)
+
+        async def _dep_opt(request: _Request) -> dict[str, Any]:
+            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
+            try:
+                user = await get_current_user(request)
+            except HTTPException as exc:
+                if getattr(exc, "status_code", 500) == 401 and not enforced:
+                    if need == "free":
+                        return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
+                    raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+                raise
+            try:
+                if bool(user.get("is_admin")):
+                    return user
+            except Exception:
+                pass
+            if not enforced:
+                return user
+            have = _norm(user.get("tier"))
+            if _RANK[have] >= _RANK[need]:
+                return user
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
+
+        return _dep_opt
+
 
 def _user_field(user: Any, name: str, default: Any = None) -> Any:
     """Read a user field from dict-style or ORM-style (guards) users."""
@@ -90,11 +119,15 @@ def _user_field(user: Any, name: str, default: Any = None) -> Any:
 
 
 def _require_profile_tier(user: Any, profile: str) -> None:
-    """Profile-aware HARD gate for /insight + /forecast_opinion.
+    """Profile-aware gate for /insight + /forecast_opinion.
 
     quick_insight/forecast_assist are free; report/deep_research need silver.
     Admin bypasses. Client-supplied body.user_tier is NEVER trusted.
-    Works with dict (fallback) and ORM (guards) users.
+    Works with dict (fallback/guest) and ORM (guards) users.
+
+    Soft-launch (BILLING_ENFORCED=false): any authenticated (non-guest)
+    user may use report/deep_research; guests stay free-only (402).
+    Strict (BILLING_ENFORCED=true): live tier rank checked (402 when low).
     """
     try:
         if bool(_user_field(user, "is_admin", False)):
@@ -104,6 +137,26 @@ def _require_profile_tier(user: Any, profile: str) -> None:
     key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
     need = "silver" if key in ("report", "deep_research") else "free"
     if need == "free":
+        return
+    try:
+        from backend.auth.tiers import is_billing_enforced as _enforced
+    except Exception:
+        _enforced = lambda: True  # fail-closed when flag unreadable
+    try:
+        enforced = bool(_enforced())
+    except Exception:
+        enforced = True
+    if not enforced:
+        # Soft-launch: authed (non-guest) passes; guests free-only.
+        try:
+            if isinstance(user, dict):
+                is_guest = bool(user.get("is_guest", False))
+            else:
+                is_guest = bool(getattr(user, "is_guest", False))
+        except Exception:
+            is_guest = False
+        if is_guest:
+            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
         return
     try:
         from backend.auth.tiers import _TIER_RANK as _R2
@@ -355,13 +408,190 @@ def _refuse_stub_opinion(opinion: Any, *, context: str) -> None:
     raise HTTPException(status_code=502, detail=detail)
 
 
-def _build_packet(symbol: str) -> EvidencePacket:
+def _fetch_news_context(symbol: str, limit: int = 10, profile: str | None = None) -> dict[str, Any] | None:
+    """Phase 6: best-effort news sentiment aggregate for AI evidence.
+
+    Calls backend.api.news.get_news(symbols=symbol, limit) + the optional
+    Investopedia scrape (when INVESTOPEDIA_ENABLED). Never raises: any
+    failure (423 no-keys / 502 upstream / disabled flag) returns None so
+    the evidence packet still builds from deterministic market data.
+
+    Returns {mean_sentiment, bullish_count, bearish_count, article_count,
+    articles:[{title, summary, url, sentiment, sentiment_label, created_at,
+    source}]} or None when no articles are available.
+    """
+    clean = (symbol or "").strip().upper()
+    if not clean:
+        return None
+    try:
+        lim = max(1, min(50, int(limit)))
+    except (TypeError, ValueError):
+        lim = 10
+    merged: list[dict[str, Any]] = []
+
+    def _clip_text(value: Any, n: int) -> str:
+        try:
+            text = "" if value is None else str(value)
+        except Exception:
+            return ""
+        return text.strip()[:n]
+
+    # -- Alpaca news (best-effort) --
+    try:
+        from backend.api.news import get_news as _get_news
+
+        payload = _get_news(symbols=clean, limit=lim)
+        raw_arts = (payload.get("articles") or []) if isinstance(payload, dict) else []
+        for art in raw_arts[:lim]:
+            if not isinstance(art, dict):
+                continue
+            try:
+                score = float(art.get("sentiment") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            score = max(-1.0, min(1.0, score))
+            label = str(art.get("sentiment_label") or ("bullish" if score > 0.2 else ("bearish" if score < -0.2 else "neutral")))
+            merged.append({
+                "title": _clip_text(art.get("title"), 200),
+                "summary": _clip_text(art.get("summary"), 280),
+                "url": _clip_text(art.get("url"), 280),
+                "sentiment": round(score, 3),
+                "sentiment_label": (label.strip().lower()[:16] or "neutral"),
+                "created_at": _clip_text(art.get("created_at"), 64),
+                "source": _clip_text(art.get("author") or art.get("source") or "alpaca-news", 120) or "alpaca-news",
+            })
+    except Exception:
+        pass
+
+    # -- Investopedia scrape (flag-gated, best-effort; append + dedup) --
+    try:
+        from backend.market_data.providers import investopedia as _inves  # type: ignore
+
+        fetch_fn = getattr(_inves, "fetch_symbol_sentiment", None)
+        if callable(fetch_fn):
+            try:
+                inv = fetch_fn(clean)
+            except Exception:
+                inv = None
+            inv_arts = []
+            if isinstance(inv, dict):
+                inv_arts = inv.get("articles") or []
+            if isinstance(inv_arts, list):
+                for art in inv_arts:
+                    if not isinstance(art, dict):
+                        continue
+                    try:
+                        raw_score = art.get("sentiment", 0.0)
+                        inv_score = float(raw_score) if raw_score is not None else 0.0
+                    except (TypeError, ValueError):
+                        inv_score = 0.0
+                    inv_score = max(-1.0, min(1.0, inv_score))
+                    try:
+                        merged.append({
+                            "title": _clip_text(art.get("title"), 200),
+                            "summary": _clip_text(art.get("summary"), 280),
+                            "url": _clip_text(art.get("url"), 280),
+                            "sentiment": round(inv_score, 3),
+                            "sentiment_label": _clip_text(art.get("sentiment_label") or ("bullish" if inv_score > 0.2 else ("bearish" if inv_score < -0.2 else "neutral")), 16) or "neutral",
+                            "created_at": _clip_text(art.get("created_at"), 64),
+                            "source": _clip_text(art.get("source") or "investopedia", 120) or "investopedia",
+                        })
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    if not merged:
+        return None
+    # Deduplicate by url (fallback: title lower).
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for art in merged:
+        key = (art.get("url") or "").strip().lower() or (art.get("title") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        if not (art.get("title") or "").strip():
+            continue
+        seen.add(key)
+        deduped.append(art)
+    if not deduped:
+        return None
+    try:
+        scores = [float(a.get("sentiment") or 0.0) for a in deduped]
+    except (TypeError, ValueError):
+        scores = [0.0]
+    mean_sent = round(sum(scores) / len(scores), 3) if scores else 0.0
+    bull_n = sum(1 for s in scores if s > 0.2)
+    bear_n = sum(1 for s in scores if s < -0.2)
+    ctx: dict[str, Any] = {
+        "mean_sentiment": mean_sent,
+        "bullish_count": int(bull_n),
+        "bearish_count": int(bear_n),
+        "article_count": len(deduped),
+        "articles": deduped,
+    }
+    return _truncate_news_for_profile(ctx, profile)
+
+
+def _truncate_news_for_profile(
+    news_context: dict[str, Any] | None, profile: str | None
+) -> dict[str, Any] | None:
+    """Trim news articles to fit PROFILE_TOKEN_BUDGETS (best-effort).
+
+    Caps (articles): quick 600->3, forecast 1000->5, report 2000->8,
+    deep 4000->10. Aggregate counts are preserved (they reflect the full
+    fetch); only the articles list is sliced so prompt JSON stays in
+    budget (enforced again in evidence.summarize_packet_for_profile).
+    """
+    if not isinstance(news_context, dict) or not news_context:
+        return None
+    arts = news_context.get("articles")
+    if not isinstance(arts, list) or not arts:
+        return None
+    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+    cap_map = {"quick_insight": 3, "forecast_assist": 5, "report": 8, "deep_research": 10}
+    cap = cap_map.get(key, 10 if key in ("", "none") else 5)
+    # Default fetch path (no profile) keeps up to 10.
+    if profile is None:
+        cap = min(len(arts), 10)
+    try:
+        trimmed = list(arts[: max(1, int(cap))])
+    except (TypeError, ValueError):
+        trimmed = list(arts[:5])
+    out = dict(news_context)
+    out["articles"] = trimmed
+    return out
+
+
+async def _packet_for(symbol: str, profile: str | None = None) -> EvidencePacket:
+    """Mock-tolerant packet builder: passes profile when supported.
+
+    Existing tests monkeypatch _build_packet(symbol) with a 1-arg lambda;
+    production _build_packet(symbol, profile) takes 2. Inspect the arity
+    so both work without editing tests.
+    """
+    import inspect as _inspect
+
+    func = _build_packet
+    try:
+        n_params = len(_inspect.signature(func).parameters)
+    except (TypeError, ValueError):
+        n_params = 1
+    if n_params >= 2:
+        return await asyncio.to_thread(func, symbol, profile)
+    return await asyncio.to_thread(func, symbol)
+
+
+def _build_packet(symbol: str, profile: str | None = None) -> EvidencePacket:
     """Assemble a bounded evidence packet from deterministic services.
 
     Only summary-level fields enter the packet — raw bars/candles are never
     included (see backend/ai/evidence.py forbidden keys). The market-data
     lookup is blocking (yfinance is sync I/O); async callers below run this
     helper in a worker thread via :func:`asyncio.to_thread`.
+
+    Phase 6: best-effort news sentiment (Alpaca + Investopedia when
+    enabled) is merged via news_context — failures never fail the packet.
 
     Fail-closed: when market data is unavailable there is no honest
     evidence to ground an opinion on, so the request raises instead of
@@ -387,7 +617,7 @@ def _build_packet(symbol: str) -> EvidencePacket:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         raise HTTPException(status_code=502, detail=f"evidence packet failed: {exc}") from exc
     try:
-        return _build_packet_from_quote(clean, quote)
+        return _build_packet_from_quote(clean, quote, profile=profile)
     except HTTPException:
         raise
     except Exception as exc:
@@ -395,7 +625,9 @@ def _build_packet(symbol: str) -> EvidencePacket:
         raise HTTPException(status_code=502, detail=f"evidence packet failed: {exc}") from exc
 
 
-def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
+def _build_packet_from_quote(
+    clean: str, quote: dict, news_context: dict[str, Any] | None = None, profile: str | None = None
+) -> EvidencePacket:
     if not isinstance(quote, dict):
         raise ValueError("quote unavailable")
     provenance = quote.get("provenance") or {}
@@ -437,14 +669,31 @@ def _build_packet_from_quote(clean: str, quote: dict) -> EvidencePacket:
         "source": str(provenance.get("source", "market-data")),
     }]
     instrument = quote.get("instrument")
-    return build_evidence_packet(clean, deterministic, provenance, instrument=instrument)
+    # Phase 6: resolve news context best-effort (never fails the packet).
+    # An explicit news_context (tests/callers) wins; otherwise fetch live.
+    resolved_news = news_context
+    if resolved_news is None:
+        try:
+            # Limit by profile budget: quick 3 / forecast 5 / report 8 / deep 10.
+            _cap_map = {"quick_insight": 4, "forecast_assist": 6, "report": 8, "deep_research": 10}
+            _key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
+            _limit = _cap_map.get(_key, 10)
+            resolved_news = _fetch_news_context(clean, limit=_limit, profile=profile)
+        except Exception:
+            resolved_news = None
+    else:
+        try:
+            resolved_news = _truncate_news_for_profile(resolved_news, profile)
+        except Exception:
+            pass
+    return build_evidence_packet(clean, deterministic, provenance, instrument=instrument, news_context=resolved_news)
 
 
 @router.post("/insight")
 async def post_insight(
     body: InsightBody,
     ai: AIRouter = Depends(get_ai_router),
-    user: dict = Depends(require_tier("free")),
+    user: dict = Depends(require_tier_optional("free")),
 ) -> dict[str, Any]:
     profile = _check_profile(body.profile)
     # V2 HARD gate: profile-aware (report needs silver). Body tier ignored.
@@ -453,7 +702,8 @@ async def post_insight(
     # Fail-closed gate first: no key -> 423 before any evidence work.
     _require_live_provider(ai, profile)
     # get_quote/yfinance are blocking sync I/O — keep the event loop free.
-    packet = await asyncio.to_thread(_build_packet, body.symbol)
+    # Phase 6: profile-aware news context (best-effort, never fails packet).
+    packet = await _packet_for(body.symbol, profile)
     try:
         opinion, cached = await ai.get_insight(
             packet, profile=profile,
@@ -492,7 +742,7 @@ async def post_insight(
 async def post_forecast_opinion(
     body: ForecastOpinionBody,
     ai: AIRouter = Depends(get_ai_router),
-    user: dict = Depends(require_tier("free")),
+    user: dict = Depends(require_tier_optional("free")),
 ) -> dict[str, Any]:
     profile = _check_profile(body.profile)
     _require_profile_tier(user, profile)
@@ -519,7 +769,7 @@ async def post_forecast_opinion(
     # forecast passes through intact (blend handles opinion=None). No fake
     # opinion is requested or served.
     if not body.ai_enabled:
-        packet = await asyncio.to_thread(_build_packet, body.symbol)
+        packet = await _packet_for(body.symbol, profile)
         quant_prob = float(body.quant_prob) if body.quant_prob is not None else 0.5
         try:
             blend = blend_forecast(
@@ -554,7 +804,8 @@ async def post_forecast_opinion(
     # Fail-closed gate: no key -> 423 before any evidence work.
     _require_live_provider(ai, profile)
     # Blocking market-data lookup — run off the event loop (see post_insight).
-    packet = await asyncio.to_thread(_build_packet, body.symbol)
+    # Phase 6: profile-aware news context (best-effort).
+    packet = await _packet_for(body.symbol, profile)
     try:
         opinion, cached = await ai.get_insight(
             packet, profile=profile, horizon=horizon,
@@ -672,7 +923,7 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
                           "symbol": symbol, "horizon": horizon})
         return
     try:
-        packet = await asyncio.to_thread(_build_packet, symbol)
+        packet = await _packet_for(symbol, "deep_research")
     except Exception as exc:
         _job_put(job_id, {"job_id": job_id, "status": "error",
                           "error": f"packet failed: {type(exc).__name__}",
@@ -712,7 +963,7 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
 @router.post("/deep_research_job", status_code=202)
 async def post_deep_research_job(
     body: DeepResearchJobBody,
-    user: dict = Depends(require_tier("silver")),
+    user: dict = Depends(require_tier_optional("silver")),
 ) -> dict[str, Any]:
     """Enqueue a deep_research call; poll GET /api/ai/jobs/{id}.
 
@@ -739,7 +990,7 @@ async def post_deep_research_job(
 
 
 @router.get("/jobs/{job_id}")
-def get_ai_job(job_id: str, user: dict = Depends(require_tier("silver"))) -> dict[str, Any]:
+def get_ai_job(job_id: str, user: dict = Depends(require_tier_optional("silver"))) -> dict[str, Any]:
     doc = _job_get((job_id or "").strip())
     if not doc:
         raise HTTPException(status_code=404, detail="unknown job_id")

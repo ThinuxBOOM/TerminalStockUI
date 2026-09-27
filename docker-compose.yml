@@ -52,6 +52,8 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
       CRON_SECRET: ${CRON_SECRET:-}
       APP_ENV: ${APP_ENV:-development}
+      BILLING_ENFORCED: ${BILLING_ENFORCED:-false}
+      INVESTOPEDIA_ENABLED: ${INVESTOPEDIA_ENABLED:-false}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:

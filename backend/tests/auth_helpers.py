@@ -58,4 +58,15 @@ def inject_admin_auth(app):  # type: ignore[no-untyped-def]
         app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
     except Exception:
         pass
+    # Phase 1+2 soft-launch gates depend on get_optional_user (which wraps
+    # get_current_user via direct call, bypassing the override above), so
+    # V1 tests calling premium routes without a token still see the admin.
+    try:
+        from backend.auth.guards import get_optional_user
+    except Exception:
+        return app
+    try:
+        app.dependency_overrides[get_optional_user] = lambda: ADMIN_USER
+    except Exception:
+        pass
     return app

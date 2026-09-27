@@ -1,5 +1,12 @@
 # Local hosting: schedulers + URLs
 
+> **Vercel paused — home server scheduler is canonical.** The `crons` block
+> in `vercel.json` is removed (replaced with a `PAUSED` note); all 8 jobs
+> below run on this machine via `local-cron.*` + Task Scheduler / cron.
+> Keep exactly ONE scheduler active per database (home server XOR cloud) —
+> two writers burn vendor quota for nothing. Endpoints are idempotent, so
+> overlapping/retried runs are safe, but never run both sides at once.
+
 Two things work differently the moment the stack leaves Vercel and runs on
 your own machine:
 
@@ -26,7 +33,8 @@ per database, or two writers burn vendor quota for nothing.
 
 ### Option 1 — OS scheduler (recommended)
 
-Windows (PowerShell, runs Task Scheduler):
+Windows — Task Scheduler quickstart (run PowerShell as a user that stays
+able to run tasks; the backend must be running when a task fires):
 
 ```powershell
 cd scripts\cron
@@ -35,6 +43,15 @@ cd scripts\cron
 schtasks.exe /Query /TN 'OneMarket\*'   # verify
 .\install-windows-tasks.ps1 -Uninstall   # remove again
 ```
+
+CRON_SECRET setup (pick ONE — first non-empty wins in `cron-call.ps1`):
+`.\local-cron.ps1 -Job <name> -CronSecret <secret>`, or
+`$env:CRON_SECRET = "<secret>"`, or store it as `CRON_SECRET=<secret>` in
+`infra/docker/.env` (gitignored, never committed). Generate with
+`openssl rand -hex 32`. Empty = header omitted (open local dev only);
+production stays fail-closed (`401` without the Bearer secret —
+`backend/api/cron.py`). Single-scheduler rule: Task Scheduler XOR cron XOR
+cloud workflows — never two at once per database.
 
 With a non-default backend: add `-BackendUrl http://192.168.1.20:8000 -CronSecret xxx`
 to both scripts (or set `$env:BACKEND_URL` / `$env:CRON_SECRET`; `CRON_SECRET`

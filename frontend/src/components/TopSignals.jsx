@@ -4,6 +4,8 @@ import Skeleton from "./Skeleton";
 import ErrorState from "./ErrorState";
 import EmptyState from "./EmptyState";
 import CurrencyValue from "./CurrencyValue";
+import TierLockedPanel from "./TierLockedPanel";
+import { isUpgradeRequiredError } from "../api/client";
 
 const MIC_LABELS = {
   XNYS: "New York (NYSE)",
@@ -114,11 +116,15 @@ function TopSignals({ data, isLoading, isError, error, horizon, onHorizon, onRet
       )}
       {isError && (
         <div className="mt-3">
-          <ErrorState
-            title="Forecast signals unavailable"
-            detail={error instanceof Error ? error.message : "Signals endpoint unreachable."}
-            onRetry={onRetry}
-          />
+          {isUpgradeRequiredError(error) ? (
+            <TierLockedPanel error={error} feature="Forecast signals" />
+          ) : (
+            <ErrorState
+              title="Forecast signals unavailable"
+              detail={error instanceof Error ? error.message : "Signals endpoint unreachable."}
+              onRetry={onRetry}
+            />
+          )}
         </div>
       )}
       {!isLoading && !isError && data && entries.length === 0 && (

@@ -204,6 +204,7 @@ def build_evidence_packet(
     instrument: Any | None = None,
     events: list[Any] | None = None,
     as_of: datetime | None = None,
+    news_context: dict[str, Any] | None = None,
 ) -> EvidencePacket:
     """Build a bounded, sanitized evidence packet.
 
@@ -215,6 +216,12 @@ def build_evidence_packet(
         instrument: optional instrument model/dict (id/MIC/currency only).
         events: optional material events list (capped at 20).
         as_of: packet timestamp override (defaults to UTC now).
+        news_context: optional Phase 6 sentiment aggregate
+            {mean_sentiment, bullish_count, bearish_count, articles:[...]}.
+            Merged as deterministic_summary["news_sentiment"] + articles as
+            EvidenceItems (bullish>0.2 -> top_bullish, bearish<-0.2 ->
+            top_risks, else events), respecting 5/5/MAX_EVENTS caps.
+            Sanitized + clipped; never includes raw bars/secrets.
     """
     clean_symbol = (symbol or "").strip().upper()
     if not clean_symbol:
@@ -258,6 +265,97 @@ def build_evidence_packet(
     packet_events = _as_items(
         events if events is not None else sanitized.get("events", []), "ev", MAX_EVENTS
     )
+
+    # -- Phase 6: optional news sentiment merge (best-effort, bounded) --
+    if isinstance(news_context, dict) and news_context:
+        try:
+            clean_news = _sanitize(news_context)
+            if not isinstance(clean_news, dict):
+                clean_news = {}
+            # Aggregate into deterministic_summary as "news_sentiment".
+            try:
+                agg = {
+                    "mean_sentiment": float(clean_news.get("mean_sentiment", 0.0) or 0.0),
+                    "bullish_count": int(clean_news.get("bullish_count", 0) or 0),
+                    "bearish_count": int(clean_news.get("bearish_count", 0) or 0),
+                    "article_count": int(
+                        clean_news.get("article_count", len(clean_news.get("articles", []) or [])) or 0
+                    ),
+                }
+            except (TypeError, ValueError):
+                agg = {"mean_sentiment": 0.0, "bullish_count": 0, "bearish_count": 0, "article_count": 0}
+            # Clip numbers into sane ranges.
+            try:
+                agg["mean_sentiment"] = max(-1.0, min(1.0, float(agg["mean_sentiment"])))
+                agg["bullish_count"] = max(0, min(50, int(agg["bullish_count"])))
+                agg["bearish_count"] = max(0, min(50, int(agg["bearish_count"])))
+                agg["article_count"] = max(0, min(50, int(agg["article_count"])))
+            except (TypeError, ValueError):
+                pass
+            if "news_sentiment" not in deterministic_summary and len(deterministic_summary) < _MAX_SUMMARY_KEYS:
+                deterministic_summary["news_sentiment"] = agg
+            raw_articles = clean_news.get("articles", [])
+            if isinstance(raw_articles, list):
+                news_idx = 0
+                for art in raw_articles:
+                    if not isinstance(art, dict):
+                        continue
+                    news_idx += 1
+                    try:
+                        score_raw = art.get("sentiment", 0.0)
+                        score = float(score_raw) if score_raw is not None else 0.0
+                    except (TypeError, ValueError):
+                        score = 0.0
+                    score = max(-1.0, min(1.0, score))
+                    label_raw = str(art.get("sentiment_label") or ("bullish" if score > 0.2 else ("bearish" if score < -0.2 else "neutral")))
+                    sentiment_label = label_raw.strip().lower()[:16] or "neutral"
+                    if sentiment_label not in ("bullish", "bearish", "neutral"):
+                        sentiment_label = "bullish" if score > 0.2 else ("bearish" if score < -0.2 else "neutral")
+                    title = _clip(art.get("title") or "(untitled)", 200)
+                    if not title:
+                        continue
+                    summary = _clip(art.get("summary") or "", 280)
+                    src = _clip(art.get("source") or art.get("author") or "news", 120) or "news"
+                    url = _clip(art.get("url") or "", 280)
+                    created = _clip(art.get("created_at") or "", 64)
+                    detail_parts = []
+                    if summary:
+                        detail_parts.append(summary[:280])
+                    detail_parts.append(f"[{sentiment_label} {score:+.2f}]")
+                    if src:
+                        detail_parts.append(f"src={src}"[:130])
+                    if url:
+                        detail_parts.append(url[:280])
+                    # _as_items clips detail to _MAX_DETAIL (500); keep tight.
+                    detail = _clip(" ".join(detail_parts), _MAX_DETAIL)
+                    try:
+                        item = EvidenceItem(
+                            id=f"news-{news_idx}",
+                            label=title,
+                            detail=detail,
+                            source=src or "news",
+                        )
+                    except Exception:
+                        continue
+                    # Route by score, respecting caps 5/5/MAX_EVENTS.
+                    if score > 0.2:
+                        if len(top_bullish) < 5:
+                            top_bullish.append(item)
+                        elif len(packet_events) < MAX_EVENTS:
+                            packet_events.append(item)
+                    elif score < -0.2:
+                        if len(top_risks) < 5:
+                            top_risks.append(item)
+                        elif len(packet_events) < MAX_EVENTS:
+                            packet_events.append(item)
+                    else:
+                        if len(packet_events) < MAX_EVENTS:
+                            packet_events.append(item)
+                    # Stop once all buckets are full to stay bounded.
+                    if len(top_bullish) >= 5 and len(top_risks) >= 5 and len(packet_events) >= MAX_EVENTS:
+                        break
+        except Exception:
+            pass
 
     limitations: list[str] = [
         "Deterministic analytics are the source of truth; AI opinion is bounded and never overrides the quantitative core.",

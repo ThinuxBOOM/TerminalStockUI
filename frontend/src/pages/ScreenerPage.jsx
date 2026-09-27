@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { FORECAST_HORIZONS, getScreener } from "../api/client";
+import { FORECAST_HORIZONS, getScreener, isUpgradeRequiredError } from "../api/client";
 import AdSlot from "../components/AdSlot";
 import { useAuth } from "../hooks/useAuth";
 import CurrencyValue from "../components/CurrencyValue";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
+import TierLockedPanel from "../components/TierLockedPanel";
 import MarketStateBadge from "../components/MarketStateBadge";
 import ProvenanceBadge from "../components/ProvenanceBadge";
 import Skeleton from "../components/Skeleton";
@@ -40,6 +41,46 @@ function qualityReason(r) {
   return qualityInfo(r).reason || "Quality signal unavailable for this row";
 }
 const MAX_SKIPPED_SHOWN = 10;
+// Phase 8: client-side CSV export (blob download, no new deps). Fail-hidden:
+// a blocked download surfaces a console warning only — the table is unaffected.
+function csvCell(v) {
+  const s = String(v ?? "");
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function exportScreenerCsv(rows, horizon, offset) {
+  try {
+    const header = ["rank", "symbol", "company", "mic", "price", "currency", "change_pct", `prob_${horizon}d`, "confidence", "quality", "market_state"];
+    const lines = [header.join(",")];
+    rows.forEach((r, i) => {
+      lines.push(
+        [
+          (offset ?? 0) + i + 1,
+          csvCell(r.symbol),
+          csvCell(r.company_name ?? ""),
+          csvCell(r.exchange_mic ?? ""),
+          r.price ?? "",
+          csvCell(r.currency ?? ""),
+          r.change_pct ?? "",
+          Number.isFinite(r.direction_probability) ? r.direction_probability.toFixed(4) : "",
+          csvCell(r.confidence ?? ""),
+          csvCell(qualityFlag(r)),
+          csvCell(r.market_state ?? ""),
+        ].join(",")
+      );
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `screener-h${horizon}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch {
+    // fail-hidden: export must never break the screener table
+  }
+}
 function screenerErrorDetail(error) {
   const message = error instanceof Error ? error.message : "Backend unreachable. Check VITE_API_BASE_URL.";
   if (error?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(message)) {
@@ -147,12 +188,19 @@ function ScreenerPage() {
           <AdSlot slotId="screener-below-filters" format="in-feed" tier={tier} slotIndex={2} />
           <div className="mt-2">
             {screen.isLoading && <Skeleton label="scanning universe…" lines={6} variant="table" />}
-            {screen.isError && <ErrorState title="Screener unavailable" detail={screenerErrorDetail(screen.error)} onRetry={() => void screen.refetch()} />}
+            {screen.isError && (
+              isUpgradeRequiredError(screen.error) ? (
+                <TierLockedPanel error={screen.error} feature="Screener" />
+              ) : (
+                <ErrorState title="Screener unavailable" detail={screenerErrorDetail(screen.error)} onRetry={() => void screen.refetch()} />
+              )
+            )}
             {!screen.isLoading && !screen.isError && data && (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-xs text-term-muted" role="status">{data.count} of {data.filtered_total ?? data.universe_size} pass · page {Math.floor((data.offset ?? offset) / SCREENER_LIMIT) + 1}{(data.offset ?? offset) >= 200 ? " · offset capped at 200 — refine filters" : ""}{skippedCount > 0 && ` · ${skippedCount} skipped`}{symbolFilter ? ` · filter “${symbolFilter}”` : ""}{screen.isFetching ? " · refreshing…" : ""}</p>
                   <div className="flex items-center gap-2">
+                    <button className="term-btn-ghost text-xs" type="button" disabled={rows.length === 0 || screen.isFetching} onClick={() => exportScreenerCsv(rows, horizon, data.offset ?? offset)} aria-label="Export screener results as CSV">EXPORT CSV</button>
                     <button className="term-btn-ghost text-xs" type="button" disabled={(data.offset ?? offset) <= 0 || screen.isFetching} onClick={() => setOffset((o) => Math.max(0, o - SCREENER_LIMIT))} aria-label="Previous screener page">← PREV</button>
                     <button className="term-btn-ghost text-xs" type="button" disabled={(data.offset ?? offset) + data.count >= (data.filtered_total ?? data.count) || screen.isFetching || (data.offset ?? offset) >= 200} onClick={() => setOffset((o) => Math.min(200, o + SCREENER_LIMIT))} title={(data.offset ?? offset) >= 200 ? "Offset capped at 200 by the backend — refine filters to narrow beyond 220 rows." : void 0} aria-label="Next screener page">NEXT →</button>
                   </div>

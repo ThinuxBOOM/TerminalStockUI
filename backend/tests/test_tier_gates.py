@@ -101,6 +101,9 @@ def _make_client(tmp_path, monkeypatch) -> tuple[TestClient, dict[str, str]]:
     monkeypatch.setenv("SECRET_KEY", TEST_SECRET)
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.delenv("APP_ENV", raising=False)
+    # Strict HARD-gate assertions: pin BILLING_ENFORCED=true so
+    # require_tier_optional mirrors require_tier exactly.
+    monkeypatch.setenv("BILLING_ENFORCED", "true")
     # Ensure users table mapping exists before create_all.
     from backend.auth import guards as _g  # noqa: F401
 

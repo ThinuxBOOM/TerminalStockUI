@@ -61,4 +61,29 @@ async function getSymbolNews(symbol, limit = 10, opts = {}) {
   };
 }
 
-export { getNews, getSymbolNews };
+// Phase 8: GET /api/sentiment/premarket — merged premarket sentiment
+// (Alpaca news + optional Investopedia scrape). Best-effort: callers treat
+// 404/disabled as fail-hidden (return null -> strip stays unmounted).
+async function getPremarket(opts = {}) {
+  const { data } = await api.get("/api/sentiment/premarket", {
+    timeout: 15000,
+    ...(opts?.signal ? { signal: opts.signal } : {}),
+  });
+  const d = data ?? {};
+  const agg = d.aggregate_sentiment ?? d.aggregate ?? {};
+  const numOr = (v, fb) => (typeof v === "number" && Number.isFinite(v) ? v : fb);
+  return {
+    meanSentiment: numOr(agg.mean_sentiment, 0),
+    bullishCount: numOr(agg.bullish_count, 0),
+    bearishCount: numOr(agg.bearish_count, 0),
+    articleCount: numOr(agg.article_count, 0),
+    sources: Array.isArray(agg.sources) ? agg.sources.map((s) => String(s)) : [],
+    fetchedAt: typeof agg.fetched_at === "string" ? agg.fetched_at : null,
+    alpaca: d.alpaca && typeof d.alpaca === "object" ? d.alpaca : null,
+    investopedia: d.investopedia && typeof d.investopedia === "object" ? d.investopedia : null,
+    disclosure: typeof d.disclosure === "string" ? d.disclosure : "",
+    raw: d,
+  };
+}
+
+export { getNews, getPremarket, getSymbolNews };

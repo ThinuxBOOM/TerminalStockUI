@@ -13,6 +13,7 @@ without branching later:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import Request
@@ -71,6 +72,20 @@ def normalize_tier(tier: str | None) -> str:
     return cand if cand in _TIER_RANK else "free"
 
 
+def is_billing_enforced() -> bool:
+    """Soft-launch flag: True = hard 402 gates, False = registered see all.
+
+    Reads ``BILLING_ENFORCED`` env (default ``"false"``). Truthy values:
+    ``1/true/yes/on`` (case-insensitive). Never raises (fail-open to
+    soft mode on unreadable env).
+    """
+    try:
+        raw = os.getenv("BILLING_ENFORCED", "false")
+        return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+
+
 def can_use_feature(tier: str | None, feature: str) -> bool:
     """Pure tier check for FUTURE gating. Always True-safe on unknown input."""
     try:
@@ -118,6 +133,7 @@ __all__ = [
     "VALID_TIERS",
     "can_use_feature",
     "get_current_user_stub",
+    "is_billing_enforced",
     "normalize_tier",
     "quota_for",
 ]

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import useWatchlist from "../hooks/useWatchlist";
@@ -77,10 +77,12 @@ function ForecastCells({ symbol }) {
 
 function WatchlistPage() {
   const navigate = useNavigate();
-  const { symbols, add, remove, clear } = useWatchlist();
+  const { symbols, add, remove, clear, exportJSON, importJSON } = useWatchlist();
   const [draft, setDraft] = useState("");
   const [targetCcy, setTargetCcy] = useState("USD");
   const [filterText, setFilterText] = useState("");
+  const [importError, setImportError] = useState(null);
+  const fileRef = useRef(null);
   const [sortKey, setSortKey] = useState("symbol");
   const [sortDir, setSortDir] = useState(1);
   const sortedSymbols = useMemo(() => [...symbols].sort(), [symbols]);
@@ -189,6 +191,46 @@ function WatchlistPage() {
   function openSecurity(sym) {
     navigate(`/security/${encodeURIComponent(sym)}`);
   }
+  // Phase 8: client-side JSON backup/restore (no backend table yet).
+  // Export downloads symbols.json; import accepts a JSON array (or
+  // {symbols:[...]}) and reuses the hook's dedupe/cap validation.
+  function exportWatchlistFile() {
+    try {
+      setImportError(null);
+      const data = exportJSON();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "watchlist.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      setImportError("Export failed — the browser blocked the download.");
+    }
+  }
+  async function onImportFile(e) {
+    setImportError(null);
+    const f = e?.target?.files?.[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const parsed = JSON.parse(text);
+      const arr = Array.isArray(parsed) ? parsed : parsed?.symbols;
+      if (!Array.isArray(arr)) throw new Error("Expected a JSON array of tickers (or {\"symbols\": [...]})");
+      importJSON(arr.map((s) => String(s ?? "")));
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message.slice(0, 200) : "Invalid watchlist file.");
+    } finally {
+      try {
+        e.target.value = "";
+      } catch {
+        // reset must never break import
+      }
+    }
+  }
 
   if (symbols.length === 0) {
     return (
@@ -234,7 +276,16 @@ function WatchlistPage() {
           <button className="term-btn shrink-0" type="submit">ADD</button>
         </form>
         <button className="term-btn-ghost text-xs" type="button" onClick={clearWatchlist} aria-label="Clear watchlist">CLEAR</button>
+        <button className="term-btn-ghost text-xs" type="button" onClick={exportWatchlistFile} aria-label="Export watchlist as JSON">EXPORT JSON</button>
+        <button className="term-btn-ghost text-xs" type="button" onClick={() => fileRef.current?.click()} aria-label="Import watchlist from JSON">IMPORT JSON</button>
+        <input ref={fileRef} type="file" accept="application/json,.json" className="sr-only" aria-label="Choose watchlist JSON file" onChange={onImportFile} />
       </div>
+      <p className="mt-1 text-[11px] text-term-muted" role="status">
+        {symbols.length} followed · saved in this browser, no login required · backup via EXPORT JSON, restore via IMPORT JSON.
+      </p>
+      {importError && (
+        <p className="mt-1 text-xs text-term-red" role="alert">Import failed — {importError}</p>
+      )}
 
       <div className="mt-3">
         <FXProvenanceBanner provenance={fxProvenance} targetCcy={targetCcy} loading={rankQuery.isLoading} error={rankQuery.error} />

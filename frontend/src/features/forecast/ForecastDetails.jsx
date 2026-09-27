@@ -9,6 +9,7 @@ import {
   getAnalytics,
   getChart,
   getForecast,
+  isUpgradeRequiredError,
   postAIInsight,
   tryNormalizeAIOpinion,
 } from "../../api/client";
@@ -27,6 +28,7 @@ import EmptyState from "../../components/EmptyState";
 import { ResearchSection, AuditLink, DeepResearchStub, SourceBadge } from "../../components/ResearchSection";
 import { formatDateTime, formatPct1 } from "../../utils/format";
 import ErrorState from "../../components/ErrorState";
+import TierLockedPanel from "../../components/TierLockedPanel";
 
 const DISCLOSURE = "Not investment advice. Forecasts are measurable probabilities from the deterministic engine; AI opinions are bounded and capped at 20% influence.";
 const MAX_CAL_TABLE_ROWS = 20;
@@ -374,11 +376,15 @@ function ForecastDetails({ symbol }) {
             </div>
           )}
           {forecastQ.isError && (
-            <ErrorState
-              title="Forecast unavailable"
-              detail={`provider didn't return fresh data (${extractBackendDetail(forecastQ.error, "forecast endpoint unreachable")}), ${lastSuccessText(forecastQ.dataUpdatedAt)} — no placeholder numbers shown`}
-              onRetry={() => void forecastQ.refetch()}
-            />
+            isUpgradeRequiredError(forecastQ.error) ? (
+              <TierLockedPanel error={forecastQ.error} feature="Forecast" />
+            ) : (
+              <ErrorState
+                title="Forecast unavailable"
+                detail={`provider didn't return fresh data (${extractBackendDetail(forecastQ.error, "forecast endpoint unreachable")}), ${lastSuccessText(forecastQ.dataUpdatedAt)} — no placeholder numbers shown`}
+                onRetry={() => void forecastQ.refetch()}
+              />
+            )
           )}
           {!forecastQ.isError && !forecastQ.isLoading && !live && (
             <EmptyState
@@ -490,6 +496,7 @@ function ForecastDetails({ symbol }) {
           onRequestAI={aiM.data ? undefined : () => aiM.mutate()}
           requestingAI={aiM.isPending}
           aiRequestError={aiM.isError ? friendlyAIError(aiM.error) : null}
+          aiError={aiM.isError ? aiM.error : null}
         />
       )}
 
@@ -572,11 +579,15 @@ function ForecastDetails({ symbol }) {
           )}
           {analyticsQ.isLoading && <div className="mt-2"><Skeleton label="loading analytics…" lines={4} variant="table" /></div>}
           {analyticsQ.isError && (
-            <ErrorState
-              title="Analytics unavailable"
-              detail={`provider didn't return fresh data (${extractBackendDetail(analyticsQ.error, "analytics endpoint unreachable")}), ${lastSuccessText(analyticsQ.dataUpdatedAt)} — forecast above unaffected`}
-              onRetry={() => void analyticsQ.refetch()}
-            />
+            isUpgradeRequiredError(analyticsQ.error) ? (
+              <TierLockedPanel error={analyticsQ.error} feature="Analytics" />
+            ) : (
+              <ErrorState
+                title="Analytics unavailable"
+                detail={`provider didn't return fresh data (${extractBackendDetail(analyticsQ.error, "analytics endpoint unreachable")}), ${lastSuccessText(analyticsQ.dataUpdatedAt)} — forecast above unaffected`}
+                onRetry={() => void analyticsQ.refetch()}
+              />
+            )
           )}
           {analytics && (
             <>
@@ -853,7 +864,13 @@ function ForecastDetails({ symbol }) {
             CANCEL
           </button>
         )}
-        {aiM.isError && <span className="text-term-amber">⚠ {friendlyAIError(aiM.error)}— deterministic forecast above is unaffected.</span>}
+        {aiM.isError && (
+          isUpgradeRequiredError(aiM.error) ? (
+            <TierLockedPanel error={aiM.error} feature="AI Opinion" />
+          ) : (
+            <span className="text-term-amber">⚠ {friendlyAIError(aiM.error)}— deterministic forecast above is unaffected.</span>
+          )
+        )}
       </div>
       {/* Tier-gated stub — always unlocked, no enforcement. */}
       <DeepResearchStub locked={false} tier="Free" feature="Deep Research" />

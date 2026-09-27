@@ -35,7 +35,7 @@ from typing import Any, Callable
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from backend.auth.tiers import _TIER_RANK, normalize_tier
+from backend.auth.tiers import _TIER_RANK, is_billing_enforced, normalize_tier
 from backend.db.session import get_db
 
 try:  # preferred JWT backend (V2 plan: pyjwt>=2.8)
@@ -284,6 +284,69 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Any:
     return user
 
 
+def get_optional_user(request: Request, db: Session = Depends(get_db)) -> Any:
+    """Optional auth: authed user or guest dict.
+
+    Tries :func:`get_current_user`; on 401 (missing/bad/expired token,
+    unknown user) returns the guest dict
+    ``{"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}``.
+    Non-401 HTTP errors and unexpected failures are re-raised (fail-closed).
+    """
+    try:
+        return get_current_user(request, db)
+    except HTTPException as exc:
+        try:
+            status = int(getattr(exc, "status_code", 500))
+        except Exception:
+            status = 500
+        if status == 401:
+            return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
+        raise
+    except Exception:
+        raise _unauthorized()
+
+
+def _is_guest(user: Any) -> bool:
+    """True for the guest dict (or any user carrying is_guest=True)."""
+    try:
+        if isinstance(user, dict):
+            return bool(user.get("is_guest", False))
+        return bool(getattr(user, "is_guest", False))
+    except Exception:
+        return False
+
+
+def _is_admin(user: Any) -> bool:
+    try:
+        if isinstance(user, dict):
+            return bool(user.get("is_admin", False))
+        return bool(getattr(user, "is_admin", False))
+    except Exception:
+        return False
+
+
+def _tier_of(user: Any) -> str:
+    try:
+        if isinstance(user, dict):
+            return normalize_tier(user.get("tier", "free"))
+        return normalize_tier(getattr(user, "tier", "free"))
+    except Exception:
+        return "free"
+
+
+def _insufficient(min_tier: str, tier: str) -> HTTPException:
+    need = str(min_tier or "").strip().lower()
+    return HTTPException(
+        status_code=402,
+        detail={
+            "message": f"tier '{tier}' insufficient; requires '{need}' or higher",
+            "upgrade_required": True,
+            "min_tier": need,
+            "tier": tier,
+        },
+    )
+
+
 def require_tier(min_tier: str) -> Callable:
     """Dependency factory gating on the LIVE tier rank (402 when too low).
 
@@ -319,6 +382,47 @@ def require_tier(min_tier: str) -> Callable:
     return _gate
 
 
+def require_tier_optional(min_tier: str) -> Callable:
+    """Soft-launch gate: guests get free-only, registered get everything.
+
+    - Unknown ``min_tier`` raises ``ValueError`` at wiring time (fail-closed,
+      mirrors :func:`require_tier`).
+    - ``BILLING_ENFORCED=true`` → behaves exactly like :func:`require_tier`
+      (guests 401, authed rank-checked 402).
+    - ``BILLING_ENFORCED=false`` (default soft-launch):
+      guests (``is_guest``) get ``free``-only (non-free → 402
+      ``upgrade_required``); any authenticated (non-guest) user passes
+      regardless of tier (admin also passes).
+    """
+    need = str(min_tier or "").strip().lower()
+    if need not in _TIER_RANK:
+        raise ValueError(f"unknown min_tier: {min_tier!r}")
+
+    def _gate(user: Any = Depends(get_optional_user)) -> Any:
+        try:
+            if _is_admin(user):
+                return user
+        except Exception:
+            pass
+        guest = _is_guest(user)
+        if is_billing_enforced():
+            # Strict: mirror require_tier exactly.
+            if guest:
+                raise _unauthorized()
+            tier = _tier_of(user)
+            if _TIER_RANK.get(tier, 0) < _TIER_RANK[need]:
+                raise _insufficient(need, tier)
+            return user
+        # Soft-launch: registered see everything, guests free-only.
+        if guest:
+            if need == "free":
+                return user
+            raise _insufficient(need, "free")
+        return user
+
+    return _gate
+
+
 def require_admin(user: Any = Depends(get_current_user)) -> Any:
     """Dependency gating on live ``is_admin`` (401 unauth, 403 non-admin)."""
     try:
@@ -337,7 +441,9 @@ __all__ = [
     "decode_token",
     "get_current_user",
     "get_jwt_secret",
+    "get_optional_user",
     "get_user_model",
     "require_admin",
     "require_tier",
+    "require_tier_optional",
 ]

@@ -41,6 +41,11 @@ try:
 except Exception:  # pragma: no cover - partial checkout
     TwelveDataProvider = None  # type: ignore[assignment]
 
+try:
+    from backend.market_data.providers import investopedia as investopedia  # flag-gated scrape adapter
+except Exception:  # pragma: no cover - partial checkout
+    investopedia = None  # type: ignore[assignment]
+
 __all__ = [
     "YFinanceProvider",
     "AKShareProvider",
@@ -48,4 +53,5 @@ __all__ = [
     "StooqProvider",
     "FinnhubProvider",
     "TwelveDataProvider",
+    "investopedia",
 ]

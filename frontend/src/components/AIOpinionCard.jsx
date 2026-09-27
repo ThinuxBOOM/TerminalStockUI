@@ -1,6 +1,7 @@
 import React from "react";
 import ProvenanceBadge from "./ProvenanceBadge";
-import { AI_DISABLED_LABEL, DISAGREE_TOL, sourceLabelForAIOpinion } from "../api/client";
+import TierLockedPanel from "./TierLockedPanel";
+import { AI_DISABLED_LABEL, DISAGREE_TOL, isUpgradeRequiredError, sourceLabelForAIOpinion } from "../api/client";
 import { formatPct1 } from "../utils/format";
 
 const DISAGREE_TOL_EXPORT = DISAGREE_TOL;
@@ -26,7 +27,15 @@ function AIOpinionCard({
   onRequest,
   requesting,
   requestError,
+  requestErrorObj = null,
+  aiError = null,
 }) {
+  // PHASE 3: 402 branches BEFORE any generic error copy. 423/502/404
+  // handling below is untouched (requestError string still renders).
+  const rawUpgradeErr = requestErrorObj ?? aiError ?? (requestError && typeof requestError === "object" ? requestError : null);
+  if (isUpgradeRequiredError(rawUpgradeErr)) {
+    return <TierLockedPanel error={rawUpgradeErr} feature="AI Opinion" />;
+  }
   const w = typeof aiWeight === "number" && Number.isFinite(aiWeight) ? aiWeight : 0;
   const disabled = !(w > 0);
 
