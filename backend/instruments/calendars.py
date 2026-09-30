@@ -388,6 +388,36 @@ def last_completed_trading_day(mic: str, now: datetime | None = None) -> date:
             return date.today()
 
 
+def session_date(ts: object, mic: str | None = None) -> date | None:
+    """Exchange-local calendar day of a bar timestamp.
+
+    Daily bars are stored as the session's local midnight expressed in UTC,
+    so for venues east of UTC the UTC date is the PREVIOUS day (the 29 Sep
+    Shanghai bar is ``2026-09-28T16:00:00+00:00``). Comparing ``str(ts)[:10]``
+    with exchange-local session days therefore misdates every Asian and
+    European bar. Accepts datetimes and ISO strings; plain ``YYYY-MM-DD`` is
+    already a session day. Returns None when unparseable.
+    """
+    try:
+        if isinstance(ts, datetime):
+            dt = ts
+        elif isinstance(ts, date):
+            return ts
+        else:
+            text = str(ts or "").strip()
+            if len(text) == 10:
+                return date.fromisoformat(text)
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.date()
+    key = (mic or "").strip().upper()
+    if key in EXCHANGE_META:
+        return _exchange_now(key, dt).date()
+    return dt.astimezone(timezone.utc).date()
+
+
 def _exchange_now(mic: str, dt: datetime) -> datetime:
     """Return ``dt`` in the exchange timezone.
 

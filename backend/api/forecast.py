@@ -9,7 +9,6 @@ provenance envelope + model/feature/data versions + timestamp + the
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -695,14 +694,10 @@ _REGIME_PERSIST_MAP = {"high": "elevated"}
 def _persist_forecast_record(result: dict, symbol: str, market_service=None) -> None:
     """Insert the versioned forecast row + audit event (best-effort, never raises).
 
-    Feeds GET /api/audit/forecasts (homepage "Latest research"). Skipped
-    under pytest (PYTEST_CURRENT_TEST) so unit runs never pollute the dev
-    sqlite file; production/server always attempts the write. Duplicate
+    Feeds GET /api/audit/forecasts (homepage "Latest research"). Duplicate
     runs (same instrument+horizon+target+versions UNIQUE key) are ignored.
     """
     try:
-        if os.getenv("PYTEST_CURRENT_TEST"):
-            return
         from backend.db.session import get_session_factory, ensure_schema
 
         try:

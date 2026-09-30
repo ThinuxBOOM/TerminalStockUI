@@ -59,6 +59,8 @@ def normalize_quote(raw: dict, *, source: str, delay_minutes: int = 15) -> dict:
         "volume": _clean_number(raw.get("volume")),
         "currency": currency,
         "as_of": raw.get("as_of") or _utcnow(),
+        # When the price was set upstream (as_of is when we fetched it).
+        "price_time": raw.get("price_time"),
         "source": source,
     }
     missing = [f for f in QUOTE_FIELDS if quote.get(f) is None]

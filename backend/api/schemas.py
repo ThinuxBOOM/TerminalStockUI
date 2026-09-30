@@ -46,12 +46,18 @@ class QuoteResponse(BaseModel):
     currency: str = "USD"
     change: float | None = None
     change_pct: float | None = None
+    #: When the price was set upstream (ISO 8601 UTC); provenance.as_of is
+    #: when it was fetched. None when the source does not report it.
+    price_time: str | None = None
     market_state: str = "delayed"
     provenance: Provenance
 
 
 class BarOut(BaseModel):
     ts: str
+    #: Exchange-local session day of a daily bar (YYYY-MM-DD). Use this, not
+    #: ts[:10], for dates: ts is local midnight in UTC, a day early east of UTC.
+    date: str | None = None
     open: float | None = None
     high: float | None = None
     low: float | None = None

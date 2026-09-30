@@ -85,7 +85,7 @@ def _closes_from_bars(bars: list[dict]) -> list[dict]:
     for row in bars or []:
         if not isinstance(row, dict):
             continue
-        raw_t = row.get("ts") or row.get("time") or row.get("date")
+        raw_t = row.get("date") or row.get("ts") or row.get("time")
         if raw_t is None:
             continue
         t = str(raw_t)[:10] if isinstance(raw_t, str) else None

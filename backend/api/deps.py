@@ -5,25 +5,11 @@ from __future__ import annotations
 from ..cache import get_cache
 from ..instruments.registry import InstrumentRegistry
 from ..market_data.health import ProviderHealthTracker
+from ..market_data.providers.alpaca import AlpacaProvider
+from ..market_data.providers.finnhub_free import FinnhubProvider
+from ..market_data.providers.twelvedata_free import TwelveDataProvider
 from ..market_data.providers.yfinance import YFinanceProvider
 from ..market_data.service import MarketDataService
-
-try:  # Milestone 0 live-data chain (opt-in; missing -> skipped, never crash)
-    from ..market_data.providers.alpaca import AlpacaProvider
-except Exception:  # pragma: no cover
-    AlpacaProvider = None  # type: ignore[assignment]
-
-
-
-try:  # Free-tier US redundancy (opt-in; missing -> skipped, never crash)
-    from ..market_data.providers.finnhub_free import FinnhubProvider
-except Exception:  # pragma: no cover
-    FinnhubProvider = None  # type: ignore[assignment]
-
-try:
-    from ..market_data.providers.twelvedata_free import TwelveDataProvider
-except Exception:  # pragma: no cover
-    TwelveDataProvider = None  # type: ignore[assignment]
 
 _registry: InstrumentRegistry | None = None
 _health: ProviderHealthTracker | None = None
@@ -63,41 +49,34 @@ def _tracker_hook(tracker):  # type: ignore[no-untyped-def]
     return _record
 
 
+def _configured_or_none(factory, hook):  # type: ignore[no-untyped-def]
+    """Instantiate an optional key-based provider only when its keys are set.
+
+    An unconfigured provider in the chain would be called (and fail) on every
+    quote, costing latency and showing as "degraded" instead of simply absent.
+    """
+    if factory is None:
+        return None
+    provider = factory(on_call=hook)
+    return provider if bool(getattr(provider, "configured", False)) else None
+
+
 def get_market_service() -> MarketDataService:
+    """Quote chain: Alpaca (US, if keyed) -> yfinance -> Finnhub -> TwelveData
+    (each optional provider only when its API key is configured)."""
     global _service
     if _service is None:
         tracker = get_health_tracker()
         hook = _tracker_hook(tracker)
-        provider = YFinanceProvider(on_call=hook, timeout_s=10.0)
-        # Milestone 0 chain: Alpaca live US (keys via env; unconfigured ->
-        # flagged stubs). Each has an independent breaker; failures never
-        # take down yfinance.
-        # Free-tier US redundancy: Finnhub (FINNHUB_API_KEY) + TwelveData
-        # (TWELVEDATA_API_KEY); unconfigured -> flagged stubs, skipped cost
-        # is one stub call each only when yfinance is not live.
-        alpaca = None
-        if AlpacaProvider is not None:
-            try:
-                alpaca = AlpacaProvider(on_call=hook)
-            except Exception:
-                alpaca = None
-        finnhub = None
-        if FinnhubProvider is not None:
-            try:
-                finnhub = FinnhubProvider(on_call=hook)
-            except Exception:
-                finnhub = None
-        twelvedata = None
-        if TwelveDataProvider is not None:
-            try:
-                twelvedata = TwelveDataProvider(on_call=hook)
-            except Exception:
-                twelvedata = None
-        _service = MarketDataService(registry=get_registry(), provider=provider,
-                                     health=tracker, cache=get_cache(),
-                                     alpaca_provider=alpaca,
-                                     finnhub_provider=finnhub,
-                                     twelvedata_provider=twelvedata)
+        _service = MarketDataService(
+            registry=get_registry(),
+            provider=YFinanceProvider(on_call=hook, timeout_s=10.0),
+            health=tracker,
+            cache=get_cache(),
+            alpaca_provider=_configured_or_none(AlpacaProvider, hook),
+            finnhub_provider=_configured_or_none(FinnhubProvider, hook),
+            twelvedata_provider=_configured_or_none(TwelveDataProvider, hook),
+        )
     return _service
 
 

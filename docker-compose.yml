@@ -20,7 +20,6 @@ services:
       - "443:443/udp"
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env}
-      ACME_EMAIL: ${ACME_EMAIL:-}
     volumes:
       - caddy_data:/data
       - caddy_config:/config

@@ -9,7 +9,7 @@ import FreshnessBadge from "../../components/FreshnessBadge";
 import MarketStateBadge from "../../components/MarketStateBadge";
 import StatusPill from "../../components/StatusPill";
 import CurrencyValue from "../../components/CurrencyValue";
-import { changeArrow, changeColor, formatPct1 } from "../../utils/format";
+import { changeArrow, changeColor, formatDateTime, formatPct1 } from "../../utils/format";
 import Loading from "../../components/Loading";
 import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
@@ -300,6 +300,11 @@ function SecurityBrief({ symbol }) {
               {typeof q.change_pct === "number" && Number.isFinite(q.change_pct) && (
                 <span className={`term-num text-sm font-bold ${changeColor(q.change_pct)}`}>
                   {changeArrow(q.change_pct)} {q.change_pct >= 0 ? "+" : ""}{q.change_pct.toFixed(2)}%
+                </span>
+              )}
+              {q.price_time && (
+                <span className="text-[11px] text-term-muted" title="When this price was set on the exchange (not when it was fetched)">
+                  price at {formatDateTime(q.price_time)}
                 </span>
               )}
             </p>

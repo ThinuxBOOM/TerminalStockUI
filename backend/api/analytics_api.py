@@ -42,7 +42,7 @@ from backend.analytics.technical import (
 )
 from backend.analytics.valuation import dcf_sensitivity, peer_compare, wacc
 from backend.api.deps import get_market_service
-from backend.market_data.service import MarketDataService
+from backend.market_data.service import MarketDataService, bar_session_day
 
 from backend.auth.guards import get_current_user
 
@@ -341,7 +341,7 @@ def get_analytics(
                 "close": [r.get("close") for r in rows],
                 "volume": [float(r.get("volume") or 0) for r in rows],
             },
-            index=pd.to_datetime([r.get("ts") for r in rows]),
+            index=pd.to_datetime([bar_session_day(r) for r in rows]),
         )
     except _HTTPException:
         raise

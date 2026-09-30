@@ -68,6 +68,24 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _iso_or_none(value: object) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def bar_session_day(row: dict) -> str:
+    """Session day of a bars-payload row: ``date`` when present (exchange-
+    local), else the UTC date of ``ts`` (payloads cached before ``date``)."""
+    return str(row.get("date") or str(row.get("ts") or "")[:10])
+
+
+def _bar_day(ts: object, mic: str | None) -> str | None:
+    """Exchange-local session day (YYYY-MM-DD) of a daily bar timestamp."""
+    from backend.instruments.calendars import session_date
+
+    day = session_date(ts, mic)
+    return day.isoformat() if day is not None else None
+
+
 def _to_yahoo_sse_symbol(provider_symbol: str) -> str:
     """Ensure Yahoo-style ``.SS`` form for SSE (``600519`` -> ``600519.SS``)."""
     text = (provider_symbol or "").strip().upper()
@@ -627,6 +645,7 @@ class MarketDataService:
             or (instrument.currency if instrument else ("CNY" if sse else "USD")),
             "change": quote.get("change"),
             "change_pct": quote.get("change_pct"),
+            "price_time": _iso_or_none(quote.get("price_time")),
             "market_state": _market_state,
             "provenance": provenance.model_dump(mode="json"),
         }
@@ -890,6 +909,7 @@ class MarketDataService:
                                 continue
                             _rows.append({
                                 "ts": _ts_iso,
+                                "date": _bar_day(_ts, getattr(instrument, "exchange_mic", None)),
                                 "open": _b.get("open"),
                                 "high": _b.get("high"),
                                 "low": _b.get("low"),
@@ -912,6 +932,7 @@ class MarketDataService:
                                     delay_minutes=_exp, quality_grade="C",
                                     fallback_used=False,
                                     missing_fields=[f"live-serve-db-thin-{int(total)}-rows"],
+                                    granularity="1d" if (timeframe or "1d") == "1d" else None,
                                 ).model_dump(mode="json")
                             except Exception:
                                 _prov = {}
@@ -1032,6 +1053,7 @@ class MarketDataService:
                 ts = quote_day
             rows.append({
                 "ts": ts,
+                "date": quote_day,
                 "open": session_open,
                 "high": high,
                 "low": low,
@@ -1084,12 +1106,16 @@ class MarketDataService:
             as_of_raw = ((quote.get("provenance") or {}).get("as_of")
                          if isinstance(quote.get("provenance"), dict) else None)
             as_of_raw = as_of_raw if as_of_raw is not None else quote.get("as_of")
-            quote_day = str(as_of_raw)[:10]
-            if len(quote_day) != 10:
+            # The session the PRICE belongs to (price_time), not when it was
+            # fetched: a Saturday fetch of Friday's close must update Friday's
+            # bar, not grow a weekend candle.
+            stamp = quote.get("price_time") or as_of_raw
+            quote_day = _bar_day(stamp, mic)
+            if quote_day is None:
                 return rows, False, "quote-undated", False
             last = rows[-1]
-            last_day = str((last or {}).get("ts") or "")[:10]
-            if len(last_day) != 10:
+            last_day = (last or {}).get("date") or _bar_day((last or {}).get("ts"), mic)
+            if last_day is None:
                 return rows, False, "bars-undated", False
         except Exception:
             return rows, False, "quote-undated", False
@@ -1297,15 +1323,6 @@ class MarketDataService:
             if raw_ts is None:
                 return True
             try:
-                latest_day = str(raw_ts)[:10]
-                if len(latest_day) != 10:
-                    return True
-                from datetime import date as _date
-
-                latest = _date.fromisoformat(latest_day)
-            except (TypeError, ValueError):
-                return True
-            try:
                 symbol_text = str(symbol or "").strip()
             except Exception:
                 return True
@@ -1332,13 +1349,13 @@ class MarketDataService:
                 return True
             if not mic:
                 return True
-            try:
-                from backend.instruments.calendars import last_completed_trading_day
-            except Exception:
-                try:
-                    from ..instruments.calendars import last_completed_trading_day  # type: ignore[no-redef]
-                except Exception:
-                    return True
+            from backend.instruments.calendars import last_completed_trading_day, session_date
+
+            # Exchange-local session day, not the UTC date of the stored
+            # timestamp (which is a day early for every venue east of UTC).
+            latest = session_date(raw_ts, mic)
+            if latest is None:
+                return True
             try:
                 expected = last_completed_trading_day(mic)
             except Exception:
@@ -1959,10 +1976,16 @@ class MarketDataService:
         rows, *, db_inst, response_symbol: str, response_inst_id,
         timeframe: str,
     ) -> dict | None:
-        """Build the bars payload from ascending PriceBar rows (shared tail)."""
+        """Build the bars payload from ascending PriceBar rows (shared tail).
+
+        Each bar carries ``ts`` (the stored instant) and ``date``, its
+        exchange-local session day: charts and freshness checks must use the
+        latter, because the instant's UTC date is a day early east of UTC.
+        """
         bars: list[dict] = []
         sources: list[str] = []
         latest_as_of = None
+        bar_mic = getattr(db_inst, "exchange_mic", None)
         for row in rows:
             ts = row.ts
             if isinstance(ts, datetime):
@@ -1981,6 +2004,7 @@ class MarketDataService:
                 sources.append(str(row.source))
             bars.append({
                 "ts": ts_iso,
+                "date": _bar_day(ts, bar_mic),
                 "open": float(row.open) if row.open is not None else None,
                 "high": float(row.high) if row.high is not None else None,
                 "low": float(row.low) if row.low is not None else None,
@@ -2002,7 +2026,10 @@ class MarketDataService:
         except ValueError:
             expected = 15
         as_of_stamp = latest_as_of or _utcnow()
-        age_min = max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
+        # Daily payloads only leave get_bars after the session freshness gate,
+        # so minutes since ingest say nothing about their quality.
+        daily = (timeframe or "1d") == "1d"
+        age_min = 0.0 if daily else max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
         grade, _reasons = grade_quality(
             delay_minutes=expected,
             age_minutes=age_min,
@@ -2013,6 +2040,7 @@ class MarketDataService:
         provenance = build_provenance(
             source, as_of=as_of_stamp, delay_minutes=expected,
             quality_grade=grade, fallback_used=False, missing_fields=[],
+            granularity="1d" if daily else None,
         )
         return {
             "symbol": response_symbol,

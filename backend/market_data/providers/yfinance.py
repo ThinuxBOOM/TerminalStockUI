@@ -7,12 +7,13 @@ tenacity retry on transient failures, deterministic offline stub fallback
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed
 
-from .base import CircuitBreaker, ProviderError, RateLimiter
+from .base import RETRY_TRANSIENT, CircuitBreaker, ProviderError, RateLimiter
 
 try:  # optional at import time; stub fallback covers offline/test envs
     import yfinance as yf
@@ -80,6 +81,94 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+
+def _finite(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _session_day(ts: object):  # type: ignore[no-untyped-def]
+    """Calendar day of a (tz-aware) bar/trade timestamp, in its own timezone."""
+    try:
+        return ts.date()  # type: ignore[union-attr]
+    except AttributeError:
+        return None
+
+
+def _to_utc(ts: object) -> datetime | None:
+    try:
+        py = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts  # type: ignore[union-attr]
+        if not isinstance(py, datetime):
+            return None
+        return py.astimezone(timezone.utc) if py.tzinfo else py.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def quote_from_history(symbol: str, hist, meta: dict | None) -> dict | None:  # type: ignore[no-untyped-def]
+    """Build a raw quote from one ``Ticker.history`` result and its metadata.
+
+    Yahoo's chart metadata (``regularMarketPrice``/``regularMarketTime`` and
+    the day's high/low/volume) describes the latest trade even while today's
+    daily bar is still NaN, which Yahoo does for Shanghai listings during and
+    after the session. It therefore wins over the bar table; without it the
+    last complete bar is used. ``prev_close`` is always the last complete bar
+    from an EARLIER session day, so a NaN "today" row can no longer make
+    yesterday's close masquerade as today's price. ``price_time`` is when the
+    price was set (UTC), as opposed to ``as_of``, when it was fetched.
+
+    Returns None when neither source has a usable price.
+    """
+    meta = meta or {}
+    complete: list[tuple[object, object]] = []  # (session day, row), oldest first
+    if hist is not None and len(hist) > 0:
+        for idx, row in hist.iterrows():
+            if _finite(row.get("Close")) is not None:
+                complete.append((_session_day(idx), row))
+
+    price = _finite(meta.get("regularMarketPrice"))
+    price_time = _to_utc(meta.get("regularMarketTime")) if price is not None else None
+    day = _session_day(meta.get("regularMarketTime")) if price is not None else None
+    if price is None:
+        if not complete:
+            return None
+        day, last_row = complete[-1]
+        price = _finite(last_row["Close"])
+        high = _finite(last_row.get("High"))
+        low = _finite(last_row.get("Low"))
+        volume = _finite(last_row.get("Volume"))
+    else:
+        same_day = next((row for d, row in reversed(complete) if d == day), None)
+        high = _finite(meta.get("regularMarketDayHigh"))
+        low = _finite(meta.get("regularMarketDayLow"))
+        volume = _finite(meta.get("regularMarketVolume"))
+        if same_day is not None:
+            high = high if high is not None else _finite(same_day.get("High"))
+            low = low if low is not None else _finite(same_day.get("Low"))
+            volume = volume if volume is not None else _finite(same_day.get("Volume"))
+
+    today = next((row for d, row in reversed(complete) if d == day), None)
+    if today is None and hist is not None and len(hist) > 0:
+        # The forming bar may lack a close but still carry an open.
+        for idx, row in hist.iterrows():
+            if _session_day(idx) == day:
+                today = row
+    earlier = [row for d, row in complete if day is not None and d is not None and d < day]
+    return {
+        "symbol": symbol.upper(),
+        "price": price,
+        "open": _finite(today.get("Open")) if today is not None else None,
+        "high": high,
+        "low": low,
+        "prev_close": _finite(earlier[-1]["Close"]) if earlier else None,
+        "volume": int(volume) if volume is not None else None,
+        "currency": meta.get("currency") or None,  # never guessed
+        "price_time": price_time,
+    }
+
 class YFinanceProvider:
     """Live yfinance provider with stub fallback."""
 
@@ -125,111 +214,51 @@ class YFinanceProvider:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_fixed(1),
-        retry=retry_if_exception_type(ProviderError),
+        retry=RETRY_TRANSIENT,
         reraise=True,
     )
     def _fetch_raw(self, symbol: str) -> dict:
+        """One ``Ticker.history`` request (plus its chart metadata).
+
+        ``fast_info`` is consulted only when the chart has no usable price:
+        its ``last_price`` downloads a year of history, so calling it on every
+        quote tripled the latency without changing the answer.
+        """
         if yf is None:
-            raise ProviderError(self.name, "yfinance package unavailable")
+            raise ProviderError(self.name, "yfinance package unavailable", retryable=False)
         try:
             from concurrent.futures import ThreadPoolExecutor as _TPE
 
             def _do_fetch():
                 ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="5d", auto_adjust=True, timeout=8)
                 try:
-                    info = ticker.fast_info  # type: ignore[attr-defined]
-                    price = getattr(info, "last_price", None)
+                    meta = ticker.get_history_metadata() or {}
                 except Exception:
-                    price = None
-                try:
-                    hist = ticker.history(period="2d", auto_adjust=True, timeout=8)
-                except TypeError:
-                    hist = ticker.history(period="2d", auto_adjust=True)
-                return price, ticker, hist
+                    meta = {}
+                return ticker, hist, meta
 
             with _TPE(max_workers=1) as _pool:
-                price, ticker, hist = _pool.submit(_do_fetch).result(timeout=self.timeout_s)
-            def _safe_volume(value: object) -> int | None:
-                # None/inf/str must not kill a live quote (int(None) raises).
+                ticker, hist, meta = _pool.submit(_do_fetch).result(timeout=self.timeout_s)
+            raw = quote_from_history(symbol, hist, meta)
+            if raw is not None and not raw.get("currency"):
                 try:
-                    number = float(value)  # type: ignore[arg-type]
-                except (TypeError, ValueError, OverflowError):
-                    return None
-                if number != number or number in (float("inf"), float("-inf")):
-                    return None
-                try:
-                    return int(number)
-                except (TypeError, ValueError, OverflowError):
-                    return None
-
-            def _safe_price(value: object) -> float | None:
-                # OHLC holes must degrade to missing fields, never kill the
-                # whole live quote (float(None) raises TypeError).
-                try:
-                    number = float(value)  # type: ignore[arg-type]
-                except (TypeError, ValueError, OverflowError):
-                    return None
-                if number != number or number in (float("inf"), float("-inf")):
-                    return None
-                return number
-
-            # Yahoo appends today's still-forming bar with NaN OHLC (volume
-            # only) while the session develops or before it finalizes. The
-            # latest row is therefore NOT always usable: scan back for the
-            # last COMPLETE row (finite close) instead of dying on NaNs.
-            # (2026-09-15: 600519.SS served NaN-today + Sept-14-complete;
-            # blindly taking iloc[-1] 502'd every SSE quote.)
-            last = None
-            prev = None
-            if hist is not None and len(hist) > 0:
-                for back in range(len(hist)):
-                    idx = len(hist) - 1 - back
-                    try:
-                        candidate = hist.iloc[idx]
-                    except (IndexError, KeyError):
-                        break
-                    try:
-                        if _safe_price(candidate["Close"]) is not None:
-                            last = candidate
-                            prev = hist.iloc[idx - 1] if idx - 1 >= 0 else None
-                            break
-                    except (KeyError, IndexError, TypeError, ValueError):
-                        continue
-            if last is None:
-                if price is None:
-                    raise ProviderError(self.name, f"no data for {symbol}")
-                # History empty but fast_info has a price: keep its currency
-                # (hardcoding USD here once mislabeled Euronext quotes).
-                ccy_only = "USD"
-                try:
-                    ccy_only = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
+                    raw["currency"] = ticker.fast_info.currency or None  # type: ignore[attr-defined]
                 except Exception:
-                    pass
-                return {"symbol": symbol.upper(), "price": float(price),
-                        "currency": ccy_only, "as_of": _utcnow()}
-            # Complete row found above; single-row history has no observable
-            # prior close (prev stays None: never fabricate change=0).
-            currency = getattr(ticker, "fast_info", None)
-            ccy = "USD"
-            try:
-                ccy = ticker.fast_info.currency or "USD"  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            _ = currency
-            close = _safe_price(last["Close"])
-            if close is None:
-                raise ProviderError(self.name, f"no data for {symbol}")
-            return {
-                "symbol": symbol.upper(),
-                "price": close,
-                "open": _safe_price(last["Open"]),
-                "high": _safe_price(last["High"]),
-                "low": _safe_price(last["Low"]),
-                "prev_close": _safe_price(prev["Close"]) if prev is not None else None,
-                "volume": _safe_volume(last["Volume"]),
-                "currency": ccy,
-                "as_of": _utcnow(),
-            }
+                    pass  # the service falls back to the instrument's currency
+            if raw is None:
+                try:
+                    fast = ticker.fast_info  # type: ignore[attr-defined]
+                    price = _finite(getattr(fast, "last_price", None))
+                    currency = getattr(fast, "currency", None)
+                except Exception:
+                    price, currency = None, None
+                if price is None:
+                    raise ProviderError(self.name, f"no data for {symbol}", retryable=False)
+                raw = {"symbol": symbol.upper(), "price": price,
+                       "currency": currency or meta.get("currency") or None}
+            raw["as_of"] = _utcnow()
+            return raw
         except ProviderError:
             raise
         except Exception as exc:  # network / parse failure

@@ -29,6 +29,7 @@ from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
 from backend.market_data.service import MarketDataService
 from backend.auth.guards import get_current_user
+from backend.instruments.calendars import session_date
 
 router = APIRouter(prefix="/api/markets", tags=["markets"], dependencies=[Depends(get_current_user)])
 
@@ -787,9 +788,12 @@ def market_liquidity_history(
                 raw_ts = getattr(bar, "ts", None)
                 if raw_ts is None:
                     continue
-                day = str(raw_ts)[:10]
-                if len(day) != 10:
+                # Exchange-local session day (the UTC date is a day early
+                # for Shanghai and Euronext bars).
+                session = session_date(raw_ts, getattr(_inst, "exchange_mic", None) or norm)
+                if session is None:
                     continue
+                day = session.isoformat()
                 try:
                     close = float(getattr(bar, "close", None))  # type: ignore[arg-type]
                     if not _math.isfinite(close):

@@ -249,28 +249,20 @@ def test_ai_unconfigured_probe_leaves_no_latency_sample(monkeypatch):
     assert stats["latency_p95_ms"] is None
 
 
-def test_providers_health_probes_zero_sample_providers(monkeypatch):
-    """Probe-on-empty pings only sample-less providers (measured, not unknown)."""
+def test_providers_health_is_read_only(monkeypatch):
+    """GET /api/providers/health never calls upstream providers; unsampled
+    providers report null latency rather than a probed or fabricated value."""
     import backend.api.providers as providers_module
     from backend.market_data.health import ProviderHealthTracker
 
     tracker = ProviderHealthTracker()
-    tracker.record("yfinance", 120.0, True)  # sampled -> must NOT be probed
+    tracker.record("yfinance", 120.0, True)
     calls: list[str] = []
-
-    def _fake_probe(name, trk=None, **kw):
-        calls.append(name)
-        assert trk is tracker
-        trk.record(name, 42.0, True)
-        return trk.stats(name)
-
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # enable probing
     monkeypatch.setattr(
-        "backend.market_data.health.probe_provider", _fake_probe)
+        "backend.market_data.health.probe_provider",
+        lambda name, *a, **kw: calls.append(name))
     out = providers_module.providers_health(tracker)
     rows = {p["provider"]: p for p in out["providers"]}
-    assert "yfinance" not in calls
-    assert {"alpaca", "fx", "gemini"} <= set(calls)
-    assert rows["alpaca"]["total_calls"] == 1
-    assert rows["alpaca"]["latency_p50_ms"] == 42.0
+    assert calls == []
     assert rows["yfinance"]["latency_p50_ms"] == 120.0
+    assert rows["alpaca"]["latency_p50_ms"] is None

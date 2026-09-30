@@ -232,3 +232,13 @@ describe("slow-path timeouts (cold serverless budget)", () => {
     expect(RANK_TIMEOUT_MS).toBe(6e4);
   });
 });
+describe("daily-bar provenance (granularity 1d)", () => {
+  it("is 'daily', never stale by minutes since ingest", () => {
+    const hoursAgo = new Date(Date.now() - 5 * 3600e3).toISOString();
+    const p = { source: "yfinance", as_of: hoursAgo, delay_minutes: 15, quality_grade: "B", fallback_used: false, missing_fields: [], granularity: "1d" };
+    expect(freshnessOf(p)).toBe("daily");
+    expect(deriveMarketState(p)).toBe("daily");
+    expect(freshnessOf({ ...p, granularity: null })).toBe("stale");
+    expect(freshnessOf({ ...p, fallback_used: true })).toBe("cached");
+  });
+});

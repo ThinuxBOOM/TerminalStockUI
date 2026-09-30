@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tenacity import retry_if_exception
+
 import threading
 import time
 from collections import deque
@@ -9,12 +11,24 @@ from datetime import datetime, timezone
 
 
 class ProviderError(RuntimeError):
-    """Upstream provider failure (timeout, HTTP error, parse error)."""
+    """Upstream provider failure (timeout, HTTP error, parse error).
+
+    ``retryable=False`` marks failures a retry cannot fix (missing keys or
+    packages, 401/403/404, bad input); :data:`RETRY_TRANSIENT` honours it.
+    """
 
     def __init__(self, provider: str, message: str, *, retryable: bool = True) -> None:
         super().__init__(f"{provider}: {message}")
         self.provider = provider
         self.retryable = retryable
+
+
+def _is_transient(exc: BaseException) -> bool:
+    return isinstance(exc, ProviderError) and bool(getattr(exc, "retryable", True))
+
+
+#: tenacity ``retry=`` predicate: retry only transient ProviderErrors.
+RETRY_TRANSIENT = retry_if_exception(_is_transient)
 
 
 def extract_status_code(error: object) -> int | None:

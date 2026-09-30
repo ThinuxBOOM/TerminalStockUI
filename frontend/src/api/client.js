@@ -6,7 +6,9 @@ const ProvenanceSchema = z.object({
   delay_minutes: z.number(),
   quality_grade: z.string(),
   fallback_used: z.boolean(),
-  missing_fields: z.array(z.string())
+  missing_fields: z.array(z.string()),
+  // "1d": built from daily bars; current when it covers the last session.
+  granularity: z.string().nullable().optional()
 });
 const InstrumentSchema = z.object({
   instrument_id: z.string().optional(),
@@ -37,6 +39,7 @@ function deriveMarketState(p, explicit) {
   const f = freshnessOf(p);
   if (f === "live") return "open";
   if (f === "stale") return "stale";
+  if (f === "daily") return "daily";
   return "delayed";
 }
 function displaySymbol(r) {
@@ -52,6 +55,8 @@ const QuoteSchema = z.object({
   change: z.number().optional(),
   change_pct: z.number().optional(),
   currency: z.string().optional(),
+  // When the price was set upstream; provenance.as_of is when it was fetched.
+  price_time: z.string().nullable().optional(),
   market_state: z.enum(["open", "closed", "lunch", "delayed", "stale"]),
   instrument: InstrumentSchema.passthrough().nullable().optional(),
   ambiguous: z.boolean().optional().default(false),
@@ -65,8 +70,9 @@ const HealthSchema = z.object({
     z.object({
       name: z.string(),
       status: z.string(),
-      latency_ms: z.number().optional(),
-      last_check: z.string().optional()
+      // Providers that have not been called yet report null for both.
+      latency_ms: z.number().nullable().optional(),
+      last_check: z.string().nullable().optional()
     })
   ).optional(),
   provenance: ProvenanceSchema.optional()
@@ -245,6 +251,7 @@ function normalizeQuote(raw) {
     change: (() => { const v = r?.change !== void 0 && r?.change !== null ? Number(r.change) : void 0; return Number.isFinite(v) ? v : void 0; })(),
     change_pct: (() => { const v = r?.change_pct !== void 0 && r?.change_pct !== null ? Number(r.change_pct) : void 0; return Number.isFinite(v) ? v : void 0; })(),
     currency: r?.currency ?? instrument?.currency ?? void 0,
+    price_time: typeof r?.price_time === "string" ? r.price_time : null,
     market_state,
     instrument,
     ambiguous: Boolean(r?.ambiguous ?? false),
@@ -361,6 +368,9 @@ async function getQuote(symbol, market, opts) {
 }
 function freshnessOf(p) {
   if (p.fallback_used) return "cached";
+  // Daily-bar data is served only when it covers the last completed session
+  // (backend freshness gate), so minutes since ingest are not staleness.
+  if (p.granularity === "1d") return "daily";
   if (p.delay_minutes < 0) return "stale";
   let effective = p.delay_minutes;
   const asOfMs = Date.parse(p.as_of);
@@ -1547,7 +1557,9 @@ function normalizeBarsToCandles(raw, symbol, timeframe = "1d") {
   for (const row of listRaw) {
     if (!row || typeof row !== "object") continue;
     const rec = row;
-    const time = normalizeBarTime(rec.ts ?? rec.time ?? rec.date);
+    // `date` is the exchange-local session day; `ts` is a UTC instant whose
+    // date is a day early for venues east of UTC.
+    const time = normalizeBarTime(rec.date ?? rec.ts ?? rec.time);
     if (!time) continue;
     const open = numFinite(rec.open);
     const high = numFinite(rec.high);

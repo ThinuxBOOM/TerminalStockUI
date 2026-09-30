@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.market_data.health import market_state as _calendar_market_state
 from backend.market_data.providers.base import ProviderError
-from backend.market_data.service import MarketDataService
+from backend.market_data.service import MarketDataService, bar_session_day
 from backend.security.validation import (
     sanitize_error,
     validate_instrument_id,
@@ -246,7 +246,7 @@ def market_indicators(
                 "close": [r.get("close") for r in rows],
                 "volume": [float(r.get("volume") or 0) for r in rows],
             },
-            index=_pd.to_datetime([r.get("ts") for r in rows]) if rows else [],
+            index=_pd.to_datetime([bar_session_day(r) for r in rows]) if rows else [],
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"indicators frame failed: {exc}") from exc

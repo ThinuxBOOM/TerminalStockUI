@@ -19,9 +19,9 @@ import math
 import time
 from datetime import datetime, timezone
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed
 
-from backend.market_data.providers.base import CircuitBreaker, ProviderError, RateLimiter
+from backend.market_data.providers.base import RETRY_TRANSIENT, CircuitBreaker, ProviderError, RateLimiter
 
 NAME = "yfinance-statements"
 CACHE_TTL_S = 24 * 3600
@@ -136,16 +136,16 @@ class YFinanceStatementsProvider:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_fixed(1),
-        retry=retry_if_exception_type(ProviderError),
+        retry=RETRY_TRANSIENT,
         reraise=True,
     )
     def _fetch_frames(self, symbol: str) -> tuple[dict, dict, dict, dict]:
         try:  # lazy: offline/test envs stay import-safe
             import yfinance as yf
         except Exception as exc:
-            raise ProviderError(NAME, "yfinance package unavailable") from exc
+            raise ProviderError(NAME, "yfinance package unavailable", retryable=False) from exc
         if yf is None:
-            raise ProviderError(NAME, "yfinance package unavailable")
+            raise ProviderError(NAME, "yfinance package unavailable", retryable=False)
         try:
             from concurrent.futures import ThreadPoolExecutor as _TPE
 

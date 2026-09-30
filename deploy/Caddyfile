@@ -1,9 +1,6 @@
-# Public entrypoint. {$DOMAIN} gets an automatic Let's Encrypt certificate
-# (ports 80 and 443 must reach this host). For a quick LAN test without a
-# domain set DOMAIN=:80 in .env.
-{
-	email {$ACME_EMAIL}
-}
+# Public entrypoint. {$DOMAIN} gets an automatic Let's Encrypt certificate,
+# renewed by Caddy (ports 80 and 443 must reach this host). For a quick LAN
+# test without a domain set DOMAIN=:80 in .env.
 
 {$DOMAIN} {
 	encode zstd gzip

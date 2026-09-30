@@ -380,8 +380,8 @@ def test_yfinance_nan_today_row_uses_last_complete_bar(monkeypatch):
         def fast_info(self):
             return _Fast()
 
-        def history(self, period="2d", auto_adjust=True):
-            assert period == "2d"
+        def history(self, period="5d", auto_adjust=True, **kw):
+            assert period == "5d"
             return hist
 
     class _FakeYF:
@@ -424,7 +424,7 @@ def test_yfinance_all_nan_history_falls_back_to_fast_info(monkeypatch):
         def fast_info(self):
             return _Fast()
 
-        def history(self, period="2d", auto_adjust=True):
+        def history(self, period="5d", auto_adjust=True, **kw):
             return hist
 
     class _FakeYF:
@@ -437,3 +437,72 @@ def test_yfinance_all_nan_history_falls_back_to_fast_info(monkeypatch):
     assert quote["fallback_used"] is False
     assert quote["price"] == 1272.75
     assert quote["currency"] == "CNY"
+
+
+# --- quote_from_history: one chart request, metadata-first ------------------
+
+
+def _bars(rows):
+    import pandas as _pd
+
+    idx = _pd.DatetimeIndex([_pd.Timestamp(d, tz="Asia/Shanghai") for d, *_ in rows])
+    return _pd.DataFrame(
+        {"Open": [r[1] for r in rows], "High": [r[2] for r in rows], "Low": [r[3] for r in rows],
+         "Close": [r[4] for r in rows], "Volume": [r[5] for r in rows]},
+        index=idx,
+    )
+
+
+def test_quote_uses_todays_trade_when_todays_bar_is_nan():
+    """Yahoo leaves today's SSE bar NaN; the price must still be today's,
+    and prev_close yesterday's (not yesterday passed off as today)."""
+    import pandas as _pd
+
+    from backend.market_data.providers.yfinance import quote_from_history
+
+    nan = float("nan")
+    hist = _bars([("2026-09-28", 1240, 1250, 1235, 1245.0, 3_000_000),
+                  ("2026-09-29", 1244.6, 1255, 1240, 1251.24, 3_100_000),
+                  ("2026-09-30", nan, nan, nan, nan, 3_833_098)])
+    meta = {"regularMarketPrice": 1258.62,
+            "regularMarketTime": _pd.Timestamp("2026-09-30 15:00:01", tz="Asia/Shanghai"),
+            "regularMarketDayHigh": 1268.0, "regularMarketDayLow": 1236.05,
+            "regularMarketVolume": 3_833_098, "currency": "CNY"}
+    q = quote_from_history("600519.ss", hist, meta)
+    assert q["symbol"] == "600519.SS"
+    assert q["price"] == 1258.62
+    assert q["prev_close"] == 1251.24
+    assert (q["high"], q["low"], q["volume"]) == (1268.0, 1236.05, 3_833_098)
+    assert q["open"] is None  # today's bar has no finite open
+    assert q["currency"] == "CNY"
+    assert q["price_time"].isoformat() == "2026-09-30T07:00:01+00:00"
+
+
+def test_quote_prev_close_is_previous_session_when_today_is_complete():
+    import pandas as _pd
+
+    from backend.market_data.providers.yfinance import quote_from_history
+
+    hist = _bars([("2026-09-29", 100, 102, 99, 101.0, 10), ("2026-09-30", 101.5, 104, 101, 103.5, 12)])
+    meta = {"regularMarketPrice": 103.5,
+            "regularMarketTime": _pd.Timestamp("2026-09-30 15:00:00", tz="Asia/Shanghai"),
+            "currency": "CNY"}
+    q = quote_from_history("X", hist, meta)
+    assert (q["price"], q["open"], q["prev_close"]) == (103.5, 101.5, 101.0)
+    assert (q["high"], q["low"], q["volume"]) == (104.0, 101.0, 12)  # bar fills missing meta
+
+
+def test_quote_without_metadata_uses_last_complete_bar():
+    from backend.market_data.providers.yfinance import quote_from_history
+
+    hist = _bars([("2026-09-29", 100, 102, 99, 101.0, 10), ("2026-09-30", 101.5, 104, 101, 103.5, 12)])
+    q = quote_from_history("X", hist, {})
+    assert (q["price"], q["prev_close"], q["price_time"]) == (103.5, 101.0, None)
+
+
+def test_quote_from_history_returns_none_without_any_price():
+    from backend.market_data.providers.yfinance import quote_from_history
+
+    nan = float("nan")
+    assert quote_from_history("X", _bars([("2026-09-30", nan, nan, nan, nan, 5)]), {}) is None
+    assert quote_from_history("X", None, None) is None
