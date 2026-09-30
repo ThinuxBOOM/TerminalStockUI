@@ -10,7 +10,7 @@ import backend.db.session as sess
 from backend.db.session import is_transaction_pooler, normalize_postgres_url
 
 ROOT = Path(__file__).resolve().parents[2]
-SEED = ROOT / "supabase" / "seed.sql"
+SEED = ROOT / "migrations" / "seed.sql"
 
 POOLED = "postgresql+psycopg://postgres:secret@db.abcdefgh1234.supabase.co:6543/postgres"
 DIRECT = "postgresql+psycopg://postgres:secret@db.abcdefgh1234.supabase.co:5432/postgres"
@@ -103,3 +103,23 @@ def test_seed_has_three_smoke_instruments():
     assert "XSHG" in text and "600519" in text
     assert "XPAR" in text and "'MC'" in text
     assert "on conflict" in text.lower()
+
+
+def test_migration_files_are_numbered_and_unique():
+    import re as _re
+
+    names = sorted(p.name for p in (ROOT / "migrations").glob("*.sql") if p.name != "seed.sql")
+    versions = [n[:4] for n in names]
+    assert all(_re.match(r"^\d{4}_[a-z0-9_]+\.sql$", n) for n in names)
+    assert len(versions) == len(set(versions))
+
+
+def test_billing_removal_migration_matches_models():
+    from backend.db.models import User
+
+    sql = (ROOT / "migrations" / "0011_remove_billing_user_ownership.sql").read_text().lower()
+    for column in ("tier", "stripe_customer_id", "stripe_subscription_id", "subscription_status"):
+        assert f"drop column if exists {column}" in sql
+        assert column not in User.__table__.columns
+    assert "token_version" in sql and "token_version" in User.__table__.columns
+    assert "fk_alerts_user" in sql

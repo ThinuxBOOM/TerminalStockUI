@@ -1,0 +1,9 @@
+# min hour dom mon dow  command            (container clock is UTC)
+*/15 * * * *  run-job evaluate  > /proc/1/fd/1 2>&1
+7 * * * *     run-job snapshot  > /proc/1/fd/1 2>&1
+30 5 * * *    run-job ingest    > /proc/1/fd/1 2>&1
+0 6 * * *     run-job sp500     > /proc/1/fd/1 2>&1
+30 6 * * *    run-job calibrate > /proc/1/fd/1 2>&1
+0 7 * * *     run-job score     > /proc/1/fd/1 2>&1
+0 8 * * *     run-job health    > /proc/1/fd/1 2>&1
+0 3 * * 0     run-job retention > /proc/1/fd/1 2>&1

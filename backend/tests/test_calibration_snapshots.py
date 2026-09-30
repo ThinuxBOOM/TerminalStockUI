@@ -237,9 +237,7 @@ def test_model_and_migration_contract(isolated_db):
             "calibrated_brier", "calibrated_ece", "member_brier",
             "calibrator"} <= cols
     root = Path(__file__).resolve().parents[2]
-    infra = (root / "infra" / "migrations" / "0002_calibration.sql").read_text()
-    supa = (root / "supabase" / "migrations" / "0002_calibration.sql").read_text()
-    for text in (infra, supa):
+    for text in ((root / "migrations" / "0002_calibration.sql").read_text(),):
         lowered = text.lower()
         assert "create table if not exists calibration_snapshots" in lowered
         assert "gen_random_uuid()" in lowered
@@ -248,11 +246,9 @@ def test_model_and_migration_contract(isolated_db):
         assert "unique (symbol, horizon_days, model_version, feature_version, data_version)" in lowered
         assert "reliability" in lowered and "members" in lowered
         assert "ix_calibration_snapshots_symbol_horizon" in lowered
-    assert "enable row level security" in supa.lower()
+    assert "enable row level security" in lowered
     # v3 skill columns live in the additive 0009 migration (twin).
-    infra_v3 = (root / "infra" / "migrations" / "0009_ensemble_v3.sql").read_text()
-    supa_v3 = (root / "supabase" / "migrations" / "0009_ensemble_v3.sql").read_text()
-    for text in (infra_v3, supa_v3):
+    for text in ((root / "migrations" / "0009_ensemble_v3.sql").read_text(),):
         lowered = text.lower()
         assert "calibrated_brier" in lowered and "calibrated_ece" in lowered
         assert "member_brier" in lowered and "calibrator" in lowered

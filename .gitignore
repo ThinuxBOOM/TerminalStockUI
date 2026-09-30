@@ -11,33 +11,23 @@ venv/
 # Node
 node_modules/
 dist/
-dist-ssr/
 .vite/
 *.local
 
-# Env / secrets — never commit real keys
+# Secrets: never commit real keys
 .env
-infra/docker/.env
 *.pem
 *.key
 
-# Docker volumes / local data
-pgdata/
-redisdata/
-data/
-
-# Alembic
-*.pyc
+# Local data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+backups/
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-# Vercel / deploy (CI docs agent) — never commit local deploy state or data
-.vercel/
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
