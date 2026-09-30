@@ -1,13 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { FORECAST_HORIZONS, getScreener, isUpgradeRequiredError } from "../api/client";
-import AdSlot from "../components/AdSlot";
-import { useAuth } from "../hooks/useAuth";
+import { FORECAST_HORIZONS, getScreener } from "../api/client";
 import CurrencyValue from "../components/CurrencyValue";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
-import TierLockedPanel from "../components/TierLockedPanel";
 import MarketStateBadge from "../components/MarketStateBadge";
 import ProvenanceBadge from "../components/ProvenanceBadge";
 import Skeleton from "../components/Skeleton";
@@ -96,7 +93,6 @@ function ScreenerPage() {
   const [horizon, setHorizon] = useState(21);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [symbolFilter, setSymbolFilter] = useState(urlQ);
-  const { tier } = useAuth();
   const SCREENER_LIMIT = 20;
   const [offset, setOffset] = useState(0);
   const [minProbInput, setMinProbInput] = useState(0.5);
@@ -185,15 +181,10 @@ function ScreenerPage() {
           <div className="mt-2">{filters}</div>
         </aside>
         <div className="min-w-0">
-          <AdSlot slotId="screener-below-filters" format="in-feed" tier={tier} slotIndex={2} />
           <div className="mt-2">
             {screen.isLoading && <Skeleton label="scanning universe…" lines={6} variant="table" />}
             {screen.isError && (
-              isUpgradeRequiredError(screen.error) ? (
-                <TierLockedPanel error={screen.error} feature="Screener" />
-              ) : (
-                <ErrorState title="Screener unavailable" detail={screenerErrorDetail(screen.error)} onRetry={() => void screen.refetch()} />
-              )
+              <ErrorState title="Screener unavailable" detail={screenerErrorDetail(screen.error)} onRetry={() => void screen.refetch()} />
             )}
             {!screen.isLoading && !screen.isError && data && (
               <div className="space-y-3">

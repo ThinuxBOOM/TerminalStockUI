@@ -3,16 +3,12 @@ import ProvenanceBadge from "./ProvenanceBadge";
 import FreshnessBadge from "./FreshnessBadge";
 import CalibrationChart from "./CalibrationChart";
 import AIOpinionCard from "./AIOpinionCard";
-import TierLockedPanel from "./TierLockedPanel";
 import {
   AI_DISABLED_LABEL,
   AI_WEIGHT_CAP,
-  PLAN_TIERS,
-  TIER_FEATURES,
   auditForecastsUrl,
   blendProbs,
   clampAIWeight,
-  isUpgradeRequiredError,
   sourceLabelForAIOpinion,
 } from "../api/client";
 import { formatPct1 } from "../utils/format";
@@ -82,32 +78,6 @@ function AuditLink({ symbol, limit = 20 }) {
     >
       AUDIT TRAIL →
     </a>
-  );
-}
-
-// Tier-gated UI stub (future-proof, NOT enforced).
-// Plan mapping: Free -> Deep Research locked; Silver -> Report locked;
-// Gold/Platinum -> all unlocked. Always render with locked=false for now.
-function DeepResearchStub({ locked = false, tier = "Free", feature = "Deep Research" }) {
-  const meta = TIER_FEATURES[feature] ?? { minTier: "Silver", lockedIcon: "🔒" };
-  const tierIndex = PLAN_TIERS.indexOf(tier);
-  const minIndex = PLAN_TIERS.indexOf(meta.minTier);
-  const wouldLock = locked && tierIndex >= 0 && tierIndex < minIndex;
-  if (!wouldLock) {
-    // Unlocked stub: visible affordance, no gating. Locked path below is
-    // future UI only — locked is always false until plans launch.
-    return (
-      <div className="rounded border border-dashed border-term-border p-2 text-xs text-term-muted" role="note">
-        <p className="font-bold text-term-text">{feature} <span className="text-[10px] font-normal text-term-muted">(coming soon — {PLAN_TIERS.join("/")})</span></p>
-        <p className="mt-0.5">Tier-gated stub: Free/Silver/Gold/Platinum mapping lives in client.TIER_FEATURES. No enforcement yet.</p>
-      </div>
-    );
-  }
-  return (
-    <div className="rounded border border-dashed border-term-amber p-2 text-xs text-term-amber" role="note">
-      <p className="font-bold">{meta.lockedIcon} {feature} — {tier} tier</p>
-      <p className="mt-0.5">Upgrade to {meta.minTier}+ to unlock. (Stub — not enforced.)</p>
-    </div>
   );
 }
 
@@ -209,7 +179,7 @@ function DeterministicEngineBlock({ forecast, calibrationHistory = [], maxWhy = 
 }
 
 // Full Research/Explanation section: (A) deterministic + blended math +
-// (B) AI opinion + audit link + verbatim disclosure + tier stubs.
+// (B) AI opinion + audit link + verbatim disclosure.
 function ResearchSection({
   symbol,
   forecast,
@@ -241,34 +211,25 @@ function ResearchSection({
           <p className="term-label">(B) AI Opinion</p>
           <SourceBadge source={aiLabel} />
         </div>
-        {isUpgradeRequiredError(aiError) ? (
-          <TierLockedPanel error={aiError} feature="AI Opinion" />
-        ) : (
-          <AIOpinionCard
-            opinion={aiOpinion}
-            deterministicProbability={quantProb ?? undefined}
-            deterministicDirection={dirWord}
-            deterministicEvidence={f?.evidence_ids ?? []}
-            provenance={f?.provenance}
-            aiWeight={w}
-            onRequest={onRequestAI}
-            requesting={requestingAI}
-            requestError={aiRequestError}
-            requestErrorObj={aiError}
-          />
-        )}
-      </div>
-      {/* Tier-gated stubs — always unlocked (locked=false), no enforcement. */}
-      <div className="grid gap-2 md:grid-cols-2">
-        <DeepResearchStub locked={false} tier="Free" feature="Deep Research" />
-        <DeepResearchStub locked={false} tier="Free" feature="Report" />
+        <AIOpinionCard
+          opinion={aiOpinion}
+          deterministicProbability={quantProb ?? undefined}
+          deterministicDirection={dirWord}
+          deterministicEvidence={f?.evidence_ids ?? []}
+          provenance={f?.provenance}
+          aiWeight={w}
+          onRequest={onRequestAI}
+          requesting={requestingAI}
+          requestError={aiRequestError}
+          requestErrorObj={aiError}
+        />
       </div>
       <p className="rounded border border-term-amber bg-term-panel p-3 text-xs text-term-amber" role="note">
-        {disclosure ?? f?.disclosure ?? "Not investment advice. Forecasts are measurable probabilities from the deterministic engine; AI opinions are bounded and capped at 20% influence."}
+        {disclosure ?? f?.disclosure ?? "Not investment advice. Forecasts are experimental probabilities from the deterministic engine; AI opinions are capped at 20% influence."}
       </p>
     </section>
   );
 }
 
-export { SourceBadge, BlendedForecastBar, AuditLink, DeepResearchStub, DeterministicEngineBlock, ResearchSection };
+export { SourceBadge, BlendedForecastBar, AuditLink, DeterministicEngineBlock, ResearchSection };
 export default ResearchSection;

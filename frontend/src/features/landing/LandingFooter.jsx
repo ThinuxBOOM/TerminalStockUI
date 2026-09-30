@@ -35,21 +35,16 @@ function LandingFooter() {
           <nav aria-label="Guide and legal">
             <h3>GUIDE · LEGAL</h3>
             <a href="#how">How It Works</a>
-            <a href="#pricing">Pricing</a>
             <a href="#faq">FAQ</a>
             <Link to="/providers">Data Health</Link>
           </nav>
         </div>
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 20, fontSize: "0.78rem" }}>
           <Link to="/login" style={{ color: "#8b94a7" }}>Sign In</Link>
-          <Link to="/pricing" style={{ color: "#8b94a7" }}>Pricing</Link>
-          <Link to="/providers" style={{ color: "#8b94a7" }}>Disclaimer</Link>
-          <Link to="/providers" style={{ color: "#8b94a7" }}>Privacy</Link>
-          <Link to="/providers" style={{ color: "#8b94a7" }}>Terms</Link>
         </div>
         <p className="lp-legal">
-          Plain-English stock insights — no jargon needed. Numbers show their source and freshness.
-          AI opinions are bounded and capped at 20%. Not investment advice.
+          Numbers show their source and freshness. Forecasts are experimental probabilities;
+          AI opinions are capped at 20% weight. Not investment advice.
         </p>
       </div>
     </footer>

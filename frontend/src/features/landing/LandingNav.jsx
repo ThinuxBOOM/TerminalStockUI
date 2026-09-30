@@ -7,7 +7,6 @@ const LINKS = [
   { href: "#product", label: "Product" },
   { href: "#research", label: "Research" },
   { href: "#markets", label: "Markets" },
-  { href: "#pricing", label: "Pricing" },
   { href: "#faq", label: "FAQ" },
 ];
 
@@ -58,14 +57,8 @@ function LandingNav({ fromHref, fromLabel }) {
             ))}
           </nav>
           <div className="lp-nav-cta">
-            <Link to="/app" className="lp-btn-ghost lp-explore" style={{ padding: "0.55rem 1rem", fontSize: "0.78rem" }}>
-              Explore
-            </Link>
-            <Link to="/login" className="lp-btn-ghost lp-explore" style={{ padding: "0.55rem 1rem", fontSize: "0.78rem" }}>
-              Sign in
-            </Link>
-            <Link to="/login?mode=register" className="lp-btn" style={{ padding: "0.55rem 1.1rem", fontSize: "0.78rem" }}>
-              Sign up
+            <Link to="/app" className="lp-btn" style={{ padding: "0.55rem 1.1rem", fontSize: "0.78rem" }}>
+              Open terminal
             </Link>
             <button
               ref={btnRef}
@@ -87,9 +80,7 @@ function LandingNav({ fromHref, fromLabel }) {
             {LINKS.map((l) => (
               <a key={l.href} href={l.href} onClick={() => setOpen(false)}>{l.label}</a>
             ))}
-            <Link to="/app" onClick={() => setOpen(false)}>Explore as guest</Link>
-            <Link to="/login" onClick={() => setOpen(false)}>Sign in</Link>
-            <Link to="/login?mode=register" onClick={() => setOpen(false)}>Sign up</Link>
+            <Link to="/app" onClick={() => setOpen(false)}>Open terminal</Link>
             {fromHref ? (
               <p className="lp-backlink" style={{ padding: "0.65rem 0.25rem" }}>
                 You came from <code>{fromLabel}</code> — <Link to={fromHref}>jump back →</Link>

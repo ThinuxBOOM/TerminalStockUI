@@ -140,7 +140,8 @@ def test_e2e_journey_search_to_audit():
         assert 0.0 <= forecast["direction_probability"] <= 1.0
         assert forecast["model_version"] and forecast["feature_version"]
         assert forecast["data_version"] and forecast["as_of"]
-        assert forecast["disclosure"] == "Not investment advice"
+        assert "Not investment advice" in forecast["disclosure"]
+        assert forecast["validation_status"] == "experimental"
         _assert_provenance(forecast, "forecast")
 
         # 4. Analytics bundle.

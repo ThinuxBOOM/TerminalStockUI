@@ -5,8 +5,6 @@ import FreshnessBadge from "../../components/FreshnessBadge";
 import CurrencyValue from "../../components/CurrencyValue";
 import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
-import TierLockedPanel from "../../components/TierLockedPanel";
-import { isUpgradeRequiredError } from "../../api/client";
 
 const h = React.createElement;
 
@@ -187,26 +185,15 @@ function PriceChart({
   data,
   loading = false,
   error = null,
-  rawError = null,
-  errorObj = null,
   provenance = null,
   indicators = null,
   requestedIndicators = [],
   indicatorsLoading = false,
   indicatorsError = null,
-  rawIndicatorsError = null,
-  indicatorsErrorObj = null,
   indicatorsProvenance = null,
   currency = "USD",
   onRetryIndicators = null
 }) {
-  // PHASE 3: 402 branches BEFORE generic ErrorState. `error` /
-  // `indicatorsError` are pre-formatted strings from the parent; the raw
-  // axios errors arrive via rawError/rawIndicatorsError (or errorObj).
-  // isUpgradeRequiredError(string) is false, so non-402 string paths
-  // (502/423/404) are untouched.
-  const barsUpgradeError = isUpgradeRequiredError(rawError) || isUpgradeRequiredError(errorObj) || isUpgradeRequiredError(error) ? (rawError ?? errorObj ?? error) : null;
-  const indicatorsUpgradeError = isUpgradeRequiredError(rawIndicatorsError) || isUpgradeRequiredError(indicatorsErrorObj) || isUpgradeRequiredError(indicatorsError) ? (rawIndicatorsError ?? indicatorsErrorObj ?? indicatorsError) : null;
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const overlayRef = useRef(new Map());
@@ -455,13 +442,8 @@ function PriceChart({
   // that could be mistaken for market data. Separate empty (no error) from
   // error so a null-error empty never renders the word "unavailable" as if
   // it were a failure, and vice versa.
-  if (!live && loading && !error && !barsUpgradeError) {
+  if (!live && loading && !error) {
     return /* @__PURE__ */ h(Skeleton, { label: `loading live bars for ${symbol}…`, lines: 8, className: "min-h-[300px]" });
-  }
-  // PHASE 3: 402 branches BEFORE generic ErrorState. 502/423/404 keep the
-  // existing "Price history unavailable" copy below untouched.
-  if (barsUpgradeError && !live) {
-    return /* @__PURE__ */ h(TierLockedPanel, { error: barsUpgradeError, feature: "Price chart" });
   }
   if (!live && !loading && error) {
     return /* @__PURE__ */ h("div", { role: "alert" }, /* @__PURE__ */ h("p", { className: "py-8 text-center text-xs text-term-muted" }, "Price history unavailable —", " ", error, " No placeholder is shown in place of market data."), /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, "source: GET /api/market_data/bars · symbol ", symbol), provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance })));
@@ -494,21 +476,20 @@ function PriceChart({
     })
   ) : null;
 
-  const indicatorStatus = indicatorsUpgradeError && !hasPriceOverlayData && !hasOscData && priceOverlaysRequested ? /* @__PURE__ */ h(TierLockedPanel, { error: indicatorsUpgradeError, feature: "Analytics" }) : /* @__PURE__ */ h(
+  const indicatorStatus = /* @__PURE__ */ h(
     React.Fragment,
     null,
     indicatorsError && !hasPriceOverlayData && !hasOscData && priceOverlaysRequested ? /* @__PURE__ */ h("div", { className: "mb-2" }, /* @__PURE__ */ h(ErrorState, { title: "Indicators unavailable", detail: `${indicatorsError} - price candles unaffected, no lines fabricated.`, onRetry: onRetryIndicators || void 0 })) : null,
-    !indicatorsLoading && !indicatorsError && !indicatorsUpgradeError && priceOverlaysRequested && !hasPriceOverlayData && legendEntries.some((e) => e.pane === "price") ? /* @__PURE__ */ h("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "Indicator series unavailable - the analytics endpoint returned snapshot values only (no plottable points). No lines fabricated.") : null
+    !indicatorsLoading && !indicatorsError && priceOverlaysRequested && !hasPriceOverlayData && legendEntries.some((e) => e.pane === "price") ? /* @__PURE__ */ h("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "Indicator series unavailable - the analytics endpoint returned snapshot values only (no plottable points). No lines fabricated.") : null
   );
 
   const oscPane = showOscPane ? /* @__PURE__ */ h(
     "div",
     { className: "mt-3" },
     /* @__PURE__ */ h("p", { className: "term-label" }, "Momentum · RSI / MACD / ATR"),
-    indicatorsUpgradeError && !hasOscData ? /* @__PURE__ */ h(TierLockedPanel, { error: indicatorsUpgradeError, feature: "Analytics" }) : null,
-    indicatorsLoading && !hasOscData && !indicatorsError && !indicatorsUpgradeError ? /* @__PURE__ */ h(Skeleton, { label: `loading oscillators for ${symbol}…`, lines: 2, className: "min-h-[140px]" }) : null,
-    indicatorsError && !indicatorsUpgradeError && !hasOscData ? /* @__PURE__ */ h(ErrorState, { title: "Oscillators unavailable", detail: `${indicatorsError} - price pane unaffected.`, onRetry: onRetryIndicators || void 0 }) : null,
-    !indicatorsLoading && !indicatorsError && !indicatorsUpgradeError && oscRequested && !hasOscData ? /* @__PURE__ */ h("p", { className: "py-4 text-center text-[11px] text-term-muted", role: "status" }, "Oscillator series unavailable - snapshot only, no lines fabricated.") : null,
+    indicatorsLoading && !hasOscData && !indicatorsError ? /* @__PURE__ */ h(Skeleton, { label: `loading oscillators for ${symbol}…`, lines: 2, className: "min-h-[140px]" }) : null,
+    indicatorsError && !hasOscData ? /* @__PURE__ */ h(ErrorState, { title: "Oscillators unavailable", detail: `${indicatorsError} - price pane unaffected.`, onRetry: onRetryIndicators || void 0 }) : null,
+    !indicatorsLoading && !indicatorsError && oscRequested && !hasOscData ? /* @__PURE__ */ h("p", { className: "py-4 text-center text-[11px] text-term-muted", role: "status" }, "Oscillator series unavailable - snapshot only, no lines fabricated.") : null,
     !indicatorsError && hasOscData ? /* @__PURE__ */ h("div", { ref: setOscContainerRef, className: "w-full min-h-[140px]", role: "img", "aria-label": `oscillators for ${symbol}` }) : null,
     indicatorsProvenance && hasOscData ? /* @__PURE__ */ h("div", { className: "mt-1" }, /* @__PURE__ */ h(ProvenanceBadge, { p: indicatorsProvenance })) : null
   ) : null;

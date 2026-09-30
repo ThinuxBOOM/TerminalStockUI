@@ -9,7 +9,7 @@ import "../features/landing/landing.css";
 // through its own LandingShell (no dependency on AppShell/Layout sidebar).
 // ?from=security/<symbol> (or ?from=/...) is preserved as a friendly
 // "back to where you were" link so the Security Brief breadcrumb keeps
-// working. Anchor ids #how #features #markets #pricing #faq live in the
+// working. Anchor ids #how #features #markets #faq live in the
 // story sections for deep links.
 // ---------------------------------------------------------------------------
 

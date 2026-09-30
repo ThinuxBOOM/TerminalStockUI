@@ -1,7 +1,7 @@
 import React, { memo } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LogIn, Menu, Search } from "lucide-react";
+import { Menu, Search } from "lucide-react";
 import { getHealth } from "../../api/client";
 import { useAuth } from "../../hooks/useAuth";
 import StatusDot from "../ui/StatusDot";
@@ -62,7 +62,7 @@ function ConnectionDot() {
 }
 
 function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, onOpenPalette }) {
-  const { isAuthenticated, loading } = useAuth();
+  const { user } = useAuth();
   return (
     <header className="sticky top-0 z-40 border-b border-term-border bg-term-panel">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
@@ -95,20 +95,9 @@ function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, on
             ⌘K PALETTE
           </button>
           <ConnectionDot />
-          {loading ? (
-            <span className="text-xs text-term-muted" role="status">···</span>
-          ) : isAuthenticated ? (
-            <Link to="/account" className="term-btn-sm" aria-label="Account">
-              ● ACCOUNT
-            </Link>
-          ) : (
-            <Link to="/login" className="term-btn-sm" aria-label="Sign in">
-              <span className="inline-flex items-center gap-1">
-                <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-                SIGN IN
-              </span>
-            </Link>
-          )}
+          <Link to="/account" className="term-btn-sm max-w-[12rem] truncate" aria-label="Account" title={user?.email ?? "Account"}>
+            ● {user?.email ?? "ACCOUNT"}
+          </Link>
         </div>
       </div>
     </header>

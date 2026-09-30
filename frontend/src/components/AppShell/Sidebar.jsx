@@ -3,7 +3,6 @@ import { Link, useLocation } from "react-router-dom";
 import {
   Activity,
   ArrowLeft,
-  Crown,
   FileText,
   FlaskConical,
   Globe,
@@ -51,7 +50,6 @@ const GROUPS = [
       { to: "/providers", label: "Data Health", Icon: Activity, hint: "Is the data fresh?" },
       { to: "/app#news", matchHash: "#news", label: "News", Icon: Newspaper, hint: "Latest headlines on home" },
       { to: "/account", label: "Account", Icon: User, hint: "Account and session" },
-      { to: "/pricing", label: "Pricing", Icon: Crown, hint: "Plans and upgrades" },
     ],
   },
 ];

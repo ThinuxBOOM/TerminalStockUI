@@ -9,7 +9,6 @@ import {
   getAnalytics,
   getChart,
   getForecast,
-  isUpgradeRequiredError,
   postAIInsight,
   tryNormalizeAIOpinion,
 } from "../../api/client";
@@ -25,12 +24,12 @@ import CollapsibleSection from "../../components/CollapsibleSection";
 import NewsPanel from "../../components/NewsPanel";
 import Skeleton from "../../components/Skeleton";
 import EmptyState from "../../components/EmptyState";
-import { ResearchSection, AuditLink, DeepResearchStub, SourceBadge } from "../../components/ResearchSection";
+import ExperimentalBadge from "../../components/ExperimentalBadge";
+import { ResearchSection, AuditLink, SourceBadge } from "../../components/ResearchSection";
 import { formatDateTime, formatPct1 } from "../../utils/format";
 import ErrorState from "../../components/ErrorState";
-import TierLockedPanel from "../../components/TierLockedPanel";
 
-const DISCLOSURE = "Not investment advice. Forecasts are measurable probabilities from the deterministic engine; AI opinions are bounded and capped at 20% influence.";
+const DISCLOSURE = "Not investment advice. Forecasts are experimental probabilities from the deterministic engine (check the Backtest Lab for their measured track record); AI opinions are capped at 20% influence.";
 const MAX_CAL_TABLE_ROWS = 20;
 const MAX_CAL_TREND_ROWS = 10;
 const MAX_ANALYTICS_CELLS = 12;
@@ -376,15 +375,11 @@ function ForecastDetails({ symbol }) {
             </div>
           )}
           {forecastQ.isError && (
-            isUpgradeRequiredError(forecastQ.error) ? (
-              <TierLockedPanel error={forecastQ.error} feature="Forecast" />
-            ) : (
-              <ErrorState
+            <ErrorState
                 title="Forecast unavailable"
                 detail={`provider didn't return fresh data (${extractBackendDetail(forecastQ.error, "forecast endpoint unreachable")}), ${lastSuccessText(forecastQ.dataUpdatedAt)} — no placeholder numbers shown`}
                 onRetry={() => void forecastQ.refetch()}
               />
-            )
           )}
           {!forecastQ.isError && !forecastQ.isLoading && !live && (
             <EmptyState
@@ -399,7 +394,7 @@ function ForecastDetails({ symbol }) {
             <div className="min-w-0 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className={`term-num text-display-sm font-bold ${directionTone(dirWord)}`}>
-                  {headline} <FreshnessBadge p={f.provenance} />
+                  {headline} <FreshnessBadge p={f.provenance} /> <ExperimentalBadge status={f.validation_status} />
                 </h2>
                 <AuditLink symbol={symbol} />
               </div>
@@ -434,7 +429,7 @@ function ForecastDetails({ symbol }) {
                 {typeof f.direction_probability_raw === "number" && Number.isFinite(f.direction_probability_raw) ? (
                   <div className="term-panel-nested p-2">
                     <dt className="text-term-muted">Raw prob</dt>
-                    <dd className="term-num font-bold text-term-text">{formatPct1(f.direction_probability_raw)} <span className="font-normal text-term-muted">(calibrated {formatPct1(f.probability)})</span></dd>
+                    <dd className="term-num font-bold text-term-text">{formatPct1(f.direction_probability_raw)} <span className="font-normal text-term-muted">(after calibration {formatPct1(f.probability)})</span></dd>
                   </div>
                 ) : null}
                 {typeof f.ensemble_spread === "number" && Number.isFinite(f.ensemble_spread) ? (
@@ -579,15 +574,11 @@ function ForecastDetails({ symbol }) {
           )}
           {analyticsQ.isLoading && <div className="mt-2"><Skeleton label="loading analytics…" lines={4} variant="table" /></div>}
           {analyticsQ.isError && (
-            isUpgradeRequiredError(analyticsQ.error) ? (
-              <TierLockedPanel error={analyticsQ.error} feature="Analytics" />
-            ) : (
-              <ErrorState
+            <ErrorState
                 title="Analytics unavailable"
                 detail={`provider didn't return fresh data (${extractBackendDetail(analyticsQ.error, "analytics endpoint unreachable")}), ${lastSuccessText(analyticsQ.dataUpdatedAt)} — forecast above unaffected`}
                 onRetry={() => void analyticsQ.refetch()}
               />
-            )
           )}
           {analytics && (
             <>
@@ -865,15 +856,9 @@ function ForecastDetails({ symbol }) {
           </button>
         )}
         {aiM.isError && (
-          isUpgradeRequiredError(aiM.error) ? (
-            <TierLockedPanel error={aiM.error} feature="AI Opinion" />
-          ) : (
-            <span className="text-term-amber">⚠ {friendlyAIError(aiM.error)}— deterministic forecast above is unaffected.</span>
-          )
+          <span className="text-term-amber">⚠ {friendlyAIError(aiM.error)}— deterministic forecast above is unaffected.</span>
         )}
       </div>
-      {/* Tier-gated stub — always unlocked, no enforcement. */}
-      <DeepResearchStub locked={false} tier="Free" feature="Deep Research" />
       <p className="text-[11px] text-term-muted">{f?.disclosure ?? DISCLOSURE}</p>
     </div>
   );

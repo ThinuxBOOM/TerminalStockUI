@@ -94,7 +94,7 @@ function HeroSection() {
               Explore how it works
             </a>
           </div>
-          <p className="lp-hero-note">Free to explore · No account · Demo data below — never fabricated live values.</p>
+          <p className="lp-hero-note">Illustrative demo data below — the terminal itself shows live, sourced values.</p>
           <div className="lp-ticker" role="status" aria-label="Market snapshot (demo data)">
             <div className="lp-ticker-head"><span>MARKETS SNAPSHOT</span><span>DEMO DATA</span></div>
             <div className="lp-ticker-row lp-num">

@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-// Phase 8: localStorage-only watchlist (guest-first — no login required).
-// HomePage previews the first 10 (MAX_HOME_WATCHLIST); this store caps at
-// MAX_SYMBOLS (30) so guests can follow without an account.
-// Server-sync stub (do NOT require a backend table yet): when a backend
-// watchlist table lands, sync best-effort here — e.g. POST /api/watchlist/sync
-// {symbols} with the Bearer token when useAuth().isAuthenticated, merge
-// server-wins-on-conflict, and keep localStorage as the fail-hidden source of
-// truth (never block render on sync, never throw when offline/401/404).
+// Watchlist stored in this browser's localStorage (not synced to the server).
+// HomePage previews the first 10 (MAX_HOME_WATCHLIST); the store caps at
+// MAX_SYMBOLS (30).
 const WATCHLIST_KEY = "onemarket.watchlist.v1";
 const WATCHLIST_SOURCES_KEY = "onemarket.watchlist.sources.v1";
 const DEFAULT_WATCHLIST = ["AAPL", "MSFT", "600519.SS", "ASML.AS"];

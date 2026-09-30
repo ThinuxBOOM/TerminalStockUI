@@ -41,7 +41,9 @@ def test_forecast_shape_and_provenance():
     assert body["feature_version"]
     assert body["data_version"]
     assert body["as_of"]
-    assert body["disclosure"] == "Not investment advice"
+    assert "Not investment advice" in body["disclosure"]
+    assert "Experimental" in body["disclosure"]
+    assert body["validation_status"] == "experimental"
     prov = body["provenance"]
     for key in ("source", "as_of", "delay_minutes", "quality_grade",
                 "fallback_used", "missing_fields"):

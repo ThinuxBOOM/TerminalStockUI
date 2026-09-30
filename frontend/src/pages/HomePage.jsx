@@ -4,12 +4,9 @@ import { useQuery } from "@tanstack/react-query";
 import { getAuditForecasts, getForecast, getProvidersHealth, getQuote } from "../api/client";
 import { getTopSignals } from "../api/signals";
 import { getNews } from "../api/news";
-import AdSlot from "../components/AdSlot";
-import { useAuth } from "../hooks/useAuth";
 import StatusPill from "../components/StatusPill";
 import MarketLiquidityPanel from "../components/MarketLiquidityPanel";
 import MarketIndicesSection, { AspiChart } from "../components/AspiChart";
-import LiquidationSection from "../components/LiquidationPanel";
 import MarketStatusStrip from "../components/MarketStatusStrip";
 import PremarketStrip from "../components/PremarketStrip";
 import CollapsibleSection from "../components/CollapsibleSection";
@@ -303,7 +300,6 @@ function MarketDetail({ mic, market, newsData }) {
 function HomePage() {
   const navigate = useNavigate();
   const [signalHorizon, setSignalHorizon] = useState(21);
-  const { tier } = useAuth();
   const providers = useQuery({
     queryKey: ["providers-health"],
     queryFn: getProvidersHealth,
@@ -505,7 +501,6 @@ function HomePage() {
         onRetry={() => void signals.refetch()}
       />
 
-      <AdSlot slotId="home-infeed" format="in-feed" tier={tier} slotIndex={2} />
 
       {/* Research + News split */}
       <div className="grid min-w-0 items-start gap-4 lg:grid-cols-2">
@@ -561,7 +556,6 @@ function HomePage() {
 
       <CollapsibleSection id="home-liquidity" title="💧 Market activity (liquidity)" subtitle="How busy is each market? Busy usually means easier to buy/sell." defaultOpen={false}>
         <MarketLiquidityPanel data={liquidity.data ?? null} isLoading={liquidity.isLoading} isError={liquidity.isError} error={liquidity.error} onRetry={() => void liquidity.refetch()} />
-        <div className="mt-4"><LiquidationSection /></div>
       </CollapsibleSection>
 
       <CollapsibleSection id="home-aspi" title="📈 Market indexes (ASPI & friends)" subtitle="One line per market — click SHOW to expand." defaultOpen={false}>

@@ -1,16 +1,5 @@
-import axios from "axios";
-import { resolveApiBaseUrl } from "./baseUrl";
-
-function resolveBaseUrl() {
-  // Shared chain (?api= > localStorage > public/config.js > build > default).
-  return resolveApiBaseUrl();
-}
-
-const api = axios.create({
-  baseURL: resolveBaseUrl(),
-  timeout: 90000,
-  headers: { "Content-Type": "application/json" },
-});
+// Shares the authenticated client (Bearer token + silent refresh).
+import { api } from "./client";
 
 function normalizeSignalRow(r) {
   if (!r || typeof r !== "object") return null;

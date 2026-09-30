@@ -1,5 +1,4 @@
 import React from "react";
-import BackendConnectionCard from "../components/BackendConnectionCard";
 import ProviderSettings from "../features/providers/ProviderSettings";
 
 function ProviderSettingsPage() {
@@ -12,7 +11,6 @@ function ProviderSettingsPage() {
           No decorative charts here; every state carries icon + text + timestamp, never color alone.
         </p>
       </div>
-      <BackendConnectionCard />
       <ProviderSettings />
     </div>
   );

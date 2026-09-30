@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getChart, getForecast, getQuote, auditForecastsUrl, extractBackendDetail, isUpgradeRequiredError, loadFavoriteIndicators, resolveTimeframePreset, saveFavoriteIndicators } from "../../api/client";
+import { TIMEFRAME_PRESETS, SUPPORTED_INDICATORS, getAnalytics, getChart, getForecast, getQuote, auditForecastsUrl, extractBackendDetail, loadFavoriteIndicators, resolveTimeframePreset, saveFavoriteIndicators } from "../../api/client";
 import { getBacktestHistory } from "../../api/backtestHistory";
 import useWatchlist from "../../hooks/useWatchlist";
 import ProvenanceBadge from "../../components/ProvenanceBadge";
@@ -14,8 +14,8 @@ import Loading from "../../components/Loading";
 import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
 import EmptyState from "../../components/EmptyState";
-import TierLockedPanel from "../../components/TierLockedPanel";
-import { SourceBadge, BlendedForecastBar, DeepResearchStub } from "../../components/ResearchSection";
+import ExperimentalBadge from "../../components/ExperimentalBadge";
+import { SourceBadge, BlendedForecastBar } from "../../components/ResearchSection";
 
 // PriceChart (and lightweight-charts) loads on demand — the brief header,
 // forecast and events render without waiting for chart code.
@@ -195,13 +195,11 @@ function SecurityBrief({ symbol }) {
               data={barsQ.data?.candles ?? null}
               loading
               error={barsQ.isError ? briefError(barsQ.error, "bars endpoint unreachable") : null}
-              rawError={barsQ.isError ? barsQ.error : null}
               provenance={barsQ.data?.provenance ?? null}
               indicators={analyticsQ.data?.indicators ?? {}}
               requestedIndicators={selectedIndicators}
               indicatorsLoading={analyticsQ.isLoading || analyticsQ.isFetching}
               indicatorsError={analyticsQ.isError ? briefError(analyticsQ.error, "analytics endpoint unreachable") : null}
-              rawIndicatorsError={analyticsQ.isError ? analyticsQ.error : null}
               indicatorsProvenance={analyticsQ.data?.provenance ?? null}
               currency={null}
               onRetryIndicators={() => void analyticsQ.refetch()}
@@ -213,29 +211,6 @@ function SecurityBrief({ symbol }) {
     );
   }
   if (quote.isError) {
-    // PHASE 3: 402 branches BEFORE generic ErrorState. 502/404/423 fall
-    // through to the existing partial-render ErrorState below untouched.
-    if (isUpgradeRequiredError(quote.error)) {
-      const hasForecastFallback = forecastQ.data != null;
-      const hasAnalyticsFallback = analyticsQ.data != null;
-      return (
-        <div className="max-w-full">
-          <h1 className="mb-2 text-lg font-extrabold text-term-text">{symbol}</h1>
-          <TierLockedPanel error={quote.error} feature="Price chart" />
-          {hasForecastFallback && (
-            <div className="term-panel mt-4 min-w-0 p-4">
-              <ForecastCard price={null} currency={null} forecast={forecastQ.data} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} />
-            </div>
-          )}
-          {hasAnalyticsFallback && (
-            <section className="mt-4">
-              <AnalyticsSnapshot analytics={analyticsQ.data} loading={false} failed={false} />
-            </section>
-          )}
-          <p className="mt-2 text-[11px] text-term-muted">{DISCLOSURE}</p>
-        </div>
-      );
-    }
     // Partial render: a quote/chart 502 must not discard already-fetched
     // forecast + analytics (parallel queries, already paid for). Show the
     // header ErrorState but still render ForecastCard/events/analytics below
@@ -386,13 +361,11 @@ function SecurityBrief({ symbol }) {
               data={barsQ.data?.candles ?? null}
               loading={barsQ.isLoading || barsQ.isFetching}
               error={barsQ.isError ? briefError(barsQ.error, "bars endpoint unreachable") : null}
-              rawError={barsQ.isError ? barsQ.error : null}
               provenance={barsQ.data?.provenance ?? null}
               indicators={analyticsQ.data?.indicators ?? {}}
               requestedIndicators={selectedIndicators}
               indicatorsLoading={analyticsQ.isLoading || analyticsQ.isFetching}
               indicatorsError={analyticsQ.isError ? briefError(analyticsQ.error, "analytics endpoint unreachable") : null}
-              rawIndicatorsError={analyticsQ.isError ? analyticsQ.error : null}
               indicatorsProvenance={analyticsQ.data?.provenance ?? null}
               currency={q.currency ?? null}
               onRetryIndicators={() => void analyticsQ.refetch()}
@@ -429,18 +402,11 @@ function SecurityBrief({ symbol }) {
           <section id="brief-tab-Overview" role="tabpanel" aria-labelledby="brief-tabbtn-Overview" className="grid min-w-0 gap-4 lg:grid-cols-2">
             <div className="term-panel min-w-0 p-4" aria-label="Forecast overview">
               {forecastQ.isLoading && <Skeleton label="loading live forecast…" lines={4} />}
-              {forecastQ.isError && isUpgradeRequiredError(forecastQ.error) && (
-                <TierLockedPanel error={forecastQ.error} feature="Forecast" />
-              )}
-              {(!forecastQ.isError || !isUpgradeRequiredError(forecastQ.error)) && !forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} compact />}
-              {(!forecastQ.isError || !isUpgradeRequiredError(forecastQ.error)) && !forecastQ.isLoading && !forecast && <ForecastUnavailable detail="live forecast unreachable — no placeholder numbers shown" onRetry={() => void forecastQ.refetch()} />}
+              {!forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} compact />}
+              {!forecastQ.isLoading && !forecast && <ForecastUnavailable detail="live forecast unreachable — no placeholder numbers shown" onRetry={() => void forecastQ.refetch()} />}
             </div>
             <div className="min-w-0">
-              {analyticsQ.isError && isUpgradeRequiredError(analyticsQ.error) ? (
-                <TierLockedPanel error={analyticsQ.error} feature="Analytics" />
-              ) : (
-                <AnalyticsSnapshot analytics={analytics} loading={analyticsQ.isLoading} failed={analyticsQ.isError} error={analyticsQ.isError ? analyticsQ.error : null} onRetry={() => void analyticsQ.refetch()} />
-              )}
+              <AnalyticsSnapshot analytics={analytics} loading={analyticsQ.isLoading} failed={analyticsQ.isError} error={analyticsQ.isError ? analyticsQ.error : null} onRetry={() => void analyticsQ.refetch()} />
               <div className="term-panel mt-4 min-w-0 p-4" aria-label="Events preview">
                 <h3 className="term-label">Events · preview</h3>
                 {analyticsQ.isLoading ? <div className="mt-2"><Skeleton label="loading events…" lines={2} /></div>
@@ -462,20 +428,13 @@ function SecurityBrief({ symbol }) {
         {activeTab === "Forecast" && (
           <section id="brief-tab-Forecast" role="tabpanel" aria-labelledby="brief-tabbtn-Forecast" className="term-panel min-w-0 p-4" aria-label="Forecast detail">
             {forecastQ.isLoading && <Skeleton label="loading live forecast…" lines={4} />}
-            {forecastQ.isError && isUpgradeRequiredError(forecastQ.error) && (
-              <TierLockedPanel error={forecastQ.error} feature="Forecast" />
-            )}
-            {(!forecastQ.isError || !isUpgradeRequiredError(forecastQ.error)) && !forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} />}
-            {(!forecastQ.isError || !isUpgradeRequiredError(forecastQ.error)) && !forecastQ.isLoading && !forecast && <ForecastUnavailable detail="live forecast unreachable — no placeholder numbers shown" onRetry={() => void forecastQ.refetch()} />}
+            {!forecastQ.isLoading && forecast && <ForecastCard price={q.price} currency={q.currency ?? null} forecast={forecast} symbol={symbol} horizon={forecastHorizon} onHorizon={setForecastHorizon} />}
+            {!forecastQ.isLoading && !forecast && <ForecastUnavailable detail="live forecast unreachable — no placeholder numbers shown" onRetry={() => void forecastQ.refetch()} />}
           </section>
         )}
         {activeTab === "Analytics" && (
           <section id="brief-tab-Analytics" role="tabpanel" aria-labelledby="brief-tabbtn-Analytics">
-            {analyticsQ.isError && isUpgradeRequiredError(analyticsQ.error) ? (
-              <TierLockedPanel error={analyticsQ.error} feature="Analytics" />
-            ) : (
-              <AnalyticsSnapshot analytics={analytics} loading={analyticsQ.isLoading} failed={analyticsQ.isError} error={analyticsQ.isError ? analyticsQ.error : null} onRetry={() => void analyticsQ.refetch()} />
-            )}
+            <AnalyticsSnapshot analytics={analytics} loading={analyticsQ.isLoading} failed={analyticsQ.isError} error={analyticsQ.isError ? analyticsQ.error : null} onRetry={() => void analyticsQ.refetch()} />
           </section>
         )}
         {activeTab === "Events" && (
@@ -501,10 +460,7 @@ function SecurityBrief({ symbol }) {
           <section id={`brief-tab-${activeTab}`} role="tabpanel" aria-labelledby={`brief-tabbtn-${activeTab}`} className="term-panel min-w-0 p-4" aria-label={`${activeTab} detail`}>
             <h3 className="term-label">{activeTab} · deterministic</h3>
             {analyticsQ.isLoading && <div className="mt-2"><Skeleton label={`loading ${activeTab.toLowerCase()}…`} lines={4} /></div>}
-            {analyticsQ.isError && isUpgradeRequiredError(analyticsQ.error) && (
-              <div className="mt-2"><TierLockedPanel error={analyticsQ.error} feature="Analytics" /></div>
-            )}
-            {analyticsQ.isError && !isUpgradeRequiredError(analyticsQ.error) && (
+            {analyticsQ.isError && (
               <div className="mt-2">
                 <p className="text-xs text-term-amber" role="alert">⚠ analytics endpoint unreachable — snapshot unavailable.</p>
                 <button className="term-btn-ghost mt-2 text-xs" type="button" onClick={() => void analyticsQ.refetch()}>
@@ -522,8 +478,7 @@ function SecurityBrief({ symbol }) {
           <section id="brief-tab-Backtest" role="tabpanel" aria-labelledby="brief-tabbtn-Backtest" className="term-panel min-w-0 p-4" aria-label="Backtest history">
             <h3 className="term-label">Backtest · walk-forward history</h3>
             {backtestQ.isLoading && <div className="mt-2"><Skeleton label="loading backtest history…" lines={3} variant="table" /></div>}
-            {backtestQ.isError && isUpgradeRequiredError(backtestQ.error) && <div className="mt-2"><TierLockedPanel error={backtestQ.error} feature="Backtest" /></div>}
-            {backtestQ.isError && !isUpgradeRequiredError(backtestQ.error) && <div className="mt-2"><ErrorState title="Backtest history unavailable" detail={briefError(backtestQ.error, "backtest endpoint unreachable")} onRetry={() => void backtestQ.refetch()} /></div>}
+            {backtestQ.isError && <div className="mt-2"><ErrorState title="Backtest history unavailable" detail={briefError(backtestQ.error, "backtest endpoint unreachable")} onRetry={() => void backtestQ.refetch()} /></div>}
             {!backtestQ.isLoading && !backtestQ.isError && (backtestQ.data ?? []).length === 0 && (
               <div className="mt-2"><EmptyState title="No backtests yet" detail={`No persisted runs for ${symbol} — run one in the Backtest Lab.`} actionLabel="Open Backtest Lab" onAction={() => window.location.assign(`/backtest?symbol=${enc}`)} /></div>
             )}
@@ -600,6 +555,7 @@ function ForecastCard({ price, currency, forecast: f, symbol, horizon, onHorizon
         <div className="flex flex-wrap items-center gap-2">
           <p className="term-label">{f.horizon_days ?? horizon} DAY FORECAST · math first (AI capped 20%)</p>
           <SourceBadge source="SOURCE: DETERMINISTIC" />
+          <ExperimentalBadge status={f.validation_status} />
         </div>
         <div className="flex items-center gap-1" role="group" aria-label="Forecast horizon">
           {horizons.map((h) => (
@@ -684,27 +640,12 @@ function ForecastCard({ price, currency, forecast: f, symbol, horizon, onHorizon
           </a>
         )}
       </div>
-      {/* Tier-gated stub — always unlocked, no enforcement. */}
-      {!compact && (
-        <div className="mt-2">
-          <DeepResearchStub locked={false} tier="Free" feature="Deep Research" />
-        </div>
-      )}
       <p className="mt-2 text-[11px] text-term-muted">Research starting point, never a guarantee. Not investment advice.</p>
     </div>
   );
 }
 
 function AnalyticsSnapshot({ analytics, loading, failed, onRetry, error = null }) {
-  // PHASE 3: 402 branches BEFORE generic analytics copy.
-  if (failed && isUpgradeRequiredError(error)) {
-    return (
-      <div className="term-panel min-w-0 p-4" aria-labelledby="brief-analytics">
-        <h3 id="brief-analytics" className="term-label">Analytics snapshot · deterministic</h3>
-        <TierLockedPanel error={error} feature="Analytics" />
-      </div>
-    );
-  }
   return (
     <div className="term-panel min-w-0 p-4" aria-labelledby="brief-analytics">
       <h3 id="brief-analytics" className="term-label">Analytics snapshot · deterministic</h3>

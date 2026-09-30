@@ -91,7 +91,15 @@ from backend.forecasting.registry import (
 )
 from backend.market_data.service import MarketDataService
 
-DISCLOSURE = "Not investment advice"
+#: Shown with every forecast. The models have no demonstrated out-of-sample
+#: skill until the scoring cron has matured forecasts to compare against, so
+#: the probabilities are presented as experimental rather than calibrated.
+DISCLOSURE = (
+    "Experimental model output: these probabilities have not been validated "
+    "against realized outcomes unless a skill score is shown. Not investment advice."
+)
+#: Machine-readable twin of the disclosure (UI badges key off this).
+VALIDATION_STATUS = "experimental"
 BAR_LIMIT = 500
 #: ensemble-v3 fixed reliability weights (sum 1.0; renormalized over the
 #: members that actually ran). ML members get 0.22 each (nonlinear + linear
@@ -1441,6 +1449,7 @@ class ForecastService:
             "target_date": target_date,
             "provenance": provenance,
             "disclosure": DISCLOSURE,
+            "validation_status": VALIDATION_STATUS,
             "record": record,
         }
         if as_of is None:
@@ -1956,6 +1965,7 @@ class ForecastService:
                 "target_date": target_date,
                 "provenance": provenance,
                 "disclosure": DISCLOSURE,
+                "validation_status": VALIDATION_STATUS,
                 "record": record,
             }
             if as_of is None:

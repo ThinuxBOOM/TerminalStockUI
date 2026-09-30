@@ -92,6 +92,7 @@ def test_register_validation_422(env):
 def test_registration_can_be_closed(env, monkeypatch):
     client, _, _ = env
     monkeypatch.setenv("ALLOW_REGISTRATION", "false")
+    assert client.get("/api/auth/config").json()["registration_open"] is False
     assert _register(client).status_code == 403
 
 
@@ -172,7 +173,7 @@ def test_refresh_without_cookie_401(env):
 # --- authorization ---------------------------------------------------------------
 
 
-_PUBLIC = {"/", "/health", "/api/auth/register", "/api/auth/login", "/api/auth/refresh"}
+_PUBLIC = {"/", "/health", "/api/auth/config", "/api/auth/register", "/api/auth/login", "/api/auth/refresh"}
 
 
 def test_every_data_route_requires_login(env):

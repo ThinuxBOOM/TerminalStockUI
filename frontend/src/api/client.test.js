@@ -113,8 +113,8 @@ describe("constants and client defaults", () => {
     expect(SCREENER_TIMEOUT_MS).toBe(6e4);
     expect(api.defaults.timeout).toBe(6e4);
   });
-  it("Node default baseURL targets local FastAPI (resolveBaseUrl contract)", () => {
-    expect(api.defaults.baseURL).toBe("http://localhost:8000");
+  it("default baseURL is same-origin (Caddy / vite proxy route /api)", () => {
+    expect(api.defaults.baseURL).toBe("");
   });
 });
 describe("normalizeTargetCcy", () => {

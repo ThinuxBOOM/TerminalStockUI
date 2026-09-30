@@ -1,4 +1,4 @@
-"""Auth routes: register / login / me / refresh / logout.
+"""Auth routes: config / register / login / me / refresh / logout.
 
 - ``POST /api/auth/register`` — normalized email + password >= 10 chars,
   bcrypt hash; 201 + access token + httpOnly refresh cookie. Registration can
@@ -96,6 +96,12 @@ def _auth_response(user: User, request: Request, *, status_code: int) -> JSONRes
 
 def _find_by_email(db: Session, email: str) -> User | None:
     return db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+
+
+@router.get("/config")
+def auth_config() -> dict:
+    """Public login-page settings."""
+    return {"registration_open": registration_open(), "min_password_length": MIN_PASSWORD_LEN}
 
 
 @router.post("/register", status_code=201)

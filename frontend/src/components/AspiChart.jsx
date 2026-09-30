@@ -151,12 +151,12 @@ function IndexLineSvg({ points, ariaSummary, valueLabel = "value", color = null 
 // ProvenanceBadge + FreshnessBadge + MarketStateBadge. No hardcoded prices —
 // every number comes from the bars/quote
 // payloads (or "unavailable" states when they don't).
-function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" }) {
+function AspiChart({ mic, defaultTimeframe = "1d" }) {
   const cfg = benchmarkForMic(mic);
   const [tf, setTf] = useState(ASPI_TIMEFRAMES.includes(defaultTimeframe) ? defaultTimeframe : "1d");
   const series = useQuery({
-    queryKey: aspiCacheKey(cfg?.mic ?? mic, tf, userId, tier),
-    queryFn: ({ signal }) => getAspiSeries(cfg?.mic ?? mic, tf, { userId, tier, signal }),
+    queryKey: aspiCacheKey(cfg?.mic ?? mic, tf),
+    queryFn: ({ signal }) => getAspiSeries(cfg?.mic ?? mic, tf, { signal }),
     retry: false,
     staleTime: 120000,
   });
@@ -283,14 +283,14 @@ function AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" })
 // the liquidity endpoint serves, screener-rank fallback otherwise) +
 // equal-weighted rebased line + native-currency constituents table.
 // No FX ranking anywhere: ordering is within one market only.
-function Top20AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1d" }) {
+function Top20AspiChart({ mic, defaultTimeframe = "1d" }) {
   const cfg = benchmarkForMic(mic);
   const [showLine, setShowLine] = useState(false);
   const [weighting, setWeighting] = useState("equal");
   const [tf, setTf] = useState(ASPI_TIMEFRAMES.includes(defaultTimeframe) ? defaultTimeframe : "1d");
   const constituents = useQuery({
-    queryKey: top20CacheKey(cfg?.mic ?? mic, userId, tier),
-    queryFn: ({ signal }) => getTop20Constituents(cfg?.mic ?? mic, { userId, tier, signal }),
+    queryKey: top20CacheKey(cfg?.mic ?? mic),
+    queryFn: ({ signal }) => getTop20Constituents(cfg?.mic ?? mic, { signal }),
     retry: false,
     staleTime: 120000,
   });
@@ -312,7 +312,7 @@ function Top20AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1
     return any ? out : null;
   }, [rows]);
   const bars = useQuery({
-    queryKey: [...top20CacheKey(cfg?.mic ?? mic, userId, tier), "bars", tf, [...symbols].sort().join(",")],
+    queryKey: [...top20CacheKey(cfg?.mic ?? mic), "bars", tf, [...symbols].sort().join(",")],
     queryFn: ({ signal }) => getTop20Bars(symbols, tf, { signal }),
     enabled: showLine && symbols.length > 0,
     retry: false,
@@ -546,7 +546,7 @@ function Top20AspiChart({ mic, userId = null, tier = null, defaultTimeframe = "1
 // HomePage section wiring all per-market charts. Collapsed by default so six
 // markets × (index bars + liquidity + screener + up to 20 constituent bars)
 // never fire on page load — each chart fetches only when expanded.
-function MarketIndexCard({ mic, userId, tier, defaultOpen = false }) {
+function MarketIndexCard({ mic, defaultOpen = false }) {
   const cfg = ASPI_BENCHMARKS[mic];
   const [showIndex, setShowIndex] = useState(defaultOpen);
   const [showTop20, setShowTop20] = useState(defaultOpen);
@@ -581,12 +581,12 @@ function MarketIndexCard({ mic, userId, tier, defaultOpen = false }) {
       </div>
       {showIndex && (
         <div className="mt-2">
-          <MemoAspiChart mic={mic} userId={userId} tier={tier} />
+          <MemoAspiChart mic={mic} />
         </div>
       )}
       {showTop20 && (
         <div className="mt-2">
-          <MemoTop20AspiChart mic={mic} userId={userId} tier={tier} />
+          <MemoTop20AspiChart mic={mic} />
         </div>
       )}
     </article>
@@ -626,7 +626,7 @@ const MemoDisabledMarketCard = memo(DisabledMarketCard);
 const MemoAspiChart = memo(AspiChart);
 const MemoTop20AspiChart = memo(Top20AspiChart);
 
-function MarketIndicesSection({ userId = null, tier = null }) {
+function MarketIndicesSection() {
   const [all, setAll] = useState(false);
   const [tick, setTick] = useState(0);
   return (
@@ -664,15 +664,13 @@ function MarketIndicesSection({ userId = null, tier = null }) {
       </p>
       <div key={tick} className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {ASPI_MICS.map((mic) => (
-          <MemoMarketIndexCard key={`${mic}-${tick}`} mic={mic} userId={userId} tier={tier} defaultOpen={all} />
+          <MemoMarketIndexCard key={`${mic}-${tick}`} mic={mic} defaultOpen={all} />
         ))}
         {ALL_ASPI_MICS.filter((m) => !ASPI_MICS.includes(m)).map((mic) => (
           <MemoDisabledMarketCard key={`${mic}-${tick}`} mic={mic} />
         ))}
       </div>
-      {/* welcome-page teaser slot: disabled venues render as explicit disabled
-          cards, never as data. Future per-user pinned indices (userId/tier)
-          plug in here — no auth implemented. */}
+      {/* Disabled venues render as explicit disabled cards, never as data. */}
       <p className="mt-2 text-[10px] text-term-muted">
         Benchmarks track their venue only. Top-20 lines are equal-weighted, rebased to 100 — not investment advice.
       </p>

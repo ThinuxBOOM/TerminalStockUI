@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from backend.forecasting.common import FORECAST_HORIZONS
+from backend.forecasting.service import DISCLOSURE as FORECAST_DISCLOSURE
 from backend.forecasting.service import ForecastService, get_forecast_service
 from backend.market_data.provenance import build_provenance
 from backend.security.validation import sanitize_error, validate_symbol
@@ -325,7 +326,7 @@ def calibration_history(
         "history": history,
         "count": len(history),
         "provenance": provenance,
-        "disclosure": "Not investment advice",
+        "disclosure": FORECAST_DISCLOSURE,
     }
 
 

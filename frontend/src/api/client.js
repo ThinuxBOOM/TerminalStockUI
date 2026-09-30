@@ -71,99 +71,51 @@ const HealthSchema = z.object({
   ).optional(),
   provenance: ProvenanceSchema.optional()
 });
-import { resolveApiBaseUrl } from "./baseUrl";
-export { API_BASE_OVERRIDE_KEY, clearApiBaseUrlOverride, resolveApiBaseUrl, resolveApiBaseUrlWithSource, setApiBaseUrlOverride } from "./baseUrl";
-function resolveBaseUrl() {
-  // Thin wrapper kept for backwards compatibility — the real priority chain
-  // (?api= > localStorage > public/config.js > VITE_API_BASE_URL > default)
-  // lives in ./baseUrl so every api module resolves identically.
-  return resolveApiBaseUrl();
-}
-const BASE_URL = resolveBaseUrl();
+import { API_BASE_URL } from "./baseUrl";
 const api = axios.create({
-  baseURL: BASE_URL,
+  baseURL: API_BASE_URL,
   timeout: 6e4,
-  headers: { "Content-Type": "application/json" }
+  headers: { "Content-Type": "application/json" },
+  // Sends the httpOnly refresh cookie on split-origin setups too.
+  withCredentials: true
 });
-// V2 auth wiring (additive only — no existing call path changes).
-// ./auth.js registers the live Bearer source via setAuthTokenProvider (kept
-// behind a setter to avoid a client<->auth import cycle). 401 -> /login,
-// 402 -> `onemarket:upgrade-required` upsell event (UpgradeModal listens).
-// All branches are window-guarded so node/vitest imports never throw.
-let authTokenProvider = null;
-let authErrorHandlers = {};
-function setAuthTokenProvider(fn) {
-  authTokenProvider = typeof fn === "function" ? fn : null;
+// Auth wiring. ./auth.js owns the access token (memory only) and registers
+// these hooks; keeping them behind a setter avoids a client<->auth import
+// cycle. A 401 triggers one silent refresh + retry; if that fails the
+// session is over and the app routes to /login.
+let authHooks = { getToken: () => null, refresh: null, onSessionExpired: null };
+function configureAuth(hooks) {
+  authHooks = { ...authHooks, ...(hooks ?? {}) };
 }
-function setAuthErrorHandlers(h) {
-  authErrorHandlers = h && typeof h === "object" ? h : {};
-}
-function readAuthToken() {
-  try {
-    return authTokenProvider ? authTokenProvider() : null;
-  } catch {
-    return null;
-  }
-}
-function defaultUnauthorized() {
-  try {
-    if (typeof window !== "undefined" && window.location) {
-      const path = window.location.pathname || "";
-      if (path.startsWith("/login")) return;
-      // Same guest guard as auth.js: no token -> no force redirect.
-      if (!readAuthToken()) return;
-      window.location.assign("/login");
-    }
-  } catch {
-    // never throw out of an interceptor
-  }
-}
-function defaultUpgradeRequired(err) {
-  try {
-    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-      let detail = null;
-      try {
-        detail = err?.response?.data ?? null;
-      } catch {
-        detail = null;
-      }
-      window.dispatchEvent(
-        new CustomEvent("onemarket:upgrade-required", { detail })
-      );
-    }
-  } catch {
-    // never throw out of an interceptor
-  }
-}
+const AUTH_ENDPOINT = /\/api\/auth\/(login|register|refresh|logout|config)$/;
 api.interceptors.request.use((config) => {
-  try {
-    const token = readAuthToken();
-    if (typeof token === "string" && token !== "") {
-      config.headers = config.headers ?? {};
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-  } catch {
-    // auth must never break a request
+  const token = authHooks.getToken?.();
+  if (typeof token === "string" && token !== "") {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
 api.interceptors.response.use(
   (response) => response,
-  (err) => {
-    try {
-      const status = err?.response?.status;
-      if (status === 401) {
-        const fn = authErrorHandlers.onUnauthorized;
-        if (typeof fn === "function") fn(err);
-        else defaultUnauthorized();
-      } else if (status === 402) {
-        const fn = authErrorHandlers.onUpgradeRequired;
-        if (typeof fn === "function") fn(err);
-        else defaultUpgradeRequired(err);
-      }
-    } catch {
-      // error routing must never mask the original failure
+  async (err) => {
+    const cfg = err?.config;
+    if (err?.response?.status !== 401 || !cfg || cfg.__authRetried || AUTH_ENDPOINT.test(cfg.url ?? "")) {
+      return Promise.reject(err);
     }
+    let token = null;
+    try {
+      token = typeof authHooks.refresh === "function" ? await authHooks.refresh() : null;
+    } catch {
+      token = null;
+    }
+    if (token) {
+      cfg.__authRetried = true;
+      cfg.headers = cfg.headers ?? {};
+      cfg.headers.Authorization = `Bearer ${token}`;
+      return api.request(cfg);
+    }
+    authHooks.onSessionExpired?.();
     return Promise.reject(err);
   }
 );
@@ -179,41 +131,10 @@ function isEndpointMissingError(err) {
   const s = httpStatus(err);
   return s === 404 || s === 501;
 }
-// PHASE 3: persistent tier-locked UI. 402 = backend require_tier denial.
-// Must stay a pure httpStatus check so callers can branch BEFORE generic
-// ErrorState without affecting 423/502/404 handling. Never throws.
-function isUpgradeRequiredError(err) {
-  try {
-    return httpStatus(err) === 402;
-  } catch {
-    return false;
-  }
-}
-// Normalize a 402 payload into panel copy. Backend sends
-// { upgrade_required, min_tier, tier, message/detail/feature }.
-// Returns { minTier, feature, tier } — tier is the caller's current tier
-// when the backend echoes it, else null (caller falls back to useAuth).
-// Never throws; always returns display-safe strings.
-function upgradeInfoFromError(err, fallbackFeature = "This feature") {
-  const fallback = String(fallbackFeature ?? "This feature") || "This feature";
-  try {
-    const data = err?.response?.data;
-    const obj = data && typeof data === "object" ? data : {};
-    const minTierRaw = obj.min_tier ?? obj.minTier ?? "silver";
-    const featureRaw = obj.feature ?? obj.message ?? obj.detail ?? fallback;
-    const tierRaw = obj.tier ?? obj.current_tier ?? obj.currentTier ?? null;
-    const minTier = String(minTierRaw ?? "silver").trim() || "silver";
-    const featureStr = String(featureRaw ?? fallback).trim() || fallback;
-    const tier = tierRaw === null || tierRaw === undefined || tierRaw === "" ? null : String(tierRaw).trim() || null;
-    return { minTier, feature: featureStr, tier };
-  } catch {
-    return { minTier: "silver", feature: fallback, tier: null };
-  }
-}
 // Shared backend-detail extractor: prefers the FastAPI {detail} payload over
-// the generic axios message, so 502s render the throttle/warmup hint instead
-// of "Request failed with status code 502". Gateway HTML (Vercel cold
-// start/timeout, no JSON) and timeouts get friendly text. Never throws.
+// the generic axios message, so 502s render the backend's reason instead of
+// "Request failed with status code 502". Proxy HTML error pages and timeouts
+// get friendly text. Never throws.
 function extractBackendDetail(err, fallback = "request failed") {
   const e = err;
   const status = httpStatus(e);
@@ -222,7 +143,7 @@ function extractBackendDetail(err, fallback = "request failed") {
     if (typeof data === "string" && data.trim() !== "") {
       const t = data.trim();
       if (t.startsWith("<") || t.length > 2000) {
-        return `Gateway ${status ?? "error"} (cold start/timeout) — retry; warm cache makes repeats fast`;
+        return `Gateway ${status ?? "error"} — the backend did not answer; retry shortly`;
       }
       return t.slice(0, 300);
     }
@@ -240,7 +161,7 @@ function extractBackendDetail(err, fallback = "request failed") {
     // fall through to message below
   }
   if (e?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(String(e?.message ?? ""))) {
-    return "Request timed out (cold start) — retry; warm cache makes repeats fast";
+    return "Request timed out — retry; repeated requests are served from cache";
   }
   if (e instanceof Error && e.message) return e.message;
   if (typeof e?.message === "string" && e.message) return e.message;
@@ -494,17 +415,6 @@ const AI_PROFILES = [
   "Forecast Assist",
   "Report"
 ];
-// Tier-gated UI mapping (future-proof stub — NOT enforced).
-// Free -> Deep Research locked; Silver -> Deep Research unlocked, Report locked;
-// Gold -> all unlocked, higher limits; Platinum -> all unlocked + priority.
-// UI must always render with `locked=false` for now (no gating).
-const PLAN_TIERS = ["Free", "Silver", "Gold", "Platinum"];
-const TIER_FEATURES = {
-  "Deep Research": { minTier: "Silver", lockedIcon: "🔒" },
-  Report: { minTier: "Silver", lockedIcon: "🔒" },
-  "Quick Insight": { minTier: "Free", lockedIcon: "🔒" },
-  "Forecast Assist": { minTier: "Free", lockedIcon: "🔒" }
-};
 const FORECAST_HORIZONS = [1, 7, 14, 21];
 function normalizeProvenance(raw, sourceFallback) {
   const r = raw ?? {};
@@ -554,6 +464,7 @@ const ForecastSchema = z.object({
   label: z.string().optional().default(""),
   probability: z.number().min(0).max(1),
   confidence: z.string().optional().default("Unknown"),
+  validation_status: z.string().optional().default("experimental"),
   quality_grade: z.string().optional().default("U"),
   provider: z.string().optional().default("deterministic-engine"),
   why: z.array(z.string()).optional().default([]),
@@ -676,6 +587,7 @@ function normalizeForecast(raw, symbol, horizon) {
     formulas: r.formulas ?? void 0,
     // Disclosure rendered verbatim by the UI — never rewritten client-side.
     disclosure: r.disclosure,
+    validation_status: typeof r.validation_status === "string" ? r.validation_status : "experimental",
     provenance: normalizeProvenance(r, "forecast-api")
   };
   return ForecastSchema.parse(candidate);
@@ -1896,6 +1808,6 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
     }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, httpStatus, isEndpointMissingError, isFreshFxProvenance, isFxProvenanceMissingError, isUpgradeRequiredError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, setAuthErrorHandlers, setAuthTokenProvider, testProviderHealth, upgradeInfoFromError };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, httpStatus, isEndpointMissingError, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, configureAuth, testProviderHealth };
 
-export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };
+export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };

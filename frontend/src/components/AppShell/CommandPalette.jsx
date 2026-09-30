@@ -21,7 +21,6 @@ const PAGES = [
   { label: "Data Health", hint: "Is the data fresh?", to: "/providers" },
   { label: "Security Brief (AAPL)", hint: "Example deep dive", to: "/security/AAPL" },
   { label: "Forecast (AAPL)", hint: "Example outlook", to: "/forecast/AAPL" },
-  { label: "Pricing", hint: "Plans and upgrades", to: "/pricing" },
   { label: "Account", hint: "Account and session", to: "/account" },
 ];
 
