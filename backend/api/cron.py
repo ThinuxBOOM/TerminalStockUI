@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from backend import settings
 from backend.api.deps import get_market_service, get_registry
 from backend.forecasting.service import ForecastService, get_forecast_service
 from backend.instruments.registry import InstrumentRegistry
@@ -78,42 +79,21 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _cron_secret() -> str:
-    return (os.getenv("CRON_SECRET", "") or "").strip()
-
-
 def _check_cron_auth(request: Request) -> None:
-    """Enforce Bearer auth iff CRON_SECRET is set; 401 otherwise.
+    """Require ``Authorization: Bearer <CRON_SECRET>`` (constant-time compare).
 
-    Fail-closed in production: missing CRON_SECRET with APP_ENV=production
-    refuses cron writes instead of serving them open. The secret value
-    itself is never logged.
-
-    Vercel Cron sends plain GET with no Authorization header (no per-cron
-    headers), so a Vercel-cron request (x-vercel-cron: 1 / vercel-cron
-    user-agent) is accepted as scheduler-originated. Spoofing the header
-    from outside still hits the nightly universe only (idempotent upserts,
-    no destructive path) — and production without CRON_SECRET stays 401.
+    The only unauthenticated mode is a development/test process with no
+    CRON_SECRET configured. No header, user agent or source address is ever
+    trusted in place of the secret.
     """
-    import os as _os
-
-    secret = _cron_secret()
+    secret = settings.cron_secret()
     if not secret:
-        env = (_os.getenv("APP_ENV", "") or "").strip().lower()
-        if env in ("production", "prod"):
-            logger.warning("cron refused: CRON_SECRET unset in production")
+        if settings.is_production():
+            logger.warning("cron refused: CRON_SECRET unset")
             raise HTTPException(status_code=401, detail="unauthorized")
-        return  # local dev: open
-    provided = request.headers.get("authorization", "") or ""
-    if hmac.compare_digest(f"Bearer {secret}", provided):
         return
-    # Vercel Cron scheduler origin (plain GET, no custom headers possible).
-    try:
-        vc = (request.headers.get("x-vercel-cron", "") or "").strip()
-        ua = (request.headers.get("user-agent", "") or "").lower()
-    except Exception:
-        vc, ua = "", ""
-    if vc == "1" or "vercel-cron" in ua:
+    provided = request.headers.get("authorization", "") or ""
+    if hmac.compare_digest(f"Bearer {secret}".encode(), provided.encode()):
         return
     logger.warning("cron auth rejected")
     raise HTTPException(status_code=401, detail="unauthorized")
@@ -302,7 +282,7 @@ def _run_calibrate(
     ``unscored`` counts written rows with zero windows (thin history:
     honest NULL metrics, not skill) plus weak n<10 rows.
     """
-    from backend.db.session import get_session_factory, init_db
+    from backend.db.session import get_session_factory, ensure_schema
     from backend.forecasting.calibration.snapshots import (
         build_snapshot,
         upsert_snapshot,
@@ -326,7 +306,7 @@ def _run_calibrate(
             "provenance": _cron_provenance(False),
         }
     try:
-        init_db()
+        ensure_schema()
         Session = get_session_factory()
         db = Session()
     except Exception:
@@ -507,10 +487,10 @@ def _run_evaluate(market: MarketDataService, forecast: ForecastService) -> dict:
     """
     from backend.api.alerts import DISCLOSURE as _ALERTS_DISCLOSURE
     from backend.api.alerts import evaluate_due_alerts
-    from backend.db.session import get_session_factory, init_db
+    from backend.db.session import get_session_factory, ensure_schema
 
     try:
-        init_db()
+        ensure_schema()
         Session = get_session_factory()
         db = Session()
     except Exception:
@@ -638,7 +618,7 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
     import time as _time
     from concurrent.futures import ThreadPoolExecutor as _TPE
 
-    from backend.db.session import get_session_factory, init_db
+    from backend.db.session import get_session_factory, ensure_schema
     from backend.workers.jobs import capture_snapshot
 
     wanted = _normalize_symbols(symbols)
@@ -647,7 +627,7 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
         return {"ok": True, "snapshots": {}, "errors": {},
                 "provenance": _cron_provenance(False)}
     try:
-        init_db()
+        ensure_schema()
     except Exception:
         pass
     try:
@@ -763,12 +743,12 @@ def _run_snapshot(symbols: list[str], timeframe: str = "1d") -> dict:
 
 def _run_score(symbols: list[str]) -> dict:
     """Score matured forecasts point-in-time (batch never 500s)."""
-    from backend.db.session import get_session_factory, init_db
+    from backend.db.session import get_session_factory, ensure_schema
     from backend.workers.jobs import score_forecasts
 
     wanted = _normalize_symbols(symbols)
     try:
-        init_db()
+        ensure_schema()
         Session = get_session_factory()
         db = Session()
     except Exception:
@@ -878,32 +858,22 @@ def cron_score_post(request: Request, body: ScoreRequest) -> dict:
 
 
 class RetentionRequest(BaseModel):
+    """Retention windows are operator config (RETENTION_*_DAYS env), never
+    request input: an HTTP caller can trigger the scheduled purge but cannot
+    shorten what it deletes."""
+
+    model_config = {"extra": "forbid"}
+
     apply: bool = Field(default=False, description="Delete expired rows when true")
-    retention_days: dict[str, int] | None = Field(
-        default=None, description="Optional per-dataset day overrides")
-
-
-def _sanitize_retention_overrides(raw: object) -> dict[str, int] | None:
-    if not isinstance(raw, dict) or not raw:
-        return None
-    out: dict[str, int] = {}
-    for key, value in raw.items():
-        try:
-            if not isinstance(key, str) or not key.strip():
-                continue
-            out[key.strip()] = int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            continue
-    return out or None
 
 
 def _run_retention(*, apply: bool, overrides: dict[str, int] | None) -> dict:
     """Dry-run report or guarded purge (batch never 500s)."""
-    from backend.db.session import get_session_factory, init_db
+    from backend.db.session import get_session_factory, ensure_schema
     from backend.observability import retention as retention_module
 
     try:
-        init_db()
+        ensure_schema()
         Session = get_session_factory()
         db = Session()
     except Exception:
@@ -973,10 +943,7 @@ def cron_retention_post(request: Request, body: RetentionRequest) -> dict:
     """Purge ONLY with ``{"apply": true}``; otherwise a dry-run report."""
     _check_cron_auth(request)
     try:
-        return _run_retention(
-            apply=bool(body.apply),
-            overrides=_sanitize_retention_overrides(body.retention_days),
-        )
+        return _run_retention(apply=bool(body.apply), overrides=None)
     except HTTPException:
         raise
     except Exception:

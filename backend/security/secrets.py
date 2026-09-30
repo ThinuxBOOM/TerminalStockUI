@@ -1,30 +1,21 @@
-"""Secrets: encrypted-at-rest stub using Fernet.
+"""Secrets: Fernet encryption at rest + redaction helpers.
 
-- Key from SECRET_KEY env (base64 urlsafe 32B) or ephemeral generated key.
+- Key derived from SECRET_KEY (see :func:`_load_key`).
 - Encrypt on write, decrypt only at call time, never return via API.
-- Redaction helpers for logs / audit payloads (tested in test_security.py).
+- Redaction helpers for logs / audit payloads.
 """
 
 from __future__ import annotations
 
 import base64
-import os
+import hashlib
 import re
 
 from cryptography.fernet import Fernet, InvalidToken
 
-REDACTED = "[REDACTED]"
+from backend import settings
 
-#: Placeholder values that must never be used outside local dev. When
-#: SECRET_KEY equals one of these (or is empty and falls back to an
-#: ephemeral key), encryption still works but ciphertext cannot survive
-#: restarts — callers should warn loudly in production.
-DEFAULT_SECRET_VALUES = frozenset({
-    "",
-    "change-me",
-    "change-me-generate-with-openssl-rand-hex-32",
-    "test-only-secret-key-for-unit-tests-123",
-})
+REDACTED = "[REDACTED]"
 
 # Keys that must never appear in plaintext in logs / audit payloads.
 _SENSITIVE_KEYS = ("api_key", "apikey", "secret", "token", "password", "authorization", "cookie", "set-cookie")
@@ -33,83 +24,22 @@ _SENSITIVE_RE = re.compile(
 )
 
 
-_WEAK_KEY_MARKERS = ("change-me", "test-only", "example", "placeholder", "secret")
-
-
-def _is_weak_key(raw: str) -> bool:
-    try:
-        lowered = str(raw or "").strip().lower()
-    except Exception:
-        return True
-    if len(str(raw or "")) < 32:
-        return True
-    return any(marker in lowered for marker in _WEAK_KEY_MARKERS)
-
-
-def assert_secret_strength(*, app_env: str | None = None) -> None:
-    """Fail loudly in production on weak/ephemeral SECRET_KEY.
-
-    Weak keys previously hashed silently into Fernet (false security) and
-    an unset key generated an ephemeral per-process key (restarts invalidate
-    all provider_secrets ciphertext). Production refuses both; dev/test
-    keep the old behavior for offline runs.
-    """
-    import os as _os
-
-    env = (app_env or _os.getenv("APP_ENV", "") or "").strip().lower()
-    if env not in ("production", "prod"):
-        return
-    raw = _os.getenv("SECRET_KEY", "") or ""
-    if not raw or _is_weak_key(raw):
-        raise RuntimeError(
-            "SECRET_KEY is missing or weak in production: set a 32+ char "
-            "random SECRET_KEY (rotation invalidates stored provider_secrets)"
-        )
-
-
 def _load_key() -> bytes:
-    raw = os.getenv("SECRET_KEY", "")
-    if raw:
-        candidate = raw.encode()
-        try:  # accept raw 32 bytes or base64 forms
-            if len(base64.urlsafe_b64decode(candidate + b"=" * (-len(candidate) % 4))) == 32:
-                return base64.urlsafe_b64encode(
-                    base64.urlsafe_b64decode(candidate + b"=" * (-len(candidate) % 4))
-                )
-        except Exception:
-            pass
-        digest = __import__("hashlib").sha256(raw.encode()).digest()
-        return base64.urlsafe_b64encode(digest)
-    return Fernet.generate_key()
+    """Fernet key derived from SECRET_KEY.
 
-
-def is_default_secret_key() -> bool:
-    """True when SECRET_KEY is missing/placeholder (dev-only posture)."""
-    try:
-        raw = (os.getenv("SECRET_KEY", "") or "").strip()
-    except Exception:
-        return True
-    return raw in DEFAULT_SECRET_VALUES
-
-
-def warn_if_default_secret_key(logger_name: str = "onemarket.security") -> bool:
-    """Log an ERROR in production when SECRET_KEY is a placeholder.
-
-    Returns True when the key is a default/placeholder. Never logs the key.
+    A SECRET_KEY that is itself a urlsafe-base64 32-byte key is used as-is;
+    anything else is hashed with SHA-256. The derivation must stay stable:
+    changing it (or rotating SECRET_KEY) makes every stored provider_secrets
+    row undecryptable — re-enter the keys after a rotation.
     """
-    if not is_default_secret_key():
-        return False
+    raw = settings.secret_key().encode()
     try:
-        import logging as _logging
-
-        _logging.getLogger(logger_name).error(
-            "SECRET_KEY is missing or a placeholder — generate one with "
-            "`openssl rand -hex 32` and set it via the SECRET_KEY env var. "
-            "Ciphertext from ephemeral keys cannot survive restarts."
-        )
-    except Exception:
+        decoded = base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4))
+        if len(decoded) == 32:
+            return base64.urlsafe_b64encode(decoded)
+    except ValueError:
         pass
-    return True
+    return base64.urlsafe_b64encode(hashlib.sha256(raw).digest())
 
 
 _fernet: Fernet | None = None

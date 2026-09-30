@@ -102,7 +102,7 @@ def test_analytics_has_disclosure_and_provenance():
     app = FastAPI()
     app.include_router(analytics_router)
     inject_admin_auth(app)
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         body = client.get("/api/analytics/AAPL").json()
         assert PROVENANCE_KEYS <= set(body["provenance"])
@@ -118,7 +118,7 @@ def test_backtest_run_and_history_have_disclosure():
     app = FastAPI()
     app.include_router(backtest_router)
     inject_admin_auth(app)
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         run = client.post(
             "/api/backtest/run",
@@ -164,7 +164,7 @@ def test_audit_ai_decisions_has_disclosure(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = _override
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         resp = client.get("/api/audit/ai_decisions")
         assert resp.status_code == 200, resp.text
@@ -198,7 +198,7 @@ def _screener_client(svc=None, registry=None) -> TestClient:
     app.dependency_overrides[get_market_service] = lambda: stub
     app.dependency_overrides[get_registry] = lambda: reg
     inject_admin_auth(app)
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def test_screener_outage_is_honest_empty_not_flagged():
@@ -292,7 +292,7 @@ def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
     app.include_router(fxapi.router)
     app.dependency_overrides[fxapi.get_fx_provider] = lambda: live_fx
     app.dependency_overrides[get_market_service] = _live_service
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         resp = client.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
@@ -314,7 +314,7 @@ def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
     app2.include_router(fxapi.router)
     app2.dependency_overrides[fxapi.get_fx_provider] = lambda: stub_fx
     app2.dependency_overrides[get_market_service] = _live_service
-    client2 = TestClient(app2)
+    client2 = TestClient(inject_admin_auth(app2))
     try:
         resp2 = client2.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
@@ -333,7 +333,7 @@ def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
     app3.include_router(fxapi.router)
     app3.dependency_overrides[fxapi.get_fx_provider] = lambda: stale_fx
     app3.dependency_overrides[get_market_service] = _live_service
-    client3 = TestClient(app3)
+    client3 = TestClient(inject_admin_auth(app3))
     try:
         resp3 = client3.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",

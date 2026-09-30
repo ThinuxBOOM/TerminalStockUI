@@ -22,8 +22,9 @@ from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
 from backend.market_data.service import MarketDataService
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/signals", tags=["signals"])
+router = APIRouter(prefix="/api/signals", tags=["signals"], dependencies=[Depends(get_current_user)])
 
 DISCLOSURE = "Not investment advice. For informational purposes only."
 _CACHE_TTL_S = 60

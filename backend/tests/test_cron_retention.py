@@ -137,11 +137,8 @@ def test_retention_post_apply_deletes_only_expired(isolated_db):
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] is False
         assert _counts(isolated_db) == (2, 3)
-        # apply=true deletes the expired rows, keeps fresh ones
-        # (unknown override keys are ignored).
-        resp = client.post("/api/cron/retention",
-                           json={"apply": True,
-                                 "retention_days": {"nope": 1}})
+        # apply=true deletes the expired rows, keeps fresh ones.
+        resp = client.post("/api/cron/retention", json={"apply": True})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["deleted"] is True
@@ -170,11 +167,15 @@ def test_retention_auth(isolated_db, monkeypatch):
         assert client.get("/api/cron/retention").status_code == 401
         assert client.post("/api/cron/retention",
                            json={"apply": False}).status_code == 401
-        # Non-integer overrides are a strict 422 (fail-closed input contract).
+        # Retention windows are operator config, never request input.
         bad = client.post("/api/cron/retention",
-                          json={"apply": True, "retention_days": {"bars": "bogus"}},
+                          json={"apply": True, "retention_days": {"bars": 0}},
                           headers={"Authorization": "Bearer s3cr3t"})
         assert bad.status_code == 422
+        # No header other than the Bearer secret is ever trusted.
+        for spoof in ({"User-Agent": "vercel-cron/1.0"}, {"x-vercel-cron": "1"}):
+            assert client.post("/api/cron/retention", json={"apply": True},
+                               headers=spoof).status_code == 401
         headers = {"Authorization": "Bearer s3cr3t"}
         assert client.get("/api/cron/retention",
                           headers=headers).status_code == 200
@@ -184,3 +185,11 @@ def test_retention_auth(isolated_db, monkeypatch):
         assert resp.json()["deleted"] is False
     finally:
         _teardown()
+
+
+def test_retention_floor_blocks_zero_and_negative_windows():
+    from backend.observability.retention import MIN_RETENTION_DAYS, get_retention_days
+
+    days = get_retention_days({"bars": 0, "audit": -5})
+    assert days["bars"] == MIN_RETENTION_DAYS
+    assert days["audit"] == MIN_RETENTION_DAYS

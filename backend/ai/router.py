@@ -16,7 +16,7 @@
   comparison dashboard (spec M5: track by exchange and horizon).
 
 Future billing stubs (NOT enforced yet):
-- get_insight() accepts user_tier / call_type / token_credits and logs them.
+- get_insight() accepts call_type / user_id and logs them.
   Planned mapping (enforce later, not today):
     Free:     20/day, Quick Insight only, no Deep Research, no Grok.
     Silver:   1000 Quick + 400 Forecast Assist + 100 Deep/Report per month.
@@ -200,9 +200,7 @@ class TokenLedger:
         completion_tokens: int = 0,
         cached: bool = False,
         stub: bool = False,
-        user_tier: str | None = None,
         call_type: str | None = None,
-        token_credits: int | None = None,
     ) -> dict[str, Any]:
         entry = {
             "provider": str(provider or "unknown"),
@@ -213,10 +211,7 @@ class TokenLedger:
             "total_tokens": max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0)),
             "cached": bool(cached),
             "stub": bool(stub),
-            # Tier stubs: logged for future quota checks, never gated today.
-            "user_tier": (str(user_tier).strip().lower() if user_tier else None),
             "call_type": (str(call_type).strip()[:64] if call_type else None),
-            "token_credits": token_credits if isinstance(token_credits, int) else None,
             "ts": time.time(),
         }
         self._entries.append(entry)
@@ -446,28 +441,11 @@ class AIRouter:
     def cache_key(
         self, profile: str, packet: EvidencePacket, horizon: int | None,
         provider: str, model: str,
-        user_id: object = None, tier: object = None,
     ) -> str:
-        """User-scoped key: u:{id}:t:{tier}: prefix prevents cross-tier poisoning.
-
-        Different tiers may see different models/quotas for the same evidence;
-        without the prefix a free-tier cached opinion could leak to platinum
-        (or vice versa). user_id/tier come from the verified JWT user only.
-        """
+        """Opinion cache key. Opinions depend only on the evidence, profile,
+        horizon and model, never on who asked, so every user shares one entry."""
         horizon_part = str(horizon) if horizon in (1, 7, 14, 21) else "-"
-        try:
-            uid = str(user_id).strip() if user_id else "anon"
-            if not uid:
-                uid = "anon"
-        except Exception:
-            uid = "anon"
-        try:
-            from backend.auth.tiers import normalize_tier as _nt
-
-            t = _nt(str(tier) if tier else None)
-        except Exception:
-            t = "free"
-        return f"u:{uid}:t:{t}:{profile}:{provider}:{model}:{packet.evidence_hash}:{horizon_part}"
+        return f"{profile}:{provider}:{model}:{packet.evidence_hash}:{horizon_part}"
 
     def clear_cache(self) -> None:
         # Evict this router's known keys from BOTH layers: get_insight reads
@@ -561,9 +539,7 @@ class AIRouter:
         horizon: int | None = None,
         timeout_s: float | None = None,
         # --- V2: verified identity for user-scoped cache + ledger ---
-        user_tier: str | None = None,
         call_type: str | None = None,
-        token_credits: int | None = None,
         user_id: Any = None,
     ) -> tuple[AIOpinion, bool]:
         """Return (opinion, cached). Malformed provider output degrades to a
@@ -582,12 +558,12 @@ class AIRouter:
             # Respect the profile map without mutating shared instances.
             provider = _with_model(provider, model)
 
-        cache_hit_key = self.cache_key(key, packet, horizon, provider_name, provider.model, user_id=user_id, tier=user_tier)
+        cache_hit_key = self.cache_key(key, packet, horizon, provider_name, provider.model)
         cached = self._cache_get(cache_hit_key)
         if cached is not None:
             self._log_tokens(
                 key, provider_name, provider.model, packet, cached, True, 0.0,
-                user_tier=user_tier, call_type=call_type, token_credits=token_credits,
+                call_type=call_type,
             )
             return cached, True
 
@@ -603,8 +579,7 @@ class AIRouter:
                         packet, profile=key, horizon=horizon,
                         provider_name=provider_name, provider=provider,
                         limits=limits, timeout_override=timeout_s,
-                        user_tier=user_tier, call_type=call_type,
-                        token_credits=token_credits, user_id=user_id,
+                        call_type=call_type, user_id=user_id,
                     )
                 )
                 self._inflight[cache_hit_key] = task
@@ -627,7 +602,7 @@ class AIRouter:
             self._log_tokens(
                 key, provider_name, provider.model, packet, opinion, False,
                 latency_ms, coalesced=True,
-                user_tier=user_tier, call_type=call_type, token_credits=token_credits,
+                call_type=call_type,
             )
         return opinion, False
 
@@ -638,9 +613,7 @@ class AIRouter:
         profile: str = "quick_insight",
         horizon: int | None = None,
         max_concurrency: int = 8,
-        user_tier: str | None = None,
         call_type: str | None = None,
-        token_credits: int | None = None,
         user_id: Any = None,
     ) -> list[tuple[AIOpinion, bool]]:
         """Batch helper: concurrent get_insight calls behind a semaphore.
@@ -655,8 +628,7 @@ class AIRouter:
             async with semaphore:
                 return await self.get_insight(
                     packet, profile=key, horizon=horizon,
-                    user_tier=user_tier, call_type=call_type,
-                    token_credits=token_credits, user_id=user_id,
+                    call_type=call_type, user_id=user_id,
                 )
 
         return list(await asyncio.gather(*(_one(packet) for packet in packets)))
@@ -671,16 +643,14 @@ class AIRouter:
         provider: BaseProvider,
         limits: dict[str, Any],
         timeout_override: float | None = None,
-        user_tier: str | None = None,
         call_type: str | None = None,
-        token_credits: int | None = None,
         user_id: Any = None,
     ) -> tuple[AIOpinion, float, bool]:
         """Single-flight provider call with timeout/retry/breaker. Returns
         (opinion, latency_ms, coalesced=False). Never raises for provider
         failures (ValueError/TypeError contract errors still propagate)."""
         breaker = self.breaker_for(provider_name)
-        cache_hit_key = self.cache_key(profile, packet, horizon, provider_name, provider.model, user_id=user_id, tier=user_tier)
+        cache_hit_key = self.cache_key(profile, packet, horizon, provider_name, provider.model)
         try:
             effective_timeout = float(timeout_override if timeout_override else limits.get("timeout_s", 60.0))
         except (TypeError, ValueError):
@@ -714,7 +684,7 @@ class AIRouter:
             self._log_tokens(
                 profile, provider_name, provider.model, packet, opinion,
                 False, 0.0, breaker_state=breaker.state,
-                user_tier=user_tier, call_type=call_type, token_credits=token_credits,
+                call_type=call_type,
             )
             self._cache_put(cache_hit_key, opinion, profile)
             return opinion, 0.0, False
@@ -818,7 +788,7 @@ class AIRouter:
             profile, provider_name, provider.model, packet, opinion,
             False, latency_ms, timeout_s=effective_timeout,
             retries=max_retries, breaker_state=breaker.state,
-            user_tier=user_tier, call_type=call_type, token_credits=token_credits,
+            call_type=call_type,
             usage=real_usage,
         )
 
@@ -833,9 +803,7 @@ class AIRouter:
         timeout_s: float | None = None,
         retries: int | None = None,
         breaker_state: str | None = None,
-        user_tier: str | None = None,
         call_type: str | None = None,
-        token_credits: int | None = None,
         usage: dict[str, int] | None = None,
     ) -> None:
         # Redacted by construction: packet/opinion never carry secrets.
@@ -893,13 +861,8 @@ class AIRouter:
             entry["retries"] = retries
         if breaker_state is not None:
             entry["breaker"] = breaker_state
-        # Tier stubs: logged for future quota/billing work, never gated.
-        if user_tier is not None:
-            entry["user_tier"] = str(user_tier).strip().lower()[:32]
         if call_type is not None:
             entry["call_type"] = str(call_type).strip()[:64]
-        if token_credits is not None:
-            entry["token_credits"] = token_credits
         self.token_log.append(entry)
         if len(self.token_log) > 2000:
             del self.token_log[: len(self.token_log) - 2000]
@@ -909,8 +872,7 @@ class AIRouter:
                 prompt_tokens=0 if cached or coalesced else prompt_tokens,
                 completion_tokens=0 if cached or coalesced else completion_tokens,
                 cached=cached or coalesced, stub=bool(opinion.stub),
-                user_tier=user_tier, call_type=call_type,
-                token_credits=token_credits,
+                call_type=call_type,
             )
         except Exception:
             pass

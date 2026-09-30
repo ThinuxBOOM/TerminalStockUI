@@ -18,6 +18,7 @@ from backend.instruments.calendars import (
 )
 from backend.instruments.registry import InstrumentRegistry
 from backend.instruments.search import search_instruments
+from backend.tests.auth_helpers import inject_admin_auth
 
 
 def _registry() -> InstrumentRegistry:
@@ -92,7 +93,7 @@ def test_resolve_unknown_returns_none():
 
 def test_search_http_exact_first():
     reset_deps()
-    client = TestClient(create_app())
+    client = TestClient(inject_admin_auth(create_app()))
     body = client.get("/api/instruments/search", params={"q": "AAP"}).json()
     assert body["results"][0]["exchange_symbol"] == "AAP"
     body = client.get("/api/instruments/search", params={"q": "600519.SS"}).json()
@@ -103,7 +104,7 @@ def test_search_http_exact_first():
 
 def test_search_market_filter_and_empty():
     reset_deps()
-    client = TestClient(create_app())
+    client = TestClient(inject_admin_auth(create_app()))
     body = client.get("/api/instruments/search", params={"q": "A", "market": "XSHG"}).json()
     assert body["results"] and all(r["exchange_mic"] == "XSHG" for r in body["results"])
     assert client.get("/api/instruments/search", params={"q": "A", "market": "NOPE"}).status_code == 422

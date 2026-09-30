@@ -15,7 +15,6 @@ Covers:
   full outage preserves yfinance fallback; SSE/Euronext never
   touch the US-only free providers; short-circuit (one live feed, one call)
   (stooq/akshare dropped: not in the chain anymore)
-- Future tier hooks: user_id/tier accepted and inert
 - Package exports + dashboard rows
 """
 
@@ -660,17 +659,6 @@ def test_service_chain_short_circuits_new_providers_on_yfinance_live(isolated_db
     assert out["provenance"]["source"] == "yfinance"
     assert calls == []
 
-
-def test_service_tier_params_accepted_and_inert(isolated_db):
-    """Future per-user tier routing hooks: accepted, no behavior change today."""
-    yf = YFinanceProvider(stub_mode=False)
-    yf._fetch_raw = _live_yf_raw  # type: ignore[method-assign]
-    svc = MarketDataService(provider=yf, cache=None)
-    out = svc.get_quote("AAPL", user_id="user-123", tier="Silver")
-    assert out["provenance"]["source"] == "yfinance"
-    assert out["provenance"]["fallback_used"] is False
-    many = svc.get_quotes_many(["AAPL"], user_id="user-123", tier="Free")
-    assert set(many) == {"AAPL"}
 
 
 def test_service_breaker_isolation_across_four_providers():

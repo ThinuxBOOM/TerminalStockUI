@@ -813,14 +813,14 @@ def ingest_symbols(
         return {}, {}
     fetch = fetch_fn if fetch_fn is not None else fetch_daily_bars_with_fallback
 
-    from backend.db.session import get_session_factory, init_db
+    from backend.db.session import get_session_factory, ensure_schema
 
     try:
         if db_url is not None:
-            init_db(db_url)
+            ensure_schema(db_url)
             Session = get_session_factory(db_url)
         else:
-            init_db()
+            ensure_schema()
             Session = get_session_factory()
         db = Session()
     except Exception:

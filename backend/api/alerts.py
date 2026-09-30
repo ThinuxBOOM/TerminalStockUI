@@ -39,59 +39,22 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import String as SAString
-from sqlalchemy import cast
 from sqlalchemy.orm import Session
 
 from backend.api.deps import get_market_service, get_registry
-from backend.db.models import Alert, AlertEvent
+from backend.db.models import Alert, AlertEvent, User
 from backend.db.session import get_db
 from backend.forecasting.common import FORECAST_HORIZONS
 from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
 
-try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier  # type: ignore
-except ImportError:  # pragma: no cover - fallback until Phase 2 lands
-    from typing import Any as _Any
+from backend.auth.guards import get_current_user, user_id_of
 
-    from fastapi import Request as _Request
-
-    from backend.auth.tiers import _TIER_RANK as _RANK
-    from backend.auth.tiers import normalize_tier as _norm
-
-    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
-        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
-        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
-        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
-        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
-        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
-    }
-
-    def require_tier(min_tier: str):  # type: ignore[no-redef]
-        need = _norm(min_tier)
-
-        async def _dep(request: _Request) -> dict[str, _Any]:
-            try:
-                auth = (request.headers.get("authorization") or "").strip()
-            except Exception:
-                auth = ""
-            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            user = _TEST_TOKENS.get(token)
-            if user is None:
-                raise HTTPException(status_code=401, detail="unauthorized")
-            if bool(user.get("is_admin")):
-                return dict(user)
-            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
-                return dict(user)
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+router = APIRouter(prefix="/api/alerts", tags=["alerts"], dependencies=[Depends(get_current_user)])
 
 DISCLOSURE = "Not investment advice. For informational purposes only."
 
@@ -171,33 +134,27 @@ def _alert_to_out(row: Alert) -> dict:
     }
 
 
-def _ensure_tables() -> None:
-    """Best-effort init_db (mirrors forecast calibration reads)."""
+def _owner_id(user: Any) -> uuid.UUID:
+    """The authenticated caller's id as a UUID (alerts are per-user)."""
     try:
-        from backend.db.session import init_db
-
-        init_db()
-    except Exception:
-        pass
+        return uuid.UUID(user_id_of(user))
+    except ValueError:
+        raise HTTPException(status_code=401, detail="unauthorized") from None
 
 
-def _get_alert_or_404(db: Session, alert_id: str) -> Alert:
+def _get_alert_or_404(db: Session, alert_id: str, owner: uuid.UUID) -> Alert:
+    """The caller's alert; another user's alert is reported as missing."""
     try:
         parsed = uuid.UUID(str(alert_id))
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(
             status_code=404, detail=f"unknown alert {alert_id!r}"
         ) from None
-    row = db.query(Alert).filter(Alert.alert_id == parsed).first()
-    if row is None:  # portable fallback (SQLite stores UUIDs as CHAR(32))
-        try:
-            row = (
-                db.query(Alert)
-                .filter(cast(Alert.alert_id, SAString) == str(parsed))
-                .first()
-            )
-        except Exception:
-            row = None
+    row = (
+        db.query(Alert)
+        .filter(Alert.alert_id == parsed, Alert.user_id == owner)
+        .first()
+    )
     if row is None:
         raise HTTPException(
             status_code=404, detail=f"unknown alert {alert_id!r}"
@@ -309,10 +266,9 @@ def create_alert(
     body: AlertCreate,
     db: Session = Depends(get_db),
     registry: InstrumentRegistry = Depends(get_registry),
-    user: dict = Depends(require_tier("free")),
+    user: User = Depends(get_current_user),
 ) -> dict:
     """Create one alert rule (symbol must resolve via the registry)."""
-    _ensure_tables()
     try:
         instrument, _, _ = registry.resolve(body.symbol)
     except HTTPException:
@@ -324,6 +280,7 @@ def create_alert(
             status_code=422, detail=f"unknown symbol {body.symbol!r}"
         )
     row = Alert(
+        user_id=_owner_id(user),
         symbol=str(instrument.exchange_symbol).upper(),
         exchange_mic=str(instrument.exchange_mic or ""),
         condition=str(body.condition),
@@ -364,12 +321,15 @@ def list_alerts(
     limit: int = Query(default=100, ge=1, le=500, description="Max rows (paginated)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
     db: Session = Depends(get_db),
-    user: dict = Depends(require_tier("free")),
+    user: User = Depends(get_current_user),
 ) -> dict:
     """List alert rules (creation order; paginated; never 500s on a fresh DB)."""
-    _ensure_tables()
     try:
-        query = db.query(Alert).order_by(Alert.created_at.asc())
+        query = (
+            db.query(Alert)
+            .filter(Alert.user_id == _owner_id(user))
+            .order_by(Alert.created_at.asc())
+        )
         if active_only:
             query = query.filter(Alert.is_active.is_(True))
         total = query.count()
@@ -406,7 +366,7 @@ def update_alert(
     alert_id: str,
     body: AlertPatch,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_tier("free")),
+    user: User = Depends(get_current_user),
 ) -> dict:
     """Patch the updatable subset {is_active, threshold, cooldown_hours}."""
     if (
@@ -419,7 +379,7 @@ def update_alert(
             detail="no updatable fields: expected subset of "
             "{is_active, threshold, cooldown_hours}",
         )
-    row = _get_alert_or_404(db, alert_id)
+    row = _get_alert_or_404(db, alert_id, _owner_id(user))
     if body.is_active is not None:
         row.is_active = bool(body.is_active)
     if body.threshold is not None:
@@ -448,9 +408,13 @@ def update_alert(
 
 
 @router.delete("/{alert_id}", status_code=204)
-def delete_alert(alert_id: str, db: Session = Depends(get_db), user: dict = Depends(require_tier("free"))) -> Response:
+def delete_alert(
+    alert_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
     """Delete one alert (fired events cascade; 204 with no body)."""
-    row = _get_alert_or_404(db, alert_id)
+    row = _get_alert_or_404(db, alert_id, _owner_id(user))
     try:
         # Explicit event delete first: portable across Postgres (which also
         # enforces ON DELETE CASCADE) and SQLite (FK pragmas may be off).

@@ -38,3 +38,6 @@ Thumbs.db
 # Vercel / deploy (CI docs agent) — never commit local deploy state or data
 .vercel/
 *.db
+*.db-journal
+*.db-wal
+*.db-shm

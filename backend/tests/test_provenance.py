@@ -19,6 +19,7 @@ from backend.market_data.health import ProviderHealthTracker
 from backend.market_data.providers.base import ProviderError
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
+from backend.tests.auth_helpers import inject_admin_auth
 
 REQUIRED_KEYS = {"source", "as_of", "delay_minutes", "quality_grade", "fallback_used", "missing_fields"}
 
@@ -70,7 +71,7 @@ def _client() -> TestClient:
     app = create_app()
     app.dependency_overrides[get_market_service] = _live_service
     inject_admin_auth(app)
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def test_provenance_envelope_complete_on_quote():
@@ -119,7 +120,7 @@ def test_quote_outage_maps_to_502():
     reset_deps()
     app = create_app()
     app.dependency_overrides[get_market_service] = _outage_service
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         resp = client.get("/api/market_data/quote", params={"symbol": "AAPL"})
         assert resp.status_code == 502, resp.text
@@ -183,7 +184,7 @@ def test_providers_health_rows_carry_enriched_schema():
     from fastapi.testclient import TestClient
 
     inject_admin_auth(app)
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     client.get("/api/market_data/quote", params={"symbol": "AAPL"})
     resp = client.get("/api/providers/health")
     assert resp.status_code == 200, resp.text

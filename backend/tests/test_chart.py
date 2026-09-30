@@ -18,6 +18,7 @@ from backend.api.deps import get_market_service, reset_deps
 from backend.api.main import create_app
 from backend.market_data.providers.base import ProviderError
 from backend.market_data.service import MarketDataService
+from backend.tests.auth_helpers import inject_admin_auth
 
 PROVENANCE_KEYS = {
     "source", "as_of", "delay_minutes", "quality_grade",
@@ -93,7 +94,7 @@ def _client(svc) -> TestClient:
     _clear_response_caches()
     app = create_app()
     app.dependency_overrides[get_market_service] = lambda: svc
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def _teardown() -> None:

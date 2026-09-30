@@ -25,8 +25,9 @@ from sqlalchemy.orm import Session
 from backend.db.models import AuditLog, Forecast, Instrument
 from backend.db.session import get_db
 from backend.security.secrets import redact_mapping
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/audit", tags=["audit"])
+router = APIRouter(prefix="/api/audit", tags=["audit"], dependencies=[Depends(get_current_user)])
 
 DISCLOSURE = "Not investment advice. For informational purposes only."
 

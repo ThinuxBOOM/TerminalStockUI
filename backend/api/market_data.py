@@ -16,8 +16,9 @@ from backend.security.validation import (
 from backend.analytics.technical.overlays import compute_indicators, parse_indicators
 from backend.api.deps import get_market_service, get_registry
 from backend.api.schemas import BarsResponse, ChartResponse, QuoteResponse
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/market_data", tags=["market_data"])
+router = APIRouter(prefix="/api/market_data", tags=["market_data"], dependencies=[Depends(get_current_user)])
 
 INDICATOR_MAX_POINTS = 1000
 
@@ -35,7 +36,7 @@ def _chart_cache_key(symbol: str, timeframe: str, limit: int) -> str:
         return f"market_data:chart:{symbol}:{timeframe}:{limit}"
 
 #: Contract alias router: /api/securities/{instrument_id}/quote|bars
-securities_router = APIRouter(prefix="/api/securities", tags=["securities"])
+securities_router = APIRouter(prefix="/api/securities", tags=["securities"], dependencies=[Depends(get_current_user)])
 
 
 def _utcnow():  # type: ignore[no-untyped-def]

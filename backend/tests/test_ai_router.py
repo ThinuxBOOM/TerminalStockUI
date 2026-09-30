@@ -422,22 +422,14 @@ def test_parallel_batch_dedups_identical_packets(empty_store):
     assert all(isinstance(opinion, AIOpinion) for opinion, _ in results)
 
 
-def test_tier_stubs_logged_never_enforced(empty_store):
+def test_opinion_cache_is_shared_across_users(empty_store):
     router = AIRouter(secret_store=empty_store)
     packet = _packet()
-    # Platinum + deep works exactly like free + quick: no gating today.
-    deep_opinion, _ = asyncio.run(router.get_insight(
-        packet, profile="deep_research", user_tier="platinum",
-        call_type="deep_research", token_credits=999,
-    ))
-    quick_opinion, _ = asyncio.run(router.get_insight(
-        packet, profile="quick_insight", user_tier="free", call_type="insight",
-    ))
-    assert isinstance(deep_opinion, AIOpinion) and isinstance(quick_opinion, AIOpinion)
-    tiers = [e.get("user_tier") for e in router.token_log]
-    assert "platinum" in tiers and "free" in tiers
-    ledger_rows = router.ledger.totals()
-    assert {row["profile"] for row in ledger_rows} >= {"deep_research", "quick_insight"}
+    asyncio.run(router.get_insight(packet, profile="quick_insight", call_type="insight", user_id="u-1"))
+    _, cached = asyncio.run(router.get_insight(packet, profile="quick_insight", call_type="insight", user_id="u-2"))
+    assert cached is True  # same evidence -> one provider call for everyone
+    assert all("user_tier" not in e and "token_credits" not in e for e in router.token_log)
+    assert {e.get("call_type") for e in router.token_log} == {"insight"}
 
 
 def test_per_profile_cache_ttl(empty_store):

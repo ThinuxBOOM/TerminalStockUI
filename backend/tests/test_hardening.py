@@ -24,16 +24,15 @@ from backend.api.deps import reset_deps
 from backend.api.main import create_app
 from backend.db.session import init_db, reset_engine
 from backend.market_data.service import MarketDataService
-from backend.security import auth as auth_module
 from backend.security import rate_limit as rate_limit_module
-from backend.security.secrets import is_default_secret_key, reset_fernet
+from backend.security.secrets import reset_fernet
+from backend import settings
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for var in ("API_KEY", "RATE_LIMIT_PER_MIN", "MAX_REQUEST_BYTES", "CORS_ORIGINS"):
+    for var in ("RATE_LIMIT_PER_MIN", "MAX_REQUEST_BYTES", "CORS_ORIGINS"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("SECRET_KEY", "test-only-secret-key-for-unit-tests-123")
     reset_fernet()
     rate_limit_module.reset_rate_limiter()
     reset_deps()
@@ -55,32 +54,11 @@ def _client() -> TestClient:
 # --- auth -------------------------------------------------------------------
 
 
-def test_auth_open_by_default():
-    assert auth_module.auth_enabled() is False
-    resp = _client().get("/api/providers/health")
-    assert resp.status_code == 200, resp.text
-
-
-def test_auth_enforced_when_key_set(monkeypatch):
-    monkeypatch.setenv("API_KEY", "prod-key-abc")
-    assert auth_module.auth_enabled() is True
-    client = _client()
+def test_data_routes_require_login_without_override():
+    reset_deps()
+    client = TestClient(create_app())  # no auth override
     assert client.get("/api/providers/health").status_code == 401
     assert client.get("/health").status_code == 200  # liveness stays open
-    ok = client.get("/api/providers/health", headers={"X-API-Key": "prod-key-abc"})
-    assert ok.status_code == 200, ok.text
-    bearer = client.get(
-        "/api/providers/health", headers={"Authorization": "Bearer prod-key-abc"}
-    )
-    assert bearer.status_code == 200, bearer.text
-
-
-def test_auth_key_rotation_list(monkeypatch):
-    monkeypatch.setenv("API_KEY", "old-key,new-key")
-    client = _client()
-    assert client.get("/api/providers/health", headers={"X-API-Key": "old-key"}).status_code == 200
-    assert client.get("/api/providers/health", headers={"X-API-Key": "new-key"}).status_code == 200
-    assert client.get("/api/providers/health", headers={"X-API-Key": "nope"}).status_code == 401
 
 
 # --- rate limiting ------------------------------------------------------------
@@ -95,6 +73,25 @@ def test_rate_limit_429_with_retry_after(monkeypatch):
     limited = client.get("/api/providers/health")
     assert limited.status_code == 429, limited.text
     assert "Retry-After" in limited.headers
+
+
+def test_rate_limit_ignores_spoofed_forwarded_for(monkeypatch):
+    monkeypatch.setenv("RATE_LIMIT_PER_MIN", "2")
+    rate_limit_module.reset_rate_limiter()
+    client = _client()
+    for n in range(2):
+        assert client.get("/api/providers/health", headers={"X-Forwarded-For": f"10.0.0.{n}"}).status_code == 200
+    assert client.get("/api/providers/health", headers={"X-Forwarded-For": "10.0.0.9"}).status_code == 429
+
+
+def test_login_has_its_own_tight_budget(monkeypatch):
+    monkeypatch.setenv("AUTH_RATE_LIMIT_PER_MIN", "3")
+    rate_limit_module.reset_rate_limiter()
+    client = _client()
+    codes = [client.post("/api/auth/login", json={"email": "x@example.com", "password": "nope"}).status_code
+             for _ in range(4)]
+    assert codes[:3] == [401, 401, 401]
+    assert codes[3] == 429
 
 
 def test_rate_limit_exempts_health(monkeypatch):
@@ -219,13 +216,30 @@ def test_alerts_list_pagination(isolated_db):
 # --- secrets ---------------------------------------------------------------------
 
 
-def test_default_secret_key_detected(monkeypatch):
-    monkeypatch.setenv("SECRET_KEY", "change-me-generate-with-openssl-rand-hex-32")
-    reset_fernet()
-    assert is_default_secret_key() is True
-    monkeypatch.setenv("SECRET_KEY", "a" * 64)
-    reset_fernet()
-    assert is_default_secret_key() is False
+def test_weak_secret_key_detected():
+    assert settings.is_strong_secret("change-me-generate-with-openssl-rand-hex-32") is False
+    assert settings.is_strong_secret("short") is False
+    assert settings.is_strong_secret("9f2c" * 16) is True
+
+
+def test_production_refuses_weak_or_missing_secrets(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("CRON_SECRET", "c" * 40)
+    monkeypatch.setenv("SECRET_KEY", "change-me")
+    with pytest.raises(RuntimeError):
+        settings.validate_startup()
+    monkeypatch.setenv("SECRET_KEY", "9f2c" * 16)
+    monkeypatch.delenv("CRON_SECRET")
+    with pytest.raises(RuntimeError):
+        settings.validate_startup()
+    monkeypatch.setenv("CRON_SECRET", "c" * 40)
+    settings.validate_startup()
+
+
+def test_unset_app_env_is_production(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    assert settings.is_production() is True
 
 
 # --- performance caches -------------------------------------------------------------

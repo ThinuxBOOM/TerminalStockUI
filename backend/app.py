@@ -1,8 +1,5 @@
-"""Backend entrypoint (repo-root style): uvicorn backend.app:app."""
+"""ASGI entrypoint: ``uvicorn backend.app:app`` (run from the repository root)."""
 
-try:
-    from backend.api.main import app, create_app
-except ImportError:  # backend/ as CWD
-    from api.main import app, create_app  # type: ignore[no-redef]
+from backend.api.main import app, create_app
 
 __all__ = ["app", "create_app"]

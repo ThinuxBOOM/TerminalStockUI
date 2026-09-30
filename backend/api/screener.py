@@ -38,92 +38,12 @@ from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
 from backend.market_data.service import MarketDataService
 
-try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier_optional  # type: ignore
-except ImportError:  # pragma: no cover - fallback until Phase 2 lands
-    from typing import Any as _Any
-
-    from fastapi import Request as _Request
-
-    from backend.auth.tiers import _TIER_RANK as _RANK
-    from backend.auth.tiers import normalize_tier as _norm
-
-    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
-        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
-        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
-        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
-        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
-        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
-    }
-
-    def require_tier(min_tier: str):  # type: ignore[no-redef]
-        need = _norm(min_tier)
-
-        async def _dep(request: _Request) -> dict[str, _Any]:
-            try:
-                auth = (request.headers.get("authorization") or "").strip()
-            except Exception:
-                auth = ""
-            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            user = _TEST_TOKENS.get(token)
-            if user is None:
-                raise HTTPException(status_code=401, detail="unauthorized")
-            if bool(user.get("is_admin")):
-                return dict(user)
-            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
-                return dict(user)
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep
-
-    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
-        import os as _os
-
-        need = _norm(min_tier)
-
-        async def _dep_opt(request: _Request) -> dict[str, _Any]:
-            try:
-                auth = (request.headers.get("authorization") or "").strip()
-            except Exception:
-                auth = ""
-            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            user = _TEST_TOKENS.get(token)
-            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
-            if user is None:
-                if enforced:
-                    raise HTTPException(status_code=401, detail="unauthorized")
-                if need == "free":
-                    return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
-                raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-            if bool(user.get("is_admin")):
-                return dict(user)
-            if not enforced:
-                return dict(user)
-            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
-                return dict(user)
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep_opt
-
-
-def _scope_prefix(user: dict | None) -> str:
-    """User-scoped cache prefix u:{id}:t:{tier}: (never trusts X-Tier)."""
-    try:
-        uid = str((user or {}).get("user_id") or (user or {}).get("id") or "anon")
-    except Exception:
-        uid = "anon"
-    try:
-        from backend.auth.tiers import normalize_tier as _n
-
-        tier = _n((user or {}).get("tier"))
-    except Exception:
-        tier = "free"
-    return f"u:{uid}:t:{tier}:"
+from backend.auth.guards import get_current_user
 
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/screener", tags=["screener"])
+router = APIRouter(prefix="/api/screener", tags=["screener"], dependencies=[Depends(get_current_user)])
 
 _BUILTIN_MARKETS = frozenset({"XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"})
 
@@ -302,18 +222,13 @@ def _universe_for(mic: str | None, registry: InstrumentRegistry) -> list:
 
 def _screener_cache_key(
     mic: str | None, horizon: int, min_direction: float, limit: int, offset: int,
-    user: dict | None = None,
 ) -> str:
-    """User-scoped key: u:{id}:t:{tier}: prefix prevents cross-tier poisoning."""
     try:
         min_dir = float(min_direction)
     except (TypeError, ValueError):
         min_dir = 0.5
     base = f"screener:{mic or 'ALL'}:{int(horizon)}:{min_dir:.4f}:{int(limit)}:{int(offset)}"
-    try:
-        return f"{_scope_prefix(user)}{base}"
-    except Exception:
-        return base
+    return base
 
 
 #: Minimum cached 1d bars for a symbol to enter a scan (mirrors the
@@ -390,13 +305,8 @@ def screen(
     offset: int = Query(default=0, ge=0, le=200, description="Skip first N filtered rows"),
     registry: InstrumentRegistry = Depends(get_registry),
     svc: MarketDataService = Depends(get_market_service),
-    user: dict = Depends(require_tier_optional("silver")),
 ) -> dict:
-    """Scan the registry universe, rank by forecast direction probability.
-
-    Soft-launch gate (silver): BILLING_ENFORCED=false → any authed user
-    passes, guests 402; true → silver+ only (free -> 402, admin bypasses).
-    """
+    """Scan the registry universe, rank by forecast direction probability."""
     try:
         horizon_int = int(horizon)
     except (TypeError, ValueError):
@@ -413,8 +323,7 @@ def screen(
     mic = _normalize_market(market)
 
     # Result cache: identical scans within TTL skip the quote/forecast fan-out.
-    # User-scoped so silver/gold/platinum result sets never poison each other.
-    cache_key = _screener_cache_key(mic, horizon, float(min_direction), int(limit), int(offset), user)
+    cache_key = _screener_cache_key(mic, horizon, float(min_direction), int(limit), int(offset))
     try:
         cached = get_cache().get(cache_key)
         if isinstance(cached, dict) and isinstance(cached.get("results"), list):
