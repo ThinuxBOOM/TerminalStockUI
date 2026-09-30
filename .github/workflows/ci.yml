@@ -59,12 +59,46 @@ jobs:
       - run: python scripts/migrate.py up   # second run must be a no-op
       - run: psql "$MIGRATE_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/seed.sql
 
-  images:
+  stack-e2e:
+    # Builds the production images, boots the stack, applies migrations,
+    # creates a user and drives the real UI with Playwright. The journey
+    # spec reads live market data, so it needs Yahoo Finance reachable.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate compose file
+      - name: Write CI environment
         run: |
-          printf 'DOMAIN=:80\nCRON_SECRET=ci\n' > .env
-          docker compose config --quiet
-      - run: docker compose build
+          {
+            echo "DOMAIN=:80"
+            echo "APP_ENV=production"
+            echo "SECRET_KEY=$(openssl rand -hex 32)"
+            echo "CRON_SECRET=$(openssl rand -hex 32)"
+            echo "DATABASE_URL=postgresql://postgres:ci@postgres:5432/postgres"
+            echo "ALLOW_REGISTRATION=false"
+          } > .env
+          echo "E2E_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+      - name: Build and boot the stack
+        run: docker compose -f docker-compose.yml -f deploy/ci/compose.ci.yml up -d --build --wait
+      - name: Migrate and create a user
+        run: |
+          DC="docker compose -f docker-compose.yml -f deploy/ci/compose.ci.yml"
+          $DC exec -T postgres psql -U postgres -v ON_ERROR_STOP=1 < deploy/ci/supabase_shim.sql
+          $DC exec -T backend python scripts/migrate.py up
+          $DC exec -T -e ONEMARKET_PASSWORD="$E2E_PASSWORD" backend python scripts/create_user.py e2e@example.com
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Browser tests
+        working-directory: frontend
+        env:
+          E2E_BASE_URL: http://localhost
+          E2E_EMAIL: e2e@example.com
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run e2e
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f deploy/ci/compose.ci.yml logs --tail 200
