@@ -90,6 +90,48 @@ def test_sqlite_missing_columns_are_added(tmp_path):
     assert "token_version" in cols
 
 
+def test_sqlite_billing_columns_are_dropped_and_users_can_be_created(tmp_path):
+    """A dev DB from before the billing removal: tier NOT NULL + CHECK, stripe UNIQUE."""
+    from sqlalchemy import create_engine, inspect, text
+
+    from backend.db.models import User
+
+    url = f"sqlite:///{(tmp_path / 'billing.db').as_posix()}"
+    old = create_engine(url)
+    with old.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE users (id CHAR(32) NOT NULL, email TEXT NOT NULL, "
+            "password_hash TEXT NOT NULL, tier TEXT NOT NULL, stripe_customer_id TEXT, "
+            "is_admin BOOLEAN NOT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+            "PRIMARY KEY (id), CONSTRAINT ck_users_tier CHECK (tier IN ('free', 'gold')), "
+            "UNIQUE (email), UNIQUE (stripe_customer_id))"
+        ))
+        conn.execute(text(
+            "INSERT INTO users VALUES ('0123456789abcdef0123456789abcdef', 'old@example.com', 'h', "
+            "'gold', 'cus_1', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+        ))
+    old.dispose()
+    sess.reset_engine()
+    try:
+        sess.init_db(url)
+        cols = {c["name"] for c in inspect(sess.get_engine(url)).get_columns("users")}
+        db = sess.get_session_factory(url)()
+        try:
+            db.add(User(email="new@example.com", password_hash="h"))
+            db.commit()
+            emails = sorted(u.email for u in db.query(User).all())
+            kept = db.query(User).filter_by(email="old@example.com").one()
+        finally:
+            db.close()
+        sess.init_db(url)  # idempotent once clean
+    finally:
+        sess.reset_engine()
+    assert "tier" not in cols and "stripe_customer_id" not in cols
+    assert {"token_version", "is_admin"} <= cols
+    assert emails == ["new@example.com", "old@example.com"]
+    assert kept.is_admin is True
+
+
 def test_uuid_type_is_postgres_native():
     from backend.db.models import ID_TYPE
 

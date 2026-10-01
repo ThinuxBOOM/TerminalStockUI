@@ -20,8 +20,9 @@ import os
 import threading
 from urllib.parse import parse_qs, urlparse
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.orm import sessionmaker
 
 from backend import settings
@@ -167,12 +168,49 @@ def _add_missing_sqlite_columns(engine: Engine) -> None:
                 conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}{clause}'))
 
 
+def _drop_legacy_sqlite_columns(engine: Engine) -> None:
+    """Rebuild tables that still carry columns the models no longer have (dev only).
+
+    A local SQLite file from before the billing removal still has
+    ``users.tier NOT NULL``, which makes every new user insert fail. SQLite
+    cannot drop a column used by a CHECK or UNIQUE constraint, so the table
+    is rebuilt from the model and the shared columns are copied across.
+    Foreign keys are left out of the rebuilt table (SQLite does not enforce
+    them unless asked); Postgres goes through migrations instead.
+    """
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    stale = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            continue
+        present = [col["name"] for col in inspector.get_columns(table.name)]
+        if set(present) - set(table.columns.keys()):
+            stale.append((table, [name for name in present if name in table.columns]))
+    if not stale:
+        return
+    with engine.connect() as conn:
+        for table, shared in stale:
+            tmp = table.to_metadata(MetaData(), name=f"_rebuild_{table.name}")
+            cols = ", ".join(f'"{name}"' for name in shared)
+            conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{tmp.name}"')
+            conn.execute(CreateTable(tmp, include_foreign_key_constraints=[]))
+            conn.exec_driver_sql(f'INSERT INTO "{tmp.name}" ({cols}) SELECT {cols} FROM "{table.name}"')
+            conn.exec_driver_sql(f'DROP TABLE "{table.name}"')
+            conn.exec_driver_sql(f'ALTER TABLE "{tmp.name}" RENAME TO "{table.name}"')
+            for index in table.indexes:
+                index.create(conn, checkfirst=True)
+        conn.commit()
+
+
 def init_db(url: str | None = None) -> None:
-    """Create missing tables (and, on SQLite, missing columns). Dev/test/scripts only."""
+    """Create missing tables (and, on SQLite, fix up columns). Dev/test/scripts only."""
     engine = get_engine(url)
     Base.metadata.create_all(engine)
     if engine.dialect.name == "sqlite":
+        # Add first: the rebuild copies every model column, new ones included.
         _add_missing_sqlite_columns(engine)
+        _drop_legacy_sqlite_columns(engine)
 
 
 def ensure_schema(url: str | None = None) -> None:

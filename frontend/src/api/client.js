@@ -174,6 +174,9 @@ function extractBackendDetail(err, fallback = "request failed") {
   return fallback;
 }
 const inflight = /* @__PURE__ */ new Map();
+function isCancellation(err) {
+  return err?.name === "CanceledError" || err?.name === "AbortError" || err?.code === "ERR_CANCELED";
+}
 function coalesceInflight(key, fn, signal) {
   // Abort-safe: callers with different AbortSignals must never share one
   // caller's signal (aborting one component would abort the other, and the
@@ -211,7 +214,10 @@ function coalesceInflight(key, fn, signal) {
     // fall through to coalesced path
   }
   const hit = inflight.get(key);
-  if (hit) return hit;
+  // Most fetch fns close over their caller's AbortSignal. If the first caller
+  // unmounts (React StrictMode does this on every dev mount) its abort must
+  // not fail everyone who joined: a joiner re-runs its own request instead.
+  if (hit) return hit.catch((err) => (isCancellation(err) ? fn() : Promise.reject(err)));
   const p = fn().finally(() => {
     if (inflight.get(key) === p) inflight.delete(key);
   });

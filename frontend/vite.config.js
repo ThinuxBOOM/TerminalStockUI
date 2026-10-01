@@ -28,7 +28,7 @@ export default defineConfig({
   },
   server: {
     // Local-dev only: `vite dev` proxies /api to FastAPI.
-    // Production/Vercel builds ignore `server` entirely.
+    // Production builds ignore `server` entirely.
     // Point at a remote/local backend without editing code:
     //   VITE_PROXY_TARGET=http://192.168.1.20:8000 npm run dev
     // (BACKEND_URL is accepted as an alias; default stays localhost:8000.)
@@ -41,11 +41,16 @@ export default defineConfig({
         changeOrigin: true,
         timeout: 10000,
       },
+      // Same routing as deploy/Caddyfile; without it the header shows OFFLINE in dev.
+      '/health': {
+        target: process.env.VITE_PROXY_TARGET || process.env.BACKEND_URL || 'http://localhost:8000',
+        changeOrigin: true,
+        timeout: 10000,
+      },
     },
   },
   preview: {
-    // Pinned so `vite preview` (Docker HEALTHCHECK + local `npm run preview`)
-    // always serves the same port the compose file probes.
+    // Pinned so `npm run preview` serves on the same port as dev.
     port: 5173,
   },
 });
