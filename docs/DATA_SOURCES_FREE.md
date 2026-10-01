@@ -160,13 +160,4 @@ row for filings snapshots).
 
 Local `RateLimiter` buckets mirror the free tiers (Finnhub 1 rps/burst 5;
 TwelveData 8/60 rps/burst 8; Stooq 2 rps/burst 4; Alpaca 3 rps/burst 6);
-production enforces the same quotas Redis-backed.
-
-## Future-proofing: subscription tiers (not implemented)
-
-`MarketDataService.get_quote` / `get_quotes_many` accept nullable
-`user_id` / `tier` (accepted, inert today). Provider gating belongs in the
-service chain (draft: Free → keyless only; Silver → + shared-key free
-tiers; Gold/Platinum → + paid SIP / real-time Euronext / full TwelveData
-markets with per-user keys), never inside providers. Paid providers slot
-in as new `*_provider` constructor args (None = skipped).
+limits are per process (the backend runs one worker).

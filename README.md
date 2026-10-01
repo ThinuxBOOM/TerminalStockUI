@@ -51,7 +51,8 @@ APP_ENV=development python scripts/create_user.py dev@example.com --admin
 
 Tests: `python -m pytest backend/tests` (hermetic: temp DB, no network) and
 `cd frontend && npm test && npm run build`. CI also applies every migration
-to Postgres and builds the images.
+to Postgres and runs a Playwright suite against the booted stack
+(`docs/TESTING.md`).
 
 ## Notes
 
@@ -60,4 +61,5 @@ to Postgres and builds the images.
 - Market data comes from free/personal-use sources (yfinance, optional
   Alpaca/Finnhub/TwelveData keys). Check their terms before giving other
   people access.
-- `docs/` predates this deployment model and is partly out of date.
+- More: `docs/OPERATIONS.md` (running it), `docs/SECURITY.md`,
+  `docs/API_CONTRACT.md`, `docs/USER_GUIDE.md`, `docs/DB_SCHEMA.md`.

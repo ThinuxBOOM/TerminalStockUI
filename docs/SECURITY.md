@@ -1,131 +1,82 @@
-# Security — operations guide
+# Security
 
-## Secret handling
+What the application enforces, and what the operator must configure.
 
-- **Never commit real secrets.** `infra/docker/.env` and any `.env` are
-  gitignored (see `.gitignore`). Verified: `infra/docker/.env` is NOT tracked
-  by git (`git ls-files` shows only `*.env.example`). Keep it that way —
-  before every commit, run `git status --porcelain` and confirm no `.env`
-  file is staged.
-- **If a real credential ever lands in git history**, rotation alone is not
-  enough (history keeps it forever):
-  1. Rotate the credential immediately at the provider (Supabase dashboard
-     → project → Database → reset password; update `DATABASE_URL`).
-  2. Purge history (`git filter-repo --path infra/docker/.env --invert-paths`
-     or BFG), force-push, and invalidate any exposed keys.
-- **Generate secrets** with `openssl rand -hex 32` (SECRET_KEY, CRON_SECRET,
-  API_KEY). The backend logs an ERROR at startup when `SECRET_KEY` is
-  missing/a placeholder (`backend/security/secrets.py::warn_if_default_secret_key`).
+## Authentication
 
-## Production checklist (env vars)
+- Every `/api/*` route requires a signed-in user, except `/api/auth/*`
+  (login itself) and `/api/cron/*` (scheduler, see below). `/health` is
+  public. The dependency is declared on each router, and
+  `backend/tests/test_auth.py::test_every_data_route_requires_login` fails if
+  any route answers without a token.
+- Passwords: bcrypt, 10 to 72 bytes. Login failures all return the same 401;
+  an unknown email still costs one bcrypt check.
+- Tokens: HS256 JWTs signed with `SECRET_KEY`. Access tokens live 15 minutes
+  and are kept in browser memory only (never localStorage). Refresh tokens
+  live 7 days in an `HttpOnly; Secure; SameSite=Strict` cookie scoped to
+  `/api/auth`.
+- Revocation: each token carries the user's `token_version`. Logout,
+  password resets and admin changes bump it, which invalidates every
+  outstanding access and refresh token for that user.
+- Registration is closed by default in production (`ALLOW_REGISTRATION`).
+- Admins (`users.is_admin`) are the only users who can read or change AI
+  provider keys and budgets, or trigger provider probes.
+- Alerts and AI research jobs are visible only to the user who created them.
 
-| Var | Purpose | Required in prod |
-|---|---|---|
-| `SECRET_KEY` | Fernet key for provider secrets at rest | YES — 64-hex random |
-| `CRON_SECRET` | Bearer auth for `/api/cron/*` | YES |
-| `API_KEY` | Bearer/`X-API-Key` auth for all `/api/*` except `/health` | YES |
-| `CORS_ORIGINS` | Exact frontend origin(s), comma-separated | YES — never `*` |
-| `RATE_LIMIT_PER_MIN` | Per-IP sliding window (default 300, `0` disables) | recommended |
-| `MAX_REQUEST_BYTES` | Body cap in bytes (default 1000000) | recommended |
-| `DATABASE_URL` | Postgres (Supabase pooler `:6543` supported) | YES |
-| `APP_ENV=production` | Enables HSTS + serverless pool posture | YES |
+## Scheduler (`/api/cron/*`)
 
-Local dev stays open by design: with `API_KEY`/`CRON_SECRET` unset, all
-routes are unauthenticated and CORS falls back to localhost Vite origins.
+Requires `Authorization: Bearer <CRON_SECRET>` (constant-time compare). No
+header, user agent or source address is trusted instead of the secret.
+Retention windows cannot be set over HTTP.
 
-## What changed (audit remediation)
+## Secrets
 
-- `backend/security/auth.py` — opt-in API-key enforcement (constant-time
-  compare, rotation via comma-separated keys, `/health` always open).
-- `backend/security/rate_limit.py` + middleware — 300 req/min/IP sliding
-  window with `429 + Retry-After` and `X-RateLimit-*` headers.
-- `backend/security/middleware.py` — `SecurityHeadersMiddleware` (CSP,
-  `X-Frame-Options: DENY`, `X-Content-Type-Options`, HSTS in prod) and
-  `RequestSizeLimitMiddleware` (413 over the cap).
-- `backend/api/main.py` — explicit CORS allow-list, middleware wiring,
-  startup placeholder-key warning.
-- `backend/security/validation.py` — ticker allow-list
-  (`^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$`) enforced on quote/bars/AI/alerts;
-  `instrument_id` length/control-char checks.
-- `backend/api/alerts.py` — `GET /api/alerts` paginated
-  (`limit` ≤ 500, `offset`, `total`); `evaluate_due_alerts` batch-capped
-  (`max_alerts`, default 500).
-- `backend/api/ai.py` — blocking market-data lookups run via
-  `asyncio.to_thread` so the event loop stays free.
-- `backend/market_data/service.py` — single-query bars join (was 2
-  round-trips), cached deterministic stub bases (LRU 1024/day-bucketed),
-  cached provisional instruments (LRU 512, defensive copies).
-- `backend/ai/router.py` — evidence-hash cache now TTL-bounded (default 1h).
-- `frontend/src/hooks/useWatchlist.js` — localStorage symbols allow-listed
-  before render/storage (XSS hardening; React escaping remains the primary
-  defense).
-- `frontend/src/components/ErrorBoundary.jsx` — route-level crash
-  containment (wired in `App.jsx`).
-- `frontend/src/main.jsx` — React Query `gcTime` (already present on disk).
+| Variable | Purpose |
+|---|---|
+| `SECRET_KEY` | signs JWTs and derives the Fernet key that encrypts provider API keys stored through the UI |
+| `CRON_SECRET` | scheduler bearer token |
+| `DATABASE_URL` | Supabase connection string |
+| `*_API_KEY` | optional provider keys (alternatively stored encrypted via the UI) |
 
-## Known non-issues (audit false positives, verified)
+- In production the backend refuses to start when `SECRET_KEY` or
+  `CRON_SECRET` is missing, shorter than 32 characters, or a placeholder.
+  Generate them with `openssl rand -hex 32`.
+- Keep secrets only in `.env` on the server (gitignored). Never pass
+  passwords on a command line; `scripts/create_user.py` prompts for them.
+- Provider keys are decrypted only at call time, never returned by the API,
+  and redacted from logs and audit payloads (`backend/security/secrets.py`).
+- If a secret is ever committed, rotate it first, then purge it from history
+  (`git filter-repo`); rotation alone leaves it readable in old commits.
 
-- **`infra/docker/.env` "committed"** — false: the file is gitignored and
-  untracked (`git ls-files` / `git log --all -- infra/docker/.env` empty).
-- **SQL injection via `cast(Alert.alert_id, SAString)`** — false: the
-  comparison value is a bound parameter, not string interpolation; the cast
-  exists for SQLite CHAR(32) UUID portability.
-- **`price_bars` DESC-then-reverse** — intentional: `DESC + LIMIT + reverse`
-  returns the *latest* N rows; `ASC + LIMIT` would return the oldest N.
-- **`random` in stub quotes/bars** — intentional: seeded `random.Random`
-  (never `secrets`) for deterministic offline filler; documented at the call
-  sites. Not used for any cryptographic purpose.
-- **SQLite "no pooling"** — dev-only posture; Postgres already uses
-  `QueuePool` locally and `NullPool` on serverless poolers
-  (`backend/db/session.py`).
-- **Per-request DB sessions** — correct SQLAlchemy posture (cached factory,
-  short-lived sessions); not a bottleneck.
+## Network and HTTP hardening
 
-## V2 auth (JWT + bcrypt — `backend/security/passwords.py`, `backend/auth/guards.py`, `backend/api/auth.py`)
+- Only Caddy is exposed (80/443). The backend and Redis are reachable only on
+  the compose network. Caddy overwrites client-supplied `X-Forwarded-For`,
+  and uvicorn trusts forwarded headers only because nothing else can reach it.
+- Browser pages: CSP with no inline or third-party scripts
+  (`script-src 'self'`, `connect-src 'self'`), `frame-ancestors 'none'`, HSTS,
+  `nosniff`, strict referrer policy (`deploy/Caddyfile`).
+- API responses: `default-src 'none'` CSP, `X-Frame-Options: DENY`, HSTS in
+  production (`backend/security/middleware.py`).
+- The frontend talks only to its own origin; the backend URL is fixed at
+  build time (no query-string or storage override).
+- Rate limits per client address: `RATE_LIMIT_PER_MIN` for the API (default
+  300) and `AUTH_RATE_LIMIT_PER_MIN` for login/register/refresh (default 10).
+  Live AI calls are capped per user per 24 h (`AI_DAILY_CALLS_PER_USER`).
+- Request bodies over `MAX_REQUEST_BYTES` (default 1 MB) get 413.
+- Symbols and instrument ids are allow-listed before they reach providers or
+  the database (`backend/security/validation.py`).
+- API docs (`/docs`, `/openapi.json`) are disabled in production.
 
-- **Passwords:** bcrypt hashes only (`users.password_hash`, `$2b$`), never
-  plaintext, never logged, never serialized (`GET /api/auth/me` returns
-  `{id, email, tier, subscription_status, is_admin}` only). Register
-  validates email (email-validator, `lower(trim())`) + password ≥ 10 chars;
-  duplicate email → `409`. Login uses ONE 401 message
-  (`invalid email or password`) for miss/mismatch (no user enumeration).
-  When bcrypt is missing, dev/test fall back to stdlib PBKDF2-HMAC-SHA256
-  (`pbkdf2_sha256$...`); production (`APP_ENV=production`) refuses the
-  fallback with `RuntimeError` (fail-closed).
-- **Tokens:** HS256 with the existing `SECRET_KEY` (15min access
-  `{sub, tier, is_admin, type: access}`, 7-day refresh `{sub, type:
-  refresh}` in an httpOnly cookie, `Secure` on https/prod, `SameSite=Lax`).
-  JWT `tier` is informational only — every gate reloads the LIVE `users`
-  row (`GET /api/auth/me` likewise; tier/subscription always fresh).
-- **Gates:** missing/expired/tampered token or unknown user → `401`;
-  live tier rank below `min_tier` → `402` with
-  `{upgrade_required: true, min_tier}`; non-admin on admin routes → `403`.
-  `is_admin` bypasses all tier gates. The legacy `X-Tier` header is never
-  read (spoofed headers cannot escalate). Unknown `min_tier` at wiring
-  time raises `ValueError` (misconfigured gates never open).
-- **Rotation:** login and `POST /api/auth/refresh` (cookie) both rotate
-  the refresh cookie; refresh with a missing/invalid/expired cookie → `401`.
-- **Ops:** same `SECRET_KEY` strength rules as provider secrets
-  (`openssl rand -hex 32`, rotation invalidates all tokens); no password
-  or hash material in audit payloads (redact via `redact_mapping`).
+## Database
 
-## RLS posture + rotation (Phase 5 hardening — `0010_rls_hardening.sql`)
+The backend connects with the Supabase owner role, which bypasses row-level
+security. RLS is enabled on every table with no grants to the `anon` and
+`authenticated` roles (`migrations/0010_rls_hardening.sql`), so the Supabase
+REST API exposes nothing even if its anon key leaks. Never put the service
+role key or database password in the frontend.
 
-- **Posture:** `ENABLE ROW LEVEL SECURITY` on all 16 tables
-  (`instruments`, `price_bars`, `forecasts`, `audit_logs`,
-  `calibration_snapshots`, `alerts`, `alert_events`, `provider_secrets`,
-  `provider_budgets`, `quote_snapshots`, `market_snapshots`,
-  `forecast_accuracy`, `ai_token_ledger`, `provider_health_history`,
-  `indicator_cache`, `users`); `REVOKE ALL ... FROM anon, authenticated`
-  on each; zero policies for browser roles except `users_read_own`
-  (authenticated SELECT own `users` row). Anon reads zero rows everywhere.
-- **Backend bypass:** the server connects via `DATABASE_URL` owner /
-  `service_role` credentials, which bypass RLS — app reads/writes keep full
-  access. The anon key must never appear in backend code/config.
-  `is_admin` is enforced in the app (`backend/auth/guards.py`), never as an
-  RLS policy (no recursive admin policy by design).
-- **Rotation:** same as §5 key rotation — regenerate the leaked key in the
-  dashboard (API keys) or reset the database password (then update
-  `DATABASE_URL` in Vercel + local `.env` and redeploy); re-apply
-  `0010_rls_hardening.sql` after any manual policy change to re-assert the
-  deny-by-default posture (idempotent, safe to re-run).
+## Reporting a problem
+
+Open a private security advisory on the repository rather than a public
+issue.
