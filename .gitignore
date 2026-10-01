@@ -35,3 +35,6 @@ Thumbs.db
 # Playwright output
 test-results/
 playwright-report/
+
+# Research datasets (scripts/research_v4.py)
+.research/

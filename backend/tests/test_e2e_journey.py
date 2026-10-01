@@ -1,4 +1,4 @@
-"""M8 E2E journey: Search -> Quote -> Forecast -> Analytics -> Backtest -> AI -> Audit.
+"""E2E journey: Search -> Quote -> Forecast -> Analytics -> Model card -> AI -> Audit.
 
 Full-stack walk through ``backend.api.main.create_app`` with TestClient.
 No network: market data uses live doubles (deterministic stub quotes
@@ -22,7 +22,6 @@ from backend.ai.providers import base as base_module
 from backend.api import ai as ai_api
 from backend.api.deps import get_market_service, reset_deps
 from backend.api.main import create_app
-from backend.api.backtest import reset_backtest_history
 from backend.cache import InMemoryCache
 from backend.forecasting.service import reset_forecast_service
 from backend.instruments.registry import InstrumentRegistry
@@ -72,7 +71,6 @@ def _client() -> TestClient:
 
     reset_deps()
     reset_forecast_service()
-    reset_backtest_history()
     ai_api.reset_ai_router()
     secrets_module.reset_fernet()
 
@@ -100,7 +98,6 @@ def _teardown() -> None:
     ai_api.reset_ai_router()
     reset_deps()
     reset_forecast_service()
-    reset_backtest_history()
 
 
 def _assert_provenance(body: dict, where: str) -> None:
@@ -140,8 +137,10 @@ def test_e2e_journey_search_to_audit():
         assert 0.0 <= forecast["direction_probability"] <= 1.0
         assert forecast["model_version"] and forecast["feature_version"]
         assert forecast["data_version"] and forecast["as_of"]
-        assert "Not investment advice" in forecast["disclosure"]
-        assert forecast["validation_status"] == "experimental"
+        assert "not investment advice" in forecast["disclosure"].lower()
+        assert forecast["validation_status"] == "measured"
+        assert forecast["expected_return_range"]["low"] < forecast["expected_return_range"]["high"]
+        assert forecast["summary"] and forecast["limitations"]
         _assert_provenance(forecast, "forecast")
 
         # 4. Analytics bundle.
@@ -153,24 +152,12 @@ def test_e2e_journey_search_to_audit():
             assert isinstance(analytics.get(section), dict) and analytics[section]
         _assert_provenance(analytics, "analytics")
 
-        # 5. Backtest run + history.
-        resp = client.post(
-            "/api/backtest/run",
-            json={"symbol": "AAPL", "horizons": [7, 21],
-                  "train_size": 100, "test_size": 21, "gap": 21},
-        )
+        # 5. Model card: the measured record behind every forecast.
+        resp = client.get("/api/forecast/model")
         assert resp.status_code == 200, resp.text
-        run = resp.json()
-        assert run["symbol"] == "AAPL"
-        assert set(run["results"]) == {"7", "21"}
-        assert run["model_version"] and run["feature_version"] and run["data_version"]
-        _assert_provenance(run, "backtest-run")
-        resp = client.get("/api/backtest/AAPL")
-        assert resp.status_code == 200, resp.text
-        hist = resp.json()
-        assert hist["symbol"] == "AAPL"
-        assert len(hist["runs"]) == 1
-        _assert_provenance(hist, "backtest-history")
+        card = resp.json()
+        assert card["version"] and card["universe_size"] > 100
+        assert set(card["report"]["horizons"]) == {"1", "7", "14", "21"}
 
         # 6. AI insight without keys -> 423 (fail-closed, never a stub opinion).
         resp = client.post(

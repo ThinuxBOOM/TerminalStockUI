@@ -524,3 +524,56 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# --- forecast engine v4 (0012) ---------------------------------------------------
+class ModelArtifact(Base):
+    """One trained v4 bundle (JSON coefficients + walk-forward report)."""
+
+    __tablename__ = "model_artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    engine: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    bundle: Mapped[dict] = mapped_column(JSON, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ForecastScore(Base):
+    """Latest forecast per (symbol, horizon) from the daily ``predict`` job."""
+
+    __tablename__ = "forecast_scores"
+
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True)
+    horizon_days: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exchange_mic: Mapped[str] = mapped_column(Text, nullable=False)
+    as_of: Mapped[datetime] = mapped_column(Date, nullable=False)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    last_close: Mapped[float | None] = mapped_column(Numeric)
+    p_up: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    p_out: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    out_rank: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    sigma: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    q10: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    q50: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    q90: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    drawdown_prob: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    vol_regime: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CrossSectionRow(Base):
+    """One day's universe distribution for ranking a single symbol."""
+
+    __tablename__ = "cross_sections"
+
+    as_of: Mapped[datetime] = mapped_column(Date, primary_key=True)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_model_artifacts_active", ModelArtifact.engine, ModelArtifact.active, ModelArtifact.created_at.desc())
+Index("ix_forecast_scores_rank", ForecastScore.horizon_days, ForecastScore.out_rank.desc())

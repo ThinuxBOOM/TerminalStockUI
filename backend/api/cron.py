@@ -1,21 +1,16 @@
-"""Cron router (Phase 1a + Phase 2b): daily bar ingestion + calibration.
+"""Scheduled jobs, called by the scheduler container (deploy/scheduler).
 
-Vercel Cron invokes via HTTP GET only -> ``GET /api/cron/ingest`` and
-``GET /api/cron/calibrate``.
-``POST`` variants with JSON ``{symbols: [...]}`` cover manual runs.
-Ingest shares :func:`backend.market_data.ingest.ingest_symbols` with
-``scripts/backfill_bars.py`` (no HTTP in the shared path); calibrate builds
-one walk-forward :mod:`backend.forecasting.calibration` snapshot row per
-(symbol, horizon) via upsert on the UNIQUE key.
+ingest / sp500   daily bars into ``price_bars``
+predict          daily: v4 forecasts for every instrument -> ``forecast_scores``
+train            weekly: retrain forecast engine v4 (child process)
+evaluate         every 15 min: price/forecast alerts
+snapshot         hourly: compressed market snapshots
+score            daily: grade matured forecasts against what happened
+health           provider health probes
+retention        weekly purge (GET is a dry run)
 
-Auth: when the ``CRON_SECRET`` env var is set, callers must send
-``Authorization: Bearer <secret>`` (constant-time compare); a wrong or
-missing secret is 401. When unset, the endpoints are open (local dev).
-
-Every response carries the standard provenance envelope
-``{source, as_of, delay_minutes, quality_grade, fallback_used,
-missing_fields}``. Per-symbol failures (unknown instrument, fetch miss)
-are reported in ``errors``; the batch itself never 500s.
+Every call needs ``Authorization: Bearer <CRON_SECRET>``. Per-symbol
+failures are reported in ``errors``; a batch never 500s.
 """
 
 from __future__ import annotations
@@ -26,7 +21,7 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend import settings
 from backend.api.deps import get_market_service, get_registry
@@ -267,215 +262,47 @@ _CALIBRATE_TICK_BUDGET_S = 45.0
 _CALIBRATE_ROTATION_STRIDE = 30
 
 
-def _run_calibrate(
-    symbols: list[str],
-    market: MarketDataService,
-    budget_s: float | None = None,
-    start_offset: int = 0,
-) -> dict:
-    """Build + upsert one snapshot row per (symbol, horizon).
+class JobRequest(BaseModel):
+    """POST body for /predict and /train: ``wait`` runs in-process (tests, manual)."""
 
-    Per-pair failures are reported in ``errors`` (keyed ``"SYM:horizon"``);
-    the batch itself never 500s. ``snapshots`` maps the same key to the
-    scored window count; ``calibrated`` counts rows with n_windows >= 10
-    (single-digit windows are written but flagged weak, not skill) while
-    ``unscored`` counts written rows with zero windows (thin history:
-    honest NULL metrics, not skill) plus weak n<10 rows.
-    """
-    from backend.db.session import get_session_factory, ensure_schema
-    from backend.forecasting.calibration.snapshots import (
-        build_snapshot,
-        upsert_snapshot,
-    )
-    from backend.forecasting.common import FORECAST_HORIZONS
-
-    wanted: list[str] = []
-    for raw in symbols or []:
-        text = (raw or "").strip()
-        if text:
-            wanted.append(text[:32])
-        if len(wanted) >= 100:
-            break
-    if not wanted:
-        return {
-            "ok": True,
-            "calibrated": 0,
-            "unscored": 0,
-            "snapshots": {},
-            "errors": {},
-            "provenance": _cron_provenance(False),
-        }
-    try:
-        ensure_schema()
-        Session = get_session_factory()
-        db = Session()
-    except Exception:
-        # DB unreachable: report per symbol, never 500 the batch. The
-        # exception text is deliberately reduced so connection strings can
-        # never leak into responses or logs.
-        logger.warning("calibrate db unavailable symbols=%d", len(wanted))
-        return {
-            "ok": False,
-            "calibrated": 0,
-            "unscored": 0,
-            "snapshots": {},
-            "errors": {raw: "db unavailable" for raw in wanted},
-            "provenance": _cron_provenance(True),
-        }
-    snapshots: dict[str, int] = {}
-    errors: dict[str, str] = {}
-    calibrated = 0
-    unscored = 0
-    truncated = 0
-    # Rotation: start the pair order at start_offset so consecutive
-    # budgeted ticks cover different slices (full coverage over days
-    # instead of the same prefix every night).
-    try:
-        pairs: list[tuple[str, int]] = [
-            (raw, int(h)) for raw in wanted for h in FORECAST_HORIZONS
-        ]
-    except Exception:
-        pairs = []
-    if pairs and start_offset:
-        try:
-            rot = int(start_offset) % len(pairs)
-            pairs = pairs[rot:] + pairs[:rot]
-        except Exception:
-            pass
-    try:
-        import time as _time
-
-        _tick_start = _time.monotonic()
-        for raw, horizon in pairs:
-            if budget_s is not None:
-                try:
-                    if _time.monotonic() - _tick_start >= float(budget_s):
-                        truncated += 1
-                        continue
-                except Exception:
-                    pass
-            key = f"{raw.strip().upper()}:{int(horizon)}"
-            try:
-                snap = build_snapshot(raw, int(horizon), market_service=market)
-                upsert_snapshot(db, snap)
-                n_windows = int(snap.get("n_windows") or 0)
-                snapshots[key] = n_windows
-                # Zero-window rows are written (honest NULL metrics) but
-                # must not read as scored skill. Single-digit windows
-                # (n<10) are written + flagged weak, not counted.
-                if n_windows >= 10:
-                    calibrated += 1
-                else:
-                    unscored += 1
-            except Exception as exc:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                errors[key] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning("calibrate snapshot failed")
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
-    logger.info(
-        "calibrate done calibrated=%d unscored=%d errors=%d truncated=%d",
-        calibrated, unscored, len(errors), truncated,
-    )
-    return {
-        "ok": not errors,
-        "calibrated": calibrated,
-        "unscored": unscored,
-        "snapshots": snapshots,
-        "errors": errors,
-        "truncated": truncated,
-        "provenance": _cron_provenance(bool(errors)),
-    }
+    model_config = ConfigDict(extra="forbid")
+    wait: bool = False
 
 
-@router.get("/calibrate")
-def cron_calibrate_get(
-    request: Request,
-    symbol: str | None = Query(
-        default=None, description="Single symbol; default is the ingest universe"
-    ),
-    market: MarketDataService = Depends(get_market_service),
-) -> dict:
-    """Vercel Cron entry: ``GET /api/cron/calibrate[?symbol=AAPL]``.
+def _start_job(job: str, wait: bool) -> dict:
+    from backend.forecasting.v4 import jobs as v4_jobs
 
-    Bounded nightly slice: at most ``_CALIBRATE_TICK_BUDGET_S`` of replay
-    work, rotating by day so the whole universe is covered over consecutive
-    nights (an unbounded tick always dies at maxDuration 60 for partial
-    prefix-only progress). Single-symbol runs always complete (fast).
-    ``POST /api/cron/calibrate`` (manual) stays unbounded.
-    """
+    if wait:
+        result = v4_jobs.run_predict() if job == "predict" else v4_jobs.run_train()
+        result.setdefault("job", job)
+        return {**result, "provenance": _cron_provenance(not result.get("ok"))}
+    return {**v4_jobs.spawn(job), "provenance": _cron_provenance(False)}
+
+
+@router.get("/predict")
+def cron_predict_get(request: Request) -> dict:
+    """Daily: score every instrument for every horizon (runs in a child process)."""
     _check_cron_auth(request)
-    symbols = (
-        [symbol] if (symbol or "").strip() else ingest_module.default_universe()
-    )
-    if (symbol or "").strip():
-        # Single-symbol probe: complete it, no budget/rotation.
-        try:
-            return _run_calibrate(symbols, market)
-        except HTTPException:
-            raise
-        except Exception:
-            logger.warning("cron calibrate batch failed")
-            return {
-                "ok": False,
-                "calibrated": 0,
-                "snapshots": {},
-                "errors": {"_batch": "calibrate failed"},
-                "provenance": _cron_provenance(True),
-            }
-    try:
-        from datetime import date as _date
-
-        _doy = _date.today().toordinal()
-    except Exception:
-        _doy = 0
-    try:
-        return _run_calibrate(
-            symbols, market,
-            budget_s=_CALIBRATE_TICK_BUDGET_S,
-            start_offset=_doy * _CALIBRATE_ROTATION_STRIDE,
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("cron calibrate batch failed")
-        return {
-            "ok": False,
-            "calibrated": 0,
-            "snapshots": {},
-            "errors": {"_batch": "calibrate failed"},
-            "provenance": _cron_provenance(True),
-        }
+    return _start_job("predict", wait=False)
 
 
-@router.post("/calibrate")
-def cron_calibrate_post(
-    request: Request,
-    body: IngestRequest,
-    market: MarketDataService = Depends(get_market_service),
-) -> dict:
-    """Manual run: ``POST /api/cron/calibrate`` with JSON ``{symbols: [...]}``."""
+@router.post("/predict")
+def cron_predict_post(request: Request, body: JobRequest) -> dict:
     _check_cron_auth(request)
-    symbols = body.symbols if body.symbols else ingest_module.default_universe()
-    try:
-        return _run_calibrate(symbols, market)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("cron calibrate batch failed")
-        return {
-            "ok": False,
-            "calibrated": 0,
-            "snapshots": {},
-            "errors": {"_batch": "calibrate failed"},
-            "provenance": _cron_provenance(True),
-        }
+    return _start_job("predict", wait=body.wait)
+
+
+@router.get("/train")
+def cron_train_get(request: Request) -> dict:
+    """Weekly: retrain forecast engine v4 on ~10 years of data (child process)."""
+    _check_cron_auth(request)
+    return _start_job("train", wait=False)
+
+
+@router.post("/train")
+def cron_train_post(request: Request, body: JobRequest) -> dict:
+    _check_cron_auth(request)
+    return _start_job("train", wait=body.wait)
 
 
 def _run_evaluate(market: MarketDataService, forecast: ForecastService) -> dict:

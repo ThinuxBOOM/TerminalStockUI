@@ -693,7 +693,8 @@ def _get_or_create_db_instrument(db, registry_instrument):
         currency=registry_instrument.currency or "USD",
         country=registry_instrument.country,
         sector=registry_instrument.sector,
-        timezone=registry_instrument.timezone or "UTC",
+        timezone=(registry_instrument.timezone if registry_instrument.timezone not in (None, "", "UTC")
+                  else _exchange_tz(registry_instrument)),
         trading_calendar=registry_instrument.trading_calendar
         or registry_instrument.exchange_mic,
         is_active=True,
@@ -715,6 +716,40 @@ def _get_or_create_db_instrument(db, registry_instrument):
     return row
 
 
+_DATE_LABELLED = ("1d", "1wk", "1mo")
+
+
+def _exchange_tz(instrument) -> str:
+    """The venue's timezone (auto-created instruments were stored as UTC)."""
+    from backend.instruments.calendars import EXCHANGE_META
+
+    mic = str(getattr(instrument, "exchange_mic", "") or "").upper()
+    return str(EXCHANGE_META.get(mic, {}).get("timezone") or getattr(instrument, "timezone", None) or "UTC")
+
+
+def canonical_session_ts(ts_utc: datetime, tz_name: str | None) -> datetime:
+    """A date-labelled bar's timestamp as exchange-local midnight, in UTC.
+
+    Providers disagree: yfinance stamps local midnight (16:00 UTC for
+    Shanghai), Finnhub-style candles stamp 00:00 UTC. Both mean the same
+    session, and storing them as-is kept two rows per day. A 00:00 UTC stamp
+    is read as that UTC calendar date; anything else as the exchange-local
+    date of the instant.
+    """
+    from datetime import time as _time
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(tz_name or "UTC")
+    except Exception:
+        return ts_utc
+    if ts_utc.hour == 0 and ts_utc.minute == 0 and ts_utc.second == 0:
+        session = ts_utc.date()
+    else:
+        session = ts_utc.astimezone(tz).date()
+    return datetime.combine(session, _time(0), tzinfo=tz).astimezone(timezone.utc)
+
+
 def _upsert_bars(db, db_instrument, bars: list[dict], *, timeframe: str, source: str = "yfinance") -> int:
     """Idempotent upsert keyed (instrument_id, timeframe, ts). Returns count."""
     from backend.db.models import PriceBar
@@ -734,6 +769,8 @@ def _upsert_bars(db, db_instrument, bars: list[dict], *, timeframe: str, source:
             continue
         try:
             ts_utc = _ensure_utc(ts)
+            if timeframe in _DATE_LABELLED:
+                ts_utc = canonical_session_ts(ts_utc, _exchange_tz(db_instrument))
         except Exception:
             continue
         db.merge(PriceBar(

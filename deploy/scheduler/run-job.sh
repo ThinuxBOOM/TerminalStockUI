@@ -1,5 +1,5 @@
 #!/bin/sh
-# Usage: run-job <ingest|sp500|calibrate|snapshot|evaluate|score|health|retention>
+# Usage: run-job <ingest|sp500|predict|train|snapshot|evaluate|score|health|retention>
 # Calls the backend cron endpoint(s) for one job. Exit status is non-zero if
 # any call failed. Output goes to the container log (docker compose logs scheduler).
 set -u
@@ -31,7 +31,8 @@ call() {  # call <path> [POST-json]
 
 case "$JOB" in
   ingest)    call /api/cron/ingest ;;
-  calibrate) call /api/cron/calibrate ;;
+  predict)   call /api/cron/predict ;;
+  train)     call /api/cron/train ;;
   snapshot)  call /api/cron/snapshot ;;
   evaluate)  call /api/cron/evaluate ;;
   score)     call /api/cron/score ;;

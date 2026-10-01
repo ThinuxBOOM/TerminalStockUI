@@ -216,12 +216,23 @@ def expected_delay_minutes(mic: str) -> int:
         raise ValueError(f"unsupported exchange MIC: {mic!r}") from None
 
 
+#: Benchmark indices have no venue suffix; without this map they defaulted
+#: to XNAS and their session days were computed on New York time.
+INDEX_MIC = {
+    "^FCHI": "XPAR", "^AEX": "XAMS", "^BFX": "XBRU",
+    "^NYA": "XNYS", "^GSPC": "XNYS", "^DJI": "XNYS", "^IXIC": "XNAS", "^NDX": "XNAS",
+}
+
+
 def split_provider_symbol(symbol: str) -> tuple[str, str | None]:
     """Split a provider symbol into (base, mic-or-None).
 
     Longest-suffix match so '.SS' wins correctly; bare US tickers -> None.
+    Known index symbols (``^FCHI``) map to their own venue.
     """
     text = (symbol or "").strip().upper()
+    if text in INDEX_MIC:
+        return text, INDEX_MIC[text]
     for suffix in sorted(SUFFIX_TO_MIC, key=len, reverse=True):
         if suffix and text.endswith(suffix.upper()):
             return text[: -len(suffix)], SUFFIX_TO_MIC[suffix]
@@ -231,6 +242,8 @@ def split_provider_symbol(symbol: str) -> tuple[str, str | None]:
 def provider_symbol_for(exchange_symbol: str, mic: str) -> str:
     """Canonical provider (Yahoo-style) symbol for an instrument."""
     base = (exchange_symbol or "").strip().upper()
+    if base.startswith("^"):
+        return base  # index symbols carry no venue suffix
     suffix = suffix_for_mic(mic)
     if suffix and not base.endswith(suffix.upper()):
         return base + suffix.upper()
