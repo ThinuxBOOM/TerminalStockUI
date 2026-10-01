@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from backend.db.models import AuditLog, Forecast, Instrument
@@ -63,6 +63,10 @@ def _iso_or_none(value: Any) -> Optional[str]:
     return str(value)
 
 
+#: Arbitrary constant naming the advisory lock that serializes audit appends.
+_AUDIT_APPEND_LOCK = 0x4F4D_4155_4449_54  # "OMAUDIT"
+
+
 def append_audit_log(
     db: Session,
     *,
@@ -77,6 +81,12 @@ def append_audit_log(
     Returns the persisted AuditLog (committed + refreshed).
     """
     redacted = redact_mapping(dict(payload or {}))
+    # Serialize appends: reading the head and inserting the next link must not
+    # interleave with another writer, or two rows share a prev_hash and the
+    # chain forks (indistinguishable from tampering for the verifier). The
+    # transaction-scoped advisory lock is released by the commit below.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _AUDIT_APPEND_LOCK})
     last = db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(1)).scalars().first()
     prev_hash = last.hash if last is not None else None
     now = _utcnow()

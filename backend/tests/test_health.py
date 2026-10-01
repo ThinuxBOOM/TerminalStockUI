@@ -266,3 +266,29 @@ def test_providers_health_is_read_only(monkeypatch):
     assert calls == []
     assert rows["yfinance"]["latency_p50_ms"] == 120.0
     assert rows["alpaca"]["latency_p50_ms"] is None
+
+
+def test_deep_redis_reports_degraded_when_cache_loses_writes(monkeypatch):
+    import backend.api.health as health_module
+
+    class _ForgetfulCache:
+        def set(self, key, value, ttl_s=None):
+            pass
+
+        def get(self, key):
+            return None
+
+        def delete(self, key):
+            pass
+
+    class _WorkingCache(_ForgetfulCache):
+        def set(self, key, value, ttl_s=None):
+            self.value = value
+
+        def get(self, key):
+            return getattr(self, "value", None)
+
+    monkeypatch.setattr("backend.cache.get_cache", lambda: _ForgetfulCache())
+    assert health_module._deep_redis() == "degraded"
+    monkeypatch.setattr("backend.cache.get_cache", lambda: _WorkingCache())
+    assert health_module._deep_redis() == "up"
