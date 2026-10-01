@@ -70,8 +70,41 @@ Spec §§5 (M3), §6 testing, §7 definition of done.
   volatility regime, large-drawdown probability, relative performance vs benchmark.
 - The performance dashboard shows failures as well as successes; grade-D inputs
   block forecasts (`409 FORECAST_BLOCKED`) instead of emitting uncalibrated numbers.
-- Backtests account for liquidity, transaction costs, slippage, delistings,
-  restatements, survivorship bias, and market-regime shifts (M3 requirements).
+- Backtests score direction probabilities only; they do not simulate trades,
+  so liquidity, transaction costs and slippage are not modelled. They run on
+  today's instrument list, so they carry survivorship bias. Forward scoring
+  of logged forecasts (`forecast_accuracy`) does keep delisted instruments.
+
+### Measured skill (2026-10-01)
+
+`scripts/evaluate_forecasts.py` runs the Backtest Lab's fold scorer over many
+symbols and compares the probabilities the app shows with the **base rate**:
+each fold's share of "up" labels in its training window. Stocks rise slightly
+more often than they fall, so that base rate, not 0.5, is the bar to beat.
+
+100 random symbols from the stored history (about two years of daily bars),
+expanding walk-forward, train >= 100 bars, 21-bar test folds, gap 21:
+
+| Horizon | Points | Brier model | Brier base rate | Skill (95% CI) | Hit rate model / base |
+|---|---|---|---|---|---|
+| 1 day | 31,521 | 0.2544 | 0.2503 | -0.016 (-0.020 to -0.013) | 50.7% / 51.4% |
+| 7 days | 31,450 | 0.2599 | 0.2520 | -0.031 (-0.038 to -0.024) | 50.6% / 52.4% |
+| 21 days | 30,382 | 0.2615 | 0.2586 | -0.011 (-0.030 to 0.007) | 52.1% / 53.1% |
+
+Skill = 1 - Brier(model) / Brier(base rate); CI by bootstrap over symbols.
+The model is worse than the base rate at 1 and 7 days, with confidence
+intervals clear of zero, and no better at 21 days. Its Brier score is above
+0.25 at every horizon, so it is also worse than always saying 50%. Blending
+it toward the base rate (`brier_blend` in the report) helps slightly at 21
+days and not at all at 1 or 7. That is too small to rely on given overlapping
+21-day labels and two years of data.
+
+This is why forecasts carry `validation_status: "experimental"`. Re-run the
+script after any model change:
+
+```bash
+python scripts/evaluate_forecasts.py --symbols 100 --horizons 1 7 21 --out report.json
+```
 
 ### Calibration snapshots (Phase 2b)
 

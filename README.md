@@ -56,8 +56,10 @@ to Postgres and runs a Playwright suite against the booted stack
 
 ## Notes
 
-- Forecast probabilities are experimental until the Backtest Lab shows a
-  measured track record (Brier/ECE) for a symbol.
+- Forecast probabilities are experimental. Measured walk-forward over 100
+  symbols they are slightly worse than the historical base rate at 1, 7 and
+  21 days (`docs/DATA_QUALITY.md`, "Measured skill"). Treat them as a
+  research aid, not a signal.
 - Market data comes from free/personal-use sources (yfinance, optional
   Alpaca/Finnhub/TwelveData keys). Check their terms before giving other
   people access.
