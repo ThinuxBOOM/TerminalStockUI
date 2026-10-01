@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import AppShell from "./components/AppShell/AppShell";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Skeleton from "./components/Skeleton";
@@ -11,9 +11,9 @@ import NotFoundPage from "./pages/NotFoundPage";
 const SearchPage = lazy(() => import("./pages/SearchPage"));
 const ScreenerPage = lazy(() => import("./pages/ScreenerPage"));
 const SecurityBriefPage = lazy(() => import("./pages/SecurityBriefPage"));
-const ForecastDetailsPage = lazy(() => import("./pages/ForecastDetailsPage"));
 const ProviderSettingsPage = lazy(() => import("./pages/ProviderSettingsPage"));
-const BacktestLabPage = lazy(() => import("./pages/BacktestLabPage"));
+const ModelLabPage = lazy(() => import("./pages/ModelLabPage"));
+const PortfolioPage = lazy(() => import("./pages/PortfolioPage"));
 const WatchlistPage = lazy(() => import("./pages/WatchlistPage"));
 const WelcomePage = lazy(() => import("./pages/WelcomePage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
@@ -22,6 +22,12 @@ const AccountPage = lazy(() => import("./pages/AccountPage"));
 function WelcomeRedirect() {
   const location = useLocation();
   return <Navigate to={{ pathname: "/", search: location.search }} replace />;
+}
+
+// Old forecast links open the Security page's Forecast tab.
+function ForecastRedirect() {
+  const { symbol = "AAPL" } = useParams();
+  return <Navigate to={`/security/${encodeURIComponent(symbol)}?tab=forecast`} replace />;
 }
 
 const guarded = (element, opts = {}) => <RequireAuth admin={opts.admin === true}>{element}</RequireAuth>;
@@ -42,9 +48,11 @@ function App() {
       <Route path="/search" element={guarded(<SearchPage />)} />
       <Route path="/screener" element={guarded(<ScreenerPage />)} />
       <Route path="/security/:symbol" element={guarded(<SecurityBriefPage />)} />
-      <Route path="/forecast/:symbol" element={guarded(<ForecastDetailsPage />)} />
+      <Route path="/forecast/:symbol" element={<ForecastRedirect />} />
       <Route path="/providers" element={guarded(<ProviderSettingsPage />)} />
-      <Route path="/backtest" element={guarded(<BacktestLabPage />)} />
+      <Route path="/model" element={guarded(<ModelLabPage />)} />
+      <Route path="/backtest" element={<Navigate to="/model" replace />} />
+      <Route path="/portfolio" element={guarded(<PortfolioPage />)} />
       <Route path="/watchlist" element={guarded(<WatchlistPage />)} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>

@@ -33,7 +33,7 @@ class ErrorBoundary extends React.Component {
       return /* @__PURE__ */ React.createElement(
         "div",
         { role: "alert", className: "rounded border border-term-border bg-term-panel p-4 text-sm text-term-text" },
-        /* @__PURE__ */ React.createElement("p", { className: "font-bold text-term-green" }, "Something went wrong in this view."),
+        /* @__PURE__ */ React.createElement("p", { className: "font-semibold text-term-text" }, "Something went wrong in this view."),
         /* @__PURE__ */ React.createElement(
           "p",
           { className: "mt-1 text-term-muted" },

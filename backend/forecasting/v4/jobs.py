@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[3]
 LOCK_DIR = Path(os.getenv("JOB_LOCK_DIR", tempfile.gettempdir()))
 JOBS = ("predict", "train")
 LOCK_STALE_S = {"predict": 30 * 60, "train": 3 * 3600}
-BAR_LIMIT = 400
+BAR_LIMIT = 520
 
 
 def _lock_path(job: str) -> Path:

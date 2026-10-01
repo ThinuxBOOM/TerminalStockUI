@@ -51,31 +51,31 @@ const MAX_DISPLAY_CANDLES = 500;
 const DASHED = LineStyle && LineStyle.Dashed ? LineStyle.Dashed : 2;
 const SOLID = LineStyle && LineStyle.Solid ? LineStyle.Solid : 0;
 
-// Overlay line colors (term palette: grid #1c2433, text #8b94a7,
-// up #3ddc84, down #ff5c5c, cyan #56c8ff for composite/analogue lines).
+// Overlay colors: dark steps of the CVD-validated categorical palette, kept
+// apart from the green/red candles (up #34d399, down #f87171).
 // Keys match normalizeIndicators.
 const INDICATOR_COLORS = {
-  SMA20: "#f5c542",
-  SMA50: "#56c8ff",
-  SMA200: "#b388ff",
-  EMA12: "#ff9f43",
-  EMA26: "#00d1b2",
-  BB_UPPER: "#8b94a7",
-  BB_MIDDLE: "#c3cad6",
-  BB_LOWER: "#8b94a7",
-  VWAP: "#56c8ff",
-  RSI14: "#b388ff",
-  ATR14: "#56c8ff",
-  MACD_LINE: "#56c8ff",
-  MACD_SIGNAL: "#ff9f43"
+  SMA20: "#9085e9",
+  SMA50: "#3987e5",
+  SMA200: "#d95926",
+  EMA12: "#c98500",
+  EMA26: "#d55181",
+  BB_UPPER: "#5d6778",
+  BB_MIDDLE: "#8a94a6",
+  BB_LOWER: "#5d6778",
+  VWAP: "#199e70",
+  RSI14: "#9085e9",
+  ATR14: "#3987e5",
+  MACD_LINE: "#3987e5",
+  MACD_SIGNAL: "#d95926"
 };
 
 // Overlays drawn on the price pane vs the separate oscillator pane.
 const PRICE_OVERLAY_KEYS = ["SMA20", "SMA50", "SMA200", "EMA12", "EMA26", "BB_UPPER", "BB_MIDDLE", "BB_LOWER", "VWAP"];
 const OSC_LINE_KEYS = ["RSI14", "ATR14", "MACD_LINE", "MACD_SIGNAL"];
 const HIST_KEY = "MACD_HIST";
-const HIST_UP = "#3ddc84";
-const HIST_DOWN = "#ff5c5c";
+const HIST_UP = "#34d399";
+const HIST_DOWN = "#f87171";
 
 // Canonical request name -> legend/series expansion.
 function expandRequested(requested) {
@@ -255,20 +255,20 @@ function PriceChart({
   const setContainerRef = useCallback((node) => {
     if (!node || chartRef.current) return;
     const chart = createChart(node, {
-      layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
-      grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      layout: { background: { type: "solid", color: "#10151e" }, textColor: "#8a94a6", fontFamily: "Inter Variable, Inter, system-ui, sans-serif" },
+      grid: { vertLines: { color: "#161d29" }, horzLines: { color: "#1c2431" } },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
-        horzLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+        vertLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
+        horzLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
       },
       height: 300
     });
     const series = chart.addCandlestickSeries({
-      upColor: "#3ddc84",
-      downColor: "#ff5c5c",
-      wickUpColor: "#3ddc84",
-      wickDownColor: "#ff5c5c",
+      upColor: "#34d399",
+      downColor: "#f87171",
+      wickUpColor: "#34d399",
+      wickDownColor: "#f87171",
       borderVisible: false
     });
     chartRef.current = chart;
@@ -286,12 +286,12 @@ function PriceChart({
   const setOscContainerRef = useCallback((node) => {
     if (!node || oscChartRef.current) return;
     const chart = createChart(node, {
-      layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
-      grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      layout: { background: { type: "solid", color: "#10151e" }, textColor: "#8a94a6", fontFamily: "Inter Variable, Inter, system-ui, sans-serif" },
+      grid: { vertLines: { color: "#161d29" }, horzLines: { color: "#1c2431" } },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
-        horzLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+        vertLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
+        horzLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
       },
       height: 140
     });
@@ -409,8 +409,8 @@ function PriceChart({
         if (key === "RSI14" && !rsiGuidesRef.current) {
           // Scale guides (constants, not market data): overbought/oversold.
           try {
-            s.createPriceLine({ price: 70, color: "#ff5c5c", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "70" });
-            s.createPriceLine({ price: 30, color: "#3ddc84", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "30" });
+            s.createPriceLine({ price: 70, color: "#f87171", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "70" });
+            s.createPriceLine({ price: 30, color: "#34d399", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "30" });
             rsiGuidesRef.current = true;
           } catch {
             // older builds without createPriceLine - guides skipped, lines intact

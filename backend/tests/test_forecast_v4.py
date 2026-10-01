@@ -261,6 +261,8 @@ def test_predict_job_then_screener_and_signals(monkeypatch):
     low_risk = c.get("/api/screener", params={"sort": "drawdown", "order": "asc", "limit": 5}).json()["rows"]
     assert [r["drawdown_prob"] for r in low_risk] == sorted(r["drawdown_prob"] for r in low_risk)
     assert c.get("/api/screener", params={"sort": "nope"}).status_code == 422
+    some = c.get("/api/screener", params={"symbols": f"{syms[0]},{syms[1]}, NOPE"}).json()
+    assert {r["symbol"] for r in some["rows"]} == {syms[0], syms[1]}
     sig = c.get("/api/signals/top", params={"horizon": 21, "n": 5}).json()
     assert {r["symbol"] for r in sig["top"]}.isdisjoint({r["symbol"] for r in sig["bottom"]})
 

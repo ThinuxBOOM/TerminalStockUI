@@ -41,9 +41,9 @@ DISCLOSURE = (
 )
 VALIDATION_STATUS = "measured"
 FEATURE_VERSION = "v4-features-1"
-#: Bars loaded per symbol: 253 are needed for 1-year features; extra rows
-#: absorb holidays and any duplicate sessions.
-BAR_LIMIT = 400
+#: Bars loaded per symbol: 253 sessions are needed for 1-year features; the
+#: margin absorbs holidays and duplicate-session rows in older databases.
+BAR_LIMIT = 520
 _MARKET_TTL_S = 300
 _FORECAST_TTL_S = 300
 _FORECAST_CACHE_MAX = 1000

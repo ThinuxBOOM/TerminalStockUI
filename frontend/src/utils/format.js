@@ -62,4 +62,39 @@ function formatRange(iv) {
   const pct = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(0)}%`;
   return `${pct(iv.low)} to ${pct(iv.high)}`;
 }
-export { changeArrow, changeColor, formatDateTime, formatMetric, formatNumber, formatPct1, formatRange, formatValue };
+function isNum(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
+// 0.0123 -> "+1.2%" (signed) or "1.2%" (unsigned); em dash when missing.
+function fmtPct(v, digits = 1, { signed = false } = {}) {
+  if (!isNum(v)) return "—";
+  const x = v * 100;
+  const sign = signed ? (x > 0 ? "+" : x < 0 ? "−" : "") : x < 0 ? "−" : "";
+  return `${sign}${Math.abs(x).toFixed(digits)}%`;
+}
+function fmtMoney(v, currency = "USD", digits) {
+  if (!isNum(v)) return "—";
+  const d = digits ?? (Math.abs(v) >= 1000 ? 0 : 2);
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD", currencyDisplay: "narrowSymbol", minimumFractionDigits: d, maximumFractionDigits: d }).format(v);
+  } catch {
+    return v.toFixed(d);
+  }
+}
+// 15012350139 -> "15.0B"
+function fmtCompact(v, digits = 1) {
+  if (!isNum(v)) return "—";
+  const a = Math.abs(v);
+  const [div, suf] = a >= 1e12 ? [1e12, "T"] : a >= 1e9 ? [1e9, "B"] : a >= 1e6 ? [1e6, "M"] : a >= 1e3 ? [1e3, "K"] : [1, ""];
+  return `${(v / div).toFixed(suf ? digits : 0)}${suf}`;
+}
+function fmtNum(v, digits = 2) {
+  return isNum(v) ? v.toFixed(digits) : "—";
+}
+// Percentile rank (0..1) -> "Top 8%" / "Bottom 12%" / "Middle".
+function fmtRank(rank) {
+  if (!isNum(rank)) return "—";
+  if (rank >= 0.5) return `Top ${Math.max(1, Math.round((1 - rank) * 100))}%`;
+  return `Bottom ${Math.max(1, Math.round(rank * 100))}%`;
+}
+export { changeArrow, changeColor, fmtCompact, fmtMoney, fmtNum, fmtPct, fmtRank, formatDateTime, formatMetric, formatNumber, formatPct1, formatRange, formatValue, isNum };

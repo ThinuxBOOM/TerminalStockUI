@@ -77,10 +77,9 @@ function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, on
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
         <Link to="/app" className="flex shrink-0 items-center gap-2" aria-label="OneMarket home">
-          <img src="/logo.svg" alt="OneMarket logo" className="h-8 w-8 rounded-lg" width="32" height="32" />
-          <span className="font-sans text-base font-black tracking-tight text-term-green">
-            ONE<span className="text-term-text">MARKET</span>
-            <span className="ml-2 font-sans text-2xs font-normal tracking-normal text-term-muted/70">EASY INVESTING</span>
+          <img src="/logo.svg" alt="" className="h-7 w-7" width="28" height="28" />
+          <span className="hidden font-sans text-[15px] font-semibold tracking-tight text-term-text sm:inline">
+            OneMarket
           </span>
         </Link>
         <SearchBar q={q} setQ={setQ} onSubmit={onSubmit} searchRef={searchRef} />
@@ -92,7 +91,7 @@ function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, on
             aria-label="Open command palette (Control K)"
             title="Command palette (Ctrl/⌘+K)"
           >
-            ⌘K PALETTE
+            ⌘K
           </button>
           <ConnectionDot />
           <Link to="/account" className="term-btn-sm max-w-[12rem] truncate" aria-label="Account" title={user?.email ?? "Account"}>

@@ -118,9 +118,9 @@ function AppShell({ children }) {
           </main>
           <footer
             role="contentinfo"
-            className="w-full border-t border-term-border px-4 pb-2 pt-3 text-2xs text-term-muted"
+            className="w-full border-t border-term-border px-4 pb-2 pt-3 text-2xs text-term-faint"
           >
-            Numbers show their source and freshness. Forecasts are experimental, unvalidated probabilities; AI opinions are capped at 20% weight. Not investment advice.
+            Every number shows its source and freshness. Forecasts are statistical estimates with a measured track record (see Model Lab); past accuracy does not guarantee future results. Not investment advice.
           </footer>
           <StatusBar />
         </div>

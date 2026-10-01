@@ -6,11 +6,11 @@
 --    XNAS with timezone UTC, so their session days were computed on New York
 --    time (a day early for Euronext). Move them to their own venue.
 -- 2. Auto-registered instruments kept timezone 'UTC'; set the venue's zone.
--- 3. Some providers stamp daily candles at 00:00 UTC while yfinance stamps
---    exchange-local midnight, so a session could be stored twice. Rows at
---    00:00 UTC on non-UTC venues are deleted when the local-midnight row for
---    the same session exists, otherwise re-stamped to local midnight.
---    Deletes duplicate rows only; take a backup first if in doubt.
+-- 3. Finnhub-style daily candles are stamped 00:00 UTC while yfinance stamps
+--    exchange-local midnight, so before ingest normalized them a session
+--    could be stored twice. Rows at 00:00 UTC on non-UTC venues are deleted
+--    when the local-midnight row for the same session exists, otherwise
+--    re-stamped to local midnight. Usually a no-op; deletes duplicates only.
 
 -- 1 ---------------------------------------------------------------------------
 UPDATE instruments i

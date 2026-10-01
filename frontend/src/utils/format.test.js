@@ -29,3 +29,16 @@ describe("formatRange", () => {
     expect(formatRange({ low: Number.NaN, high: 0.1 })).toBe("—");
   });
 });
+
+describe("v4 formatters", () => {
+  it("formats signed and unsigned percentages", async () => {
+    const { fmtPct, fmtRank, fmtCompact } = await import("./format");
+    expect(fmtPct(0.0123, 1, { signed: true })).toBe("+1.2%");
+    expect(fmtPct(-0.05)).toBe("−5.0%");
+    expect(fmtPct(null)).toBe("—");
+    expect(fmtRank(0.93)).toBe("Top 7%");
+    expect(fmtRank(0.08)).toBe("Bottom 8%");
+    expect(fmtCompact(15012350139)).toBe("15.0B");
+    expect(fmtCompact(950)).toBe("950");
+  });
+});

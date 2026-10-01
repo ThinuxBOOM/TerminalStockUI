@@ -24,11 +24,11 @@ import Skeleton from "./Skeleton";
 import EmptyState from "./EmptyState";
 import ErrorState from "./ErrorState";
 
-const GREEN = "#3ddc84"; // term-green
-const RED = "#ff5c5c"; // term-red
-const MUTED = "#8b94a7"; // term-muted
-const GRID = "#1c2433"; // term-border
-const CYAN = "#56c8ff"; // term-cyan — composite Top-20 line (distinguishes index from security green/red)
+const GREEN = "#34d399"; // term-green
+const RED = "#f87171"; // term-red
+const MUTED = "#8a94a6"; // term-muted
+const GRID = "#1c2431"; // term-border
+const CYAN = "#3987e5"; // term-cyan — composite Top-20 line (distinguishes index from security green/red)
 
 const plainFmt = new Intl.NumberFormat("en", {
   minimumFractionDigits: 2,
@@ -207,7 +207,7 @@ function AspiChart({ mic, defaultTimeframe = "1d" }) {
           <button
             key={t}
             type="button"
-            className={`rounded border px-2 py-0.5 text-[11px] ${t === tf ? "border-term-green text-term-green" : "border-term-border text-term-muted"}`}
+            className={`rounded border px-2 py-0.5 text-[11px] ${t === tf ? "border-term-accent text-term-text" : "border-term-border text-term-muted"}`}
             aria-pressed={t === tf}
             onClick={() => setTf(t)}
           >
@@ -372,7 +372,7 @@ function Top20AspiChart({ mic, defaultTimeframe = "1d" }) {
           <button
             key={t}
             type="button"
-            className={`rounded border px-2 py-0.5 text-[11px] ${t === tf ? "border-term-green text-term-green" : "border-term-border text-term-muted"}`}
+            className={`rounded border px-2 py-0.5 text-[11px] ${t === tf ? "border-term-accent text-term-text" : "border-term-border text-term-muted"}`}
             aria-pressed={t === tf}
             onClick={() => setTf(t)}
           >
@@ -420,7 +420,7 @@ function Top20AspiChart({ mic, defaultTimeframe = "1d" }) {
                   return (
                     <tr key={`${r.symbol}-${i}`} className="border-b border-term-border even:bg-term-panel2">
                       <td className="term-num py-1 pr-2 text-right text-term-muted">{i + 1}</td>
-                      <td className="py-1 pr-2 font-bold text-term-green">{r.symbol}</td>
+                      <td className="py-1 pr-2 font-semibold text-term-text">{r.symbol}</td>
                       <td className="max-w-[180px] truncate py-1 pr-2 text-term-muted" title={r.company_name ?? r.symbol}>
                         {r.company_name ?? "—"}
                       </td>
@@ -462,7 +462,7 @@ function Top20AspiChart({ mic, defaultTimeframe = "1d" }) {
                 onClick={() => setWeighting(id)}
                 aria-pressed={weighting === id}
                 title={id === "cap" ? "Cap-weighted when every used constituent carries a finite market_cap; otherwise falls back to equal-weighted" : "Equal-weighted mean of rebased closes (base 100)"}
-                className={`rounded border px-2 py-0.5 text-[10px] ${weighting === id ? "border-term-green text-term-green" : "border-term-border text-term-muted"}`}
+                className={`rounded border px-2 py-0.5 text-[10px] ${weighting === id ? "border-term-accent text-term-text" : "border-term-border text-term-muted"}`}
               >
                 {label}
               </button>

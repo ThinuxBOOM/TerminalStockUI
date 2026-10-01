@@ -58,6 +58,7 @@ def screen(
     regime: str | None = Query(default=None, pattern="^(low|normal|high)$"),
     sector: str | None = Query(default=None, max_length=64),
     q: str | None = Query(default=None, max_length=64, description="Symbol or name contains"),
+    symbols: str | None = Query(default=None, max_length=1200, description="Comma-separated symbols (watchlists)"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0, le=1000),
 ) -> dict:
@@ -91,6 +92,9 @@ def screen(
         items = [r for r in items if r["vol_regime"] == regime]
     if sector:
         items = [r for r in items if (r["sector"] or "").lower() == sector.lower()]
+    if symbols:
+        wanted = {s.strip().upper() for s in symbols.split(",") if s.strip()}
+        items = [r for r in items if r["symbol"].upper() in wanted]
     if q:
         needle = q.strip().lower()
         items = [r for r in items if needle in r["symbol"].lower() or needle in (r["company_name"] or "").lower()]

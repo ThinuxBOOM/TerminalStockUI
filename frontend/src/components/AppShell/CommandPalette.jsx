@@ -269,7 +269,7 @@ function CommandPalette({ open, onClose }) {
                   onMouseEnter={() => setIndex(i)}
                   onClick={() => choose(it)}
                   className={`flex w-full items-center justify-between gap-2 rounded px-3 py-2 text-left text-sm transition-colors duration-150 ${
-                    i === index ? "bg-term-greenDim text-term-green" : "text-term-text"
+                    i === index ? "bg-term-accentDim text-term-text" : "text-term-text"
                   }`.trim()}
                 >
                   <span className="min-w-0 truncate">{it.label}</span>

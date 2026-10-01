@@ -1,30 +1,33 @@
 import React from "react";
 
-function Tabs({ tabs = [], active, onChange, ariaLabel = "Tabs", className = "" }) {
+// Underline tabs. Items: [{id, label, badge?}]. Arrow keys move between tabs.
+function Tabs({ tabs = [], active, onChange, ariaLabel = "Sections", className = "" }) {
+  function onKey(e, i) {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+    onChange?.(next.id);
+    e.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[tabs.indexOf(next)]?.focus();
+  }
   return (
-    <div
-      role="tablist"
-      aria-label={ariaLabel}
-      className={`flex flex-wrap gap-1 ${className}`.trim()}
-    >
-      {tabs.map((t) => {
-        const id = typeof t === "string" ? t : t.id;
-        const label = typeof t === "string" ? t : (t.label ?? t.id);
-        const isActive = id === active;
+    <div role="tablist" aria-label={ariaLabel} className={`flex gap-1 overflow-x-auto border-b border-term-border ${className}`.trim()}>
+      {tabs.map((t, i) => {
+        const on = t.id === active;
         return (
           <button
-            key={id}
+            key={t.id}
             role="tab"
             type="button"
-            aria-selected={isActive}
-            onClick={() => onChange && onChange(id)}
-            className={`rounded px-3 py-1.5 font-sans text-xs tracking-wide transition-colors duration-150 ${
-              isActive
-                ? "bg-term-greenDim text-term-green border-b-2 border-term-green font-semibold"
-                : "text-term-muted hover:text-term-text"
-            }`.trim()}
+            aria-selected={on}
+            tabIndex={on ? 0 : -1}
+            onKeyDown={(e) => onKey(e, i)}
+            onClick={() => onChange?.(t.id)}
+            className={`-mb-px inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors ${
+              on ? "border-term-accent font-medium text-term-text" : "border-transparent text-term-muted hover:text-term-text"
+            }`}
           >
-            {label}
+            {t.label}
+            {t.badge ? <span className="rounded bg-term-panel2 px-1 text-2xs text-term-muted">{t.badge}</span> : null}
           </button>
         );
       })}

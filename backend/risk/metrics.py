@@ -100,8 +100,8 @@ def liquidity(close: pd.Series, volume: pd.Series | None, window: int = 63) -> d
     illiq = (r / dv.reindex(r.index).replace(0, np.nan)).dropna()
     return {
         "avg_dollar_volume": _finite(dv.mean(), 0),
-        # Amihud: average |return| per $1M traded (higher = less liquid).
-        "amihud": _finite(illiq.mean() * 1e6, 6) if len(illiq) else None,
+        # Amihud: average |return| per 1B (currency units) traded; higher = less liquid.
+        "amihud": _finite(illiq.mean() * 1e9, 6) if len(illiq) else None,
     }
 
 
