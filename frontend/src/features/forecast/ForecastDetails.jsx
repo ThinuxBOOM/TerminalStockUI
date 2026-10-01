@@ -26,7 +26,7 @@ import Skeleton from "../../components/Skeleton";
 import EmptyState from "../../components/EmptyState";
 import ExperimentalBadge from "../../components/ExperimentalBadge";
 import { ResearchSection, AuditLink, SourceBadge } from "../../components/ResearchSection";
-import { formatDateTime, formatPct1 } from "../../utils/format";
+import { formatDateTime, formatMetric, formatPct1 } from "../../utils/format";
 import ErrorState from "../../components/ErrorState";
 
 const DISCLOSURE = "Not investment advice. Forecasts are experimental probabilities from the deterministic engine (check the Backtest Lab for their measured track record); AI opinions are capped at 20% influence.";
@@ -875,12 +875,15 @@ function AnalyticsGrid({ title, data, emptyHint }) {
       ) : (
         <>
           <dl className="mt-1 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2 xl:grid-cols-3">
-            {visible.map(([k, v]) => (
-              <div key={k} className="min-w-0 rounded border border-term-border px-2 py-1">
-                <dt className="truncate text-term-muted" title={k}>{k}</dt>
-                <dd className="term-num break-words font-bold text-term-text">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
-              </div>
-            ))}
+            {visible.map(([k, v]) => {
+              const m = formatMetric(v);
+              return (
+                <div key={k} className="min-w-0 rounded border border-term-border px-2 py-1">
+                  <dt className="truncate text-term-muted" title={k}>{k.replace(/_/g, " ")}</dt>
+                  <dd className={`term-num break-words font-bold ${m.unavailable ? "text-term-muted" : "text-term-text"}`} title={m.title || void 0}>{m.text}</dd>
+                </div>
+              );
+            })}
           </dl>
           {entries.length > visible.length && (
             <p className="mt-1 text-[10px] text-term-muted" role="status">showing first {visible.length} of {entries.length} — +{entries.length - visible.length} more.</p>

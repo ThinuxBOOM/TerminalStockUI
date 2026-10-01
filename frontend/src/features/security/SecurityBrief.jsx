@@ -9,7 +9,7 @@ import FreshnessBadge from "../../components/FreshnessBadge";
 import MarketStateBadge from "../../components/MarketStateBadge";
 import StatusPill from "../../components/StatusPill";
 import CurrencyValue from "../../components/CurrencyValue";
-import { changeArrow, changeColor, formatDateTime, formatPct1 } from "../../utils/format";
+import { changeArrow, changeColor, formatDateTime, formatMetric, formatPct1 } from "../../utils/format";
 import Loading from "../../components/Loading";
 import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
@@ -720,8 +720,8 @@ function AnalyticsDetailGrid({ title, data }) {
         <tbody>
           {entries.map(([k, v]) => (
             <tr key={k} className="border-b border-term-border last:border-0 hover:bg-term-panel2">
-              <th scope="row" className="p-2 text-left font-normal text-term-muted">{k}</th>
-              <td className="tnum p-2 font-semibold text-term-text">{typeof v === "object" ? JSON.stringify(v) : String(v)}</td>
+              <th scope="row" className="p-2 text-left font-normal text-term-muted">{k.replace(/_/g, " ")}</th>
+              <td className="tnum p-2 font-semibold text-term-text" title={formatMetric(v).title || void 0}>{formatMetric(v).text}</td>
             </tr>
           ))}
         </tbody>
@@ -741,7 +741,7 @@ function SnapshotCell({ title, data }) {
       ) : (
         <ul className="mt-1 space-y-0.5 break-words text-term-muted">
           {entries.map(([k, v]) => (
-            <li key={k}>{k}: <b className="text-term-text">{typeof v === "object" ? JSON.stringify(v) : String(v)}</b></li>
+            <li key={k} title={formatMetric(v).title || void 0}>{k.replace(/_/g, " ")}: <b className="text-term-text">{formatMetric(v).text}</b></li>
           ))}
           {all.length > entries.length && <li className="text-[10px]" role="status">+{all.length - entries.length} more</li>}
         </ul>
