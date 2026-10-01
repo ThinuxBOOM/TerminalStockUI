@@ -1,7 +1,12 @@
 # Operations
 
-Running OneMarket Analyzer on a single Linux server with Docker Compose.
-The database is Supabase Postgres; everything else runs on the server.
+Running OneMarket on a single Linux server with Docker Compose. The
+database is Supabase Postgres; everything else runs on the server.
+
+Resources: the backend idles at ~400 MB. The weekly training job (a child
+process of the backend container) downloads ten years of S&P 500 history
+(~50 MB, cached under `MODEL_CACHE_DIR`) and peaks around 1.5-2 GB of RAM
+for ~10 minutes. The daily scoring job takes 1-2 minutes.
 
 ## Services
 
@@ -36,6 +41,10 @@ docker compose exec backend python scripts/create_user.py you@example.com --admi
   migrations (`migrate.py` refuses it).
 - A fresh Supabase project also needs the seed once:
   `psql "$DIRECT_URL" -f migrations/seed.sql`.
+- Forecasts work straight away with the model bundled in
+  `backend/forecasting/v4/default_bundle.json`. The screener fills in after
+  the first scoring run, which starts by itself the first time someone opens
+  it (or run `docker compose exec scheduler run-job predict`).
 
 The backend refuses to start in production (`APP_ENV` unset or
 `production`) when `SECRET_KEY` or `CRON_SECRET` is missing or weak (fewer
@@ -52,6 +61,12 @@ docker compose exec backend python scripts/migrate.py up
 
 `migrate.py status` lists applied and pending migrations. Migrations that
 drop data say so in their header: take a backup first.
+
+| Migration | What it does |
+|---|---|
+| 0011 | drops the old billing/tier columns (destructive: back up first) |
+| 0012 | adds `model_artifacts`, `forecast_scores`, `cross_sections` for forecast engine v4 |
+| 0013 | moves benchmark indices (^FCHI, ^AEX, ^BFX) to their own venue, fixes instrument time zones, and de-duplicates any daily bars stamped at 00:00 UTC |
 
 ## Accounts
 
@@ -77,12 +92,29 @@ page; those settings apply to every user.
 | `snapshot` | hourly at :07 | stores a compressed daily-bar snapshot per universe symbol |
 | `ingest` | 05:30 daily | refreshes daily bars for the default universe |
 | `sp500` | 06:00 daily | refreshes S&P 500 daily bars in 10 shards |
-| `calibrate` | 06:30 daily | walk-forward calibration snapshots |
+| `predict` | 06:30 daily | scores every instrument for every horizon into `forecast_scores` (screener, signals, watchlist ranks) and stores the day's cross-section; runs as a child process |
+| `train` | Saturdays 02:00 | retrains forecast engine v4 on ten years of S&P 500 history, re-runs the walk-forward evaluation, stores and activates the new bundle, then rescores; child process |
 | `score` | 07:00 daily | scores matured forecasts against realized prices |
 | `health` | 08:00 daily | pings each provider and records health |
 | `retention` | Sundays 03:00 | purges rows past their retention window |
 
-Run one by hand: `docker compose exec scheduler run-job ingest`.
+Run one by hand: `docker compose exec scheduler run-job ingest`. `predict`
+and `train` return immediately and log their progress in
+`docker compose logs backend`; only one of each runs at a time.
+
+### Forecast model
+
+The active model, its training date and its walk-forward record are on the
+Model Lab page and at `GET /api/forecast/model`. Each weekly retrain stores
+a new row in `model_artifacts` and activates it; older bundles stay in the
+table. To roll back, set `active` on the previous row (and clear it on the
+newer one); the backend picks the change up within five minutes.
+
+Train by hand (writes a file, does not touch the database):
+
+```bash
+docker compose exec backend python scripts/train_models.py --out /tmp/bundle.json
+```
 
 Retention windows are set only through `RETENTION_<DATASET>_DAYS` in `.env`
 (defaults in `backend/observability/retention.py`, never below 1 day). The
@@ -136,5 +168,8 @@ database, so it detects accidental edits, not an attacker with write access.
 | scheduler logs `FAILED(22) ... 401` | backend and scheduler disagree on `CRON_SECRET`; recreate both with `docker compose up -d` |
 | a chart or quote shows "unavailable" | the upstream source returned no live data; the app refuses to show stale data. Retry later or check `docker compose logs backend` |
 | `migrate.py` refuses the URL | you used the :6543 transaction pooler; use the session pooler or direct URL |
-| `429 rate limit exceeded` | more than `RATE_LIMIT_PER_MIN` API calls (or `AUTH_RATE_LIMIT_PER_MIN` logins) per minute from one address |
+| `429 rate limit exceeded` | more than `RATE_LIMIT_PER_MIN` API calls (or `AUTH_RATE_LIMIT_PER_MIN` logins, `REFRESH_RATE_LIMIT_PER_MIN` token refreshes) per minute from one address |
 | `429 daily AI limit reached` | the user hit `AI_DAILY_CALLS_PER_USER` in the last 24 h |
+| screener says it is scoring for the first time | the first `predict` run is in progress (1-2 min); it refreshes by itself |
+| `train` ends with exit code 2 | the history download failed (network or Yahoo throttling); the previous model stays active. Rerun later |
+| a stock's forecast says it needs 253 daily bars | fewer than a year of daily bars is stored; run `ingest` for it or wait for the nightly job |

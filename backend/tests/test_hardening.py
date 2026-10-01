@@ -94,6 +94,16 @@ def test_login_has_its_own_tight_budget(monkeypatch):
     assert codes[3] == 429
 
 
+def test_refresh_does_not_spend_the_login_budget(monkeypatch):
+    """Page loads refresh tokens; they must not lock users out of signing in."""
+    monkeypatch.setenv("AUTH_RATE_LIMIT_PER_MIN", "2")
+    monkeypatch.setenv("REFRESH_RATE_LIMIT_PER_MIN", "50")
+    rate_limit_module.reset_rate_limiter()
+    client = _client()
+    assert all(client.post("/api/auth/refresh").status_code == 401 for _ in range(10))  # no cookie: 401, not 429
+    assert client.post("/api/auth/login", json={"email": "x@example.com", "password": "nope"}).status_code == 401
+
+
 def test_rate_limit_exempts_health(monkeypatch):
     monkeypatch.setenv("RATE_LIMIT_PER_MIN", "1")
     rate_limit_module.reset_rate_limiter()

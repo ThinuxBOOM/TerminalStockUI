@@ -58,8 +58,8 @@ jobs:
       - run: python scripts/migrate.py up
       - run: python scripts/migrate.py up   # second run must be a no-op
       - run: psql "$MIGRATE_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/seed.sql
-      - name: Postgres-only tests (audit chain under concurrency)
-        run: TEST_POSTGRES_URL="$MIGRATE_DATABASE_URL" python -m pytest backend/tests/test_audit_concurrency.py -q
+      - name: Postgres-only tests (audit chain under concurrency, bar repair migration)
+        run: TEST_POSTGRES_URL="$MIGRATE_DATABASE_URL" python -m pytest backend/tests/test_audit_concurrency.py backend/tests/test_migration_0013.py -q
 
   stack-e2e:
     # Builds the production images, boots the stack, applies migrations,

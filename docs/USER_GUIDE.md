@@ -1,79 +1,88 @@
 # User guide
 
-OneMarket Analyzer is a research terminal for NYSE, Nasdaq, Shanghai (SSE)
-and Euronext Paris/Amsterdam/Brussels. Every number shows where it came
-from, when, and how fresh it is. Forecasts describe how far a price may
-move; they are not investment advice.
+OneMarket is a research terminal for NYSE, Nasdaq, Shanghai (SSE) and
+Euronext Paris, Amsterdam and Brussels. Every number shows where it came
+from and how fresh it is, and every forecast shows how accurate it has been.
+Not investment advice.
 
-Sign in at `/login` with the account your administrator created. The
-landing page (`/`) is public; everything else needs an account.
+Sign in at `/login` with the account your administrator created. The home
+page (`/`) is public; everything else needs an account. Press `Ctrl/⌘ K`
+anywhere for the command palette, or `/` to jump to search.
 
-## Reading the badges
+## Reading a forecast
 
-- **Source / grade**: which provider served the number and a quality grade
-  (A best to D).
-- **LIVE / DELAYED / CLOSED / STALE**: freshness of a quote. Free feeds are
-  usually 15 minutes delayed. `price at …` next to a quote is when that price
-  was set on the exchange.
-- **DAILY**: built from daily bars, which are as current as the last
-  completed trading session.
-- **EXPERIMENTAL**: on every up/down probability ("direction lean"). Next to
-  it, **Measured: ...** gives its walk-forward record against the historical
-  base rate. Today that record says the lean has no edge, so use the range
-  and risk figures instead.
+Forecasts cover 1, 7, 14 and 21 trading days and refresh after each close.
 
-When a source returns no live data the app says "unavailable" rather than
-showing an old or made-up number.
+- **Return range (80%)**: where the price ended in 80% of comparable past
+  periods, from a volatility model. Shown as percentages and prices. In
+  testing about 80% of real outcomes landed inside it, so roughly one in ten
+  ends below and one in ten above.
+- **10%+ drop risk**: the chance of a fall of 10% or more at some point
+  within the horizon.
+- **Outperformance rank** (US listings): where the stock sits among ~500
+  S&P 500 stocks on the model's chance of beating the median stock. "Top 8%"
+  means it scores higher than 92% of them. The edge is small: it shows up
+  across many stocks, not reliably in any single one. "Pushing it up" and
+  "Holding it back" list the factors behind the rank.
+- **Chance of rising**: stays close to the historical base rate (stocks rose
+  in about 55% of 21-day periods), because no model beat that base rate in
+  testing.
+- **How accurate is this?**: the measured record for the horizon you're
+  viewing: range coverage, drop-risk skill, ranking correlation and the
+  top-vs-bottom decile gap. The full record is in the Model Lab.
+
+Freshness badges: **LIVE / DELAYED / CLOSED / STALE** for quotes (free feeds
+are usually 15 minutes delayed; "price at …" is when the exchange set the
+price) and **DAILY** for numbers built from daily bars.
 
 ## Pages
 
-**Overview** (`/app`): market open/closed strip, your watchlist (21-day
-range and the experimental lean per symbol), recent research, market news,
-and collapsible sections for experimental direction leans per market,
-market indexes, market activity and data health.
+**Overview** (`/app`): market status, benchmark tiles, today's strongest
+signals (top and bottom of the ranking), the model's record, data health,
+your watchlist, news and market activity.
 
-**Discover** (`/search`): one search across all markets by ticker, name or
-provider symbol (`AAPL`, `Moutai`, `600519.SS`, `MC.PA`). A market filter
-narrows the results; when several instruments match, you pick, the app never
-guesses.
+**Screener** (`/screener`): every stock scored after the last close. Filter
+by market, horizon, sector, volatility regime, drop risk and rank; sort any
+column; export CSV. Click a row to open the stock.
 
-**Security Brief** (`/security/:symbol`): price in the native currency,
-chart (1D to 5Y, with SMA/EMA/RSI/MACD/Bollinger/VWAP/ATR overlays), events,
-analytics snapshot and the forecast card.
+**Security** (`/security/:symbol`), one page per stock:
 
-**Forecast** (`/forecast/:symbol`): the deterministic forecast for 1, 7, 14
-or 21 trading days. It leads with the return range (where 80% of comparable
-past periods ended), the volatility regime and the chance of a 10%+ drop;
-then the experimental direction lean with its measured record, model
-agreement, versions, calibration history and limitations. You can also
-request an AI opinion here (see below).
+- *Overview*: price chart (1W-5Y, indicator overlays), forecast summary and
+  risk summary.
+- *Forecast*: the range fan chart for every horizon (hover for prices), the
+  detail cards above, the measured record and the limitations.
+- *Risk*: volatility (realized and forecast), drawdowns, value at risk and
+  expected shortfall, beta and correlation, Sharpe/Sortino, liquidity, and a
+  **position sizer**: enter your account size and the share you're willing
+  to lose, and it sizes the position so that a move to the model's
+  10th-percentile outcome costs only that.
+- *Fundamentals*: growth, margins, returns, valuation and quality scores
+  from filed statements, plus events.
+- *News* and *AI*: headlines, and an AI summary of catalysts and risks on
+  request (counts toward your daily AI limit; kept separate from the
+  measured forecast).
 
-**Screener** (`/screener`): ranks a market (or the S&P 500 universe) by the
-experimental up probability, with its measured record shown above the
-results. Use it to find names to research. Per-symbol failures are listed,
-not hidden.
+**Watchlist** (`/watchlist`): live prices with each stock's rank, range and
+drop risk; switch horizons; import/export JSON; compare prices in one
+currency when fresh exchange rates are available. Saved in this browser for
+your account.
 
-**Backtest** (`/backtest`): walk-forward backtests with Brier score
-(0 is perfect, 0.25 is a coin flip), calibration error and a reliability
-table, failures included.
+**Portfolio risk** (`/portfolio`): enter holdings with the amount held in
+each (or import your watchlist) and analyze: volatility, 1-day VaR and
+CVaR, max drawdown, beta, diversification ratio, each holding's share of
+risk vs. share of capital, a correlation heatmap and the worst days. Saved
+in this browser for your account.
 
-**Watchlist** (`/watchlist`): symbols you follow, stored in this browser.
-Cross-market ranking in one currency only appears when fresh exchange rates
-are available; otherwise you see native-currency quotes and an explanation.
+**Model Lab** (`/model`): how the live model did on years it never saw,
+per horizon: range coverage by year, average return by model decile,
+ranking correlation by year, drop-risk and direction skill, and a per-stock
+lookup.
 
-**Data Health** (`/providers`): status, latency and error rate per data and
-AI provider. Administrators also manage AI provider keys and budgets here.
+**Data health** (`/providers`): status, latency and error rate per data and
+AI provider. Administrators manage AI provider keys and budgets here.
 
-**Account** (`/account`): your email and role, and sign-out (which ends your
+**Account** (`/account`): your email and role, and sign-out (ends your
 sessions on every device).
-
-## AI opinions
-
-AI never runs on page views. On the Forecast page choose a profile (Quick
-Insight, Forecast Assist, Deep Research, Report) and request an opinion. The
-opinion lists catalysts and risks tied to evidence, and its influence on the
-blended forecast is capped at 20%. This needs an AI provider key configured
-by an administrator; each user has a daily limit (`AI_DAILY_CALLS_PER_USER`).
 
 ## API access
 
@@ -86,24 +95,24 @@ TOKEN=$(curl -s -X POST "$BASE/api/auth/login" -H 'Content-Type: application/jso
   -d '{"email":"you@example.com","password":"..."}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
 AUTH="Authorization: Bearer $TOKEN"
 
-curl -H "$AUTH" "$BASE/api/market_data/quote?symbol=600519.SS"
-curl -H "$AUTH" "$BASE/api/forecast/AAPL?horizon=21"
-curl -H "$AUTH" "$BASE/api/screener?market=XPAR&horizon=21&limit=10"
+curl -H "$AUTH" "$BASE/api/forecast/AAPL/all"
+curl -H "$AUTH" "$BASE/api/screener?market=US&horizon=21&sort=out_rank&limit=20"
+curl -H "$AUTH" "$BASE/api/risk/AAPL"
+curl -H "$AUTH" -X POST "$BASE/api/risk/portfolio" -H 'Content-Type: application/json' \
+  -d '{"holdings":[{"symbol":"AAPL","weight":60},{"symbol":"MC.PA","weight":40}]}'
 ```
 
-Alerts are available through the API only (no page yet). They belong to the
-user who creates them and are evaluated every 15 minutes:
+Alerts are available through the API (no page yet). They belong to the user
+who creates them and are evaluated every 15 minutes:
 
 ```bash
 curl -H "$AUTH" -X POST "$BASE/api/alerts/" -H 'Content-Type: application/json' \
   -d '{"symbol":"AAPL","condition":"price_above","threshold":250}'
 curl -H "$AUTH" "$BASE/api/alerts/?active_only=true"
-curl -H "$AUTH" -X DELETE "$BASE/api/alerts/<alert_id>"
 ```
 
 Conditions: `price_above`, `price_below`, `direction_above`,
 `direction_below`, `change_pct_below`. Fired alerts are posted to
 `ALERTS_WEBHOOK_URL` when the operator sets one.
 
-Full request/response shapes: `docs/API_CONTRACT.md`. Market notes:
-`docs/SSE_NOTES.md`, `docs/EURONEXT_NOTES.md`.
+Request and response shapes: `docs/API_CONTRACT.md`.

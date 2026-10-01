@@ -72,6 +72,7 @@ def run_predict(market=None, registry=None) -> dict:
         registry = get_registry()
     instruments = [i for i in registry.all() if getattr(i, "sector", "") not in ("ETF", "Index")]
     by_symbol = {str(i.provider_symbol or i.exchange_symbol).upper(): i for i in instruments}
+    log.info("predict: loading daily bars for %d instruments (model %s)", len(by_symbol), bundle.version)
     payloads = market.get_bars_many(list(by_symbol), timeframe="1d", limit=BAR_LIMIT)
     frames = {s: bars_frame(p) for s, p in payloads.items()}
     frames = {s: f for s, f in frames.items() if len(f) >= F.WARMUP}
@@ -88,6 +89,7 @@ def run_predict(market=None, registry=None) -> dict:
 
     universe = {s: f for s, f in frames.items()
                 if str(by_symbol[s].exchange_mic).upper() in US_MICS and s.replace(".", "-") in set(bundle.universe)}
+    log.info("predict: %d instruments have a year of history; building cross-section", len(frames))
     cs = None
     try:
         cs, _ = build_cross_section(universe, markets.get("SPY"), bundle)
@@ -123,6 +125,7 @@ def run_predict(market=None, registry=None) -> dict:
                 },
             })
     rows = [_clean(r) for r in rows]
+    log.info("predict: saving %d scores (%d instruments skipped)", len(rows), len(errors))
     saved = save_scores(rows)
     return {"ok": True, "model_version": bundle.version, "symbols": len(frames), "rows": saved,
             "cross_section": cs.as_of if cs else None, "errors": errors,

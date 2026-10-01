@@ -5,8 +5,9 @@ What the application enforces, and what the operator must configure.
 ## Authentication
 
 - Every `/api/*` route requires a signed-in user, except `/api/auth/*`
-  (login itself) and `/api/cron/*` (scheduler, see below). `/health` is
-  public. The dependency is declared on each router, and
+  (login itself), `/api/cron/*` (scheduler, see below) and
+  `/api/public/model` (aggregate model accuracy for the landing page: no
+  symbols, prices, forecasts or user data). `/health` is public. The dependency is declared on each router, and
   `backend/tests/test_auth.py::test_every_data_route_requires_login` fails if
   any route answers without a token.
 - Passwords: bcrypt, 10 to 72 bytes. Login failures all return the same 401;
@@ -27,7 +28,11 @@ What the application enforces, and what the operator must configure.
 
 Requires `Authorization: Bearer <CRON_SECRET>` (constant-time compare). No
 header, user agent or source address is trusted instead of the secret.
-Retention windows cannot be set over HTTP.
+Retention windows cannot be set over HTTP. `predict` and `train` run as
+child processes with a lock file, so repeated calls cannot pile up work.
+
+Model bundles are JSON (coefficients and quantile grids), never pickles, so
+loading a model from the database cannot execute code.
 
 ## Secrets
 
@@ -61,7 +66,9 @@ Retention windows cannot be set over HTTP.
 - The frontend talks only to its own origin; the backend URL is fixed at
   build time (no query-string or storage override).
 - Rate limits per client address: `RATE_LIMIT_PER_MIN` for the API (default
-  300) and `AUTH_RATE_LIMIT_PER_MIN` for login/register/refresh (default 10).
+  300) and `AUTH_RATE_LIMIT_PER_MIN` for login/register (default 10), and
+  `REFRESH_RATE_LIMIT_PER_MIN` for token refresh (default 60; a refresh
+  needs a valid signed cookie, and every page load does one).
   Live AI calls are capped per user per 24 h (`AI_DAILY_CALLS_PER_USER`).
 - Request bodies over `MAX_REQUEST_BYTES` (default 1 MB) get 413.
 - Symbols and instrument ids are allow-listed before they reach providers or

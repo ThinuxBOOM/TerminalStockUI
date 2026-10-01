@@ -7,15 +7,15 @@ All routes are served under the app's origin (Caddy proxies `/api/*` and
 ## Conventions
 
 - **Auth.** Every `/api/*` route requires `Authorization: Bearer <access
-  token>` except `/api/auth/*` and `/api/cron/*`. Missing, expired or revoked
+  token>` except `/api/auth/*`, `/api/cron/*` and `/api/public/*`. Missing, expired or revoked
   tokens get `401`; admin-only routes return `403` to other users.
 - **Cron.** `/api/cron/*` requires `Authorization: Bearer <CRON_SECRET>`.
 - **Timestamps** are ISO 8601 UTC. Money carries an explicit `currency`.
 - **Fail closed.** Market data is live or an error (`502`), never a stale or
   synthetic `200`. Missing fields are listed, never zero-filled.
 - **Disclosure.** Forecast and AI responses carry `disclosure`; clients must
-  show it. Forecasts carry `validation_status: "experimental"` and
-  `measured_skill` (below).
+  show it. Forecasts carry `validation_status: "measured"` and their
+  walk-forward record in `measured` (below).
 
 ### Provenance envelope
 
@@ -47,30 +47,45 @@ Daily bars carry `ts` (the session's local midnight, as a UTC instant) and
 `date` (the exchange-local session day). Use `date` for calendar logic: the
 UTC date of `ts` is a day early for Shanghai and Euronext.
 
-### Measured skill
+### Forecast payload (engine v4)
 
-`measured_skill` on a forecast (one entry of the `measured-skill` table) is
-the pooled walk-forward record of the up probability for that horizon and
-calibration, from `scripts/evaluate_forecasts.py`. `null` when the running
-model version has not been evaluated.
+`GET /api/forecast/{symbol}?horizon=21` (abridged):
 
 ```json
 {
-  "horizon_days": 7,
-  "calibration": "shrinkage",
-  "skill": -0.0311,
-  "ci95": [-0.0382, -0.0239],
-  "verdict": "worse",
-  "symbols": 100,
-  "points": 31450,
-  "as_of": "2026-10-01",
-  "summary": "In walk-forward tests on 100 stocks, 7-day direction probabilities scored worse than the historical base rate (skill -0.031, 95% CI -0.038 to -0.024)."
+  "symbol": "NVDA", "exchange_mic": "XNAS", "horizon_days": 21,
+  "as_of": "2026-10-01", "target_date": "2026-10-30",
+  "expected_return_range": {"low": -0.099, "mid": 0.014, "high": 0.124, "coverage": "80% (volatility model)"},
+  "quantiles": {"0.05": -0.14, "0.10": -0.099, "0.25": -0.04, "0.50": 0.014, "0.75": 0.06, "0.90": 0.124, "0.95": 0.16},
+  "price_quantiles": {"0.10": 207.98, "0.50": 233.9, "0.90": 259.57},
+  "target_price": {"last_close": 230.86, "low": 207.98, "mid": 233.9, "high": 259.57},
+  "volatility_forecast_annual": 0.33, "volatility_regime": "low",
+  "drawdown_probability": 0.16, "drawdown_detail": {"threshold": 0.10, "horizon_days": 21},
+  "outperform_probability": 0.498, "outperform_rank": 0.45, "relative_available": true,
+  "signal_strength": "weak",
+  "drivers": {"for": [{"feature": "dist_sma200", "label": "distance from the 200-day average", "contribution": 0.031, "percentile": 0.85}], "against": []},
+  "direction_probability": 0.567, "direction_probability_raw": 0.571, "base_rate": 0.568,
+  "confidence": "low",
+  "measured": {"range_coverage_80": 0.793, "drop_risk_skill": 0.05, "out_ic": 0.025, "out_ic_t": 1.25, "out_decile_spread": 0.0076, "up_skill": -0.001, "up_skill_ci95": [-0.003, 0.001]},
+  "summary": "Over the next 21 trading days, NVDA has typically moved between -9.9% and +12.4% (80% range). ...",
+  "why": ["..."], "risks": ["..."], "limitations": ["..."],
+  "model_version": "v4-20261001-1507", "feature_version": "v4-features-1", "data_version": "...",
+  "cross_section_as_of": "2026-10-01",
+  "validation_status": "measured", "disclosure": "...", "provenance": {"...": "..."}
 }
 ```
 
-`skill` is the Brier skill score against the base rate (> 0 beats it).
-`verdict` is `worse` or `better` only when the 95% interval excludes zero,
-otherwise `indistinguishable`.
+- Returns are simple returns over the horizon (`-0.099` = -9.9%).
+- `outperform_*` are `null` and `relative_available` is `false` outside US
+  listings (the ranking model is trained on the S&P 500).
+- `outperform_rank` is the stock's percentile among the universe that day
+  (1 = best). `signal_strength`: `strong` (top/bottom 10%), `moderate`
+  (top/bottom 25%), `weak`.
+- `confidence` is `moderate` only for a strong ranking signal at a horizon
+  whose ranking edge is statistically significant, otherwise `low`.
+- `measured` is the walk-forward record for this horizon from the active
+  model bundle.
+- `422` when fewer than 253 daily bars are stored for the symbol.
 
 ### Errors
 
@@ -125,18 +140,25 @@ FastAPI shape: `{"detail": "..."}` (or an object for structured errors).
 | GET | `/api/news`, `/api/news/symbol/{symbol}` | needs Alpaca keys (`423` otherwise) |
 | GET | `/api/sentiment/premarket` | best-effort |
 
-### Analytics, forecasts, backtests
+### Analytics, forecasts, screening, risk
 
 | Method | Path | Query / body |
 |---|---|---|
 | GET | `/api/analytics/{symbol}` | `indicators` |
-| GET | `/api/forecast/{symbol}` | `horizon ∈ {1, 7, 14, 21}`; includes `measured_skill` |
-| GET | `/api/forecast/measured-skill` | pooled walk-forward skill per horizon, `shrinkage` and `isotonic` |
-| GET | `/api/forecast/{symbol}/calibration/history` | `horizon, limit` |
-| POST | `/api/backtest/run` | `{symbol, horizons}` (walk-forward, leakage-guarded) |
-| GET | `/api/backtest/{symbol}` | `include_reliability` |
-| GET | `/api/screener` | `market (MIC or SP500), min_direction, horizon, limit ≤ 50, offset` |
-| GET | `/api/signals/top` | `horizon, per_market` |
+| GET | `/api/forecast/{symbol}` | `horizon ∈ {1, 7, 14, 21}` (default 21) |
+| GET | `/api/forecast/{symbol}/all` | every horizon: `{symbol, horizons: {"1": ..., "21": ...}}` |
+| GET | `/api/forecast/model` | active model: version, training date, data range, walk-forward report per horizon |
+| GET | `/api/forecast/model/{symbol}` | that stock's walk-forward record (`in_universe`, range coverage, ranking hit rate per horizon) |
+| GET | `/api/screener` | `market (US/SP500, ALL or a MIC), horizon, sort (out_rank, p_up, drawdown, volatility, range_width, change, symbol), order, min_rank, max_drawdown, regime, sector, q, symbols (comma list), limit ≤ 200, offset`. Rows come from the daily scores; `pending: true` while the first scoring run is in progress |
+| GET | `/api/signals/top` | `horizon, n ≤ 25`: `top` and `bottom` of the S&P 500 ranking, never overlapping |
+| GET | `/api/risk/{symbol}` | `lookback ≤ 1000` sessions: volatility, drawdowns, VaR/CVaR (1/5/21 days), beta and correlation vs. the venue benchmark, Sharpe/Sortino, liquidity |
+| POST | `/api/risk/portfolio` | `{holdings: [{symbol, weight}], lookback}` (1-25 holdings, weights in any positive units): volatility, VaR/CVaR, max drawdown, beta, diversification ratio, risk contributions, correlation matrix, worst days; `unavailable` lists holdings without history |
+
+### Public (no account)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/public/model` | aggregate walk-forward accuracy of the active model (no symbols, prices or user data); used by the landing page |
 
 ### AI (explicit request only)
 
@@ -171,8 +193,10 @@ FastAPI shape: `{"detail": "..."}` (or an object for structured errors).
 
 ### Scheduler (`/api/cron`, `CRON_SECRET`)
 
-`ingest` (`symbol`, or `universe=sp500&shard=N&shards=M`), `calibrate`,
-`evaluate`, `snapshot`, `score`, `health`: GET or POST. `retention`: GET is a
+`ingest` (`symbol`, or `universe=sp500&shard=N&shards=M`), `evaluate`,
+`snapshot`, `score`, `health`: GET or POST. `predict` (daily scoring) and
+`train` (weekly retraining) start a child process and return
+`{job, started, pid}`; POST `{"wait": true}` runs in-process instead. `retention`: GET is a
 dry run; POST `{"apply": true}` purges (windows come from server config
 only). Batches report per-symbol `errors` instead of failing whole.
 

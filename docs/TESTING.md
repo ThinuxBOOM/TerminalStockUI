@@ -24,7 +24,9 @@ Notable coverage:
 | cron auth and retention floor | `test_cron_retention.py`, `test_cron_timeouts.py` |
 | fail-closed data (502/423/422, never stale 200) | `test_failure_modes.py`, `test_provenance.py`, `test_honesty_envelope.py` |
 | session dates east of UTC, quote parsing | `test_session_dates.py`, `test_sse_provider.py` |
-| forecasting, walk-forward leakage guard | `test_forecast*.py`, `test_backtest_api.py` |
+| forecast engine v4: no look-ahead, scale-free features, range calibration, JSON round trip, end-to-end training on synthetic data, serving, API, daily scoring, screener, signals, public summary | `test_forecast_v4.py` |
+| risk metrics (vol, beta, drawdown, VaR) and the risk API | `test_risk.py` |
+| bar timestamps at exchange midnight, index venues | `test_forecast_v4.py`, `test_alpaca_bars.py` |
 | key redaction, audit hash chain | `test_security_redaction.py`, `test_audit.py` |
 | migrations vs models | `test_db_session.py` |
 
@@ -33,7 +35,7 @@ Notable coverage:
 ```bash
 cd frontend
 npm ci
-npm test          # pure-logic specs under src/
+npm test          # logic specs plus server-rendered component tests (charts, forecast panels)
 npm run build
 ```
 

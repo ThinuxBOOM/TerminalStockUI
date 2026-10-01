@@ -77,6 +77,7 @@ RETENTION_MARKET_SNAPSHOTS_DAYS = 2 * 365  # 730 (compressed raw; heavier than b
 RETENTION_AI_TOKEN_LEDGER_DAYS = 365  # 1y (0006 successor of ai_token_logs)
 RETENTION_PROVIDER_HEALTH_HISTORY_DAYS = 90  # ops samples; 90d like ticks
 RETENTION_INDICATOR_CACHE_DAYS = 30  # stale cache eviction on updated_at
+RETENTION_CROSS_SECTIONS_DAYS = 90
 # --- Agent 3 snapshot tiers (additive; revamp values untouched) ---
 RETENTION_SNAPSHOTS_RAW_DAYS = 30  # non-gzip captures; 30d on created_at
 RETENTION_SNAPSHOTS_COMPRESSED_DAYS = 365  # gzip captures; 1y on created_at
@@ -118,6 +119,9 @@ RETENTION_RULES: list[dict[str, Any]] = [
     {"dataset": "indicator_cache", "table": "indicator_cache",
      "retention_days": RETENTION_INDICATOR_CACHE_DAYS,
      "time_column": "updated_at", "notes": "stale cache eviction; 30d on updated_at"},
+    {"dataset": "cross_sections", "table": "cross_sections",
+     "retention_days": RETENTION_CROSS_SECTIONS_DAYS,
+     "time_column": "created_at", "notes": "daily v4 universe distributions; only the latest is read; 90d"},
 ]
 
 RETENTION_DAYS: dict[str, int] = {r["dataset"]: r["retention_days"] for r in RETENTION_RULES}
@@ -133,6 +137,7 @@ _ENV_KEYS = {
     "ai_token_ledger": "RETENTION_AI_TOKEN_LEDGER_DAYS",
     "provider_health_history": "RETENTION_PROVIDER_HEALTH_HISTORY_DAYS",
     "indicator_cache": "RETENTION_INDICATOR_CACHE_DAYS",
+    "cross_sections": "RETENTION_CROSS_SECTIONS_DAYS",
     "snapshots_raw": "RETENTION_SNAPSHOTS_RAW_DAYS",
     "snapshots_compressed": "RETENTION_SNAPSHOTS_COMPRESSED_DAYS",
 }

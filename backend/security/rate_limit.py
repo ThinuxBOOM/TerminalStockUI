@@ -2,7 +2,11 @@
 
 Env:
   RATE_LIMIT_PER_MIN       general /api/* budget per client per 60s (default 300; 0 disables)
-  AUTH_RATE_LIMIT_PER_MIN  budget for login/register/refresh per client (default 10)
+  AUTH_RATE_LIMIT_PER_MIN  budget for login/register per client (default 10): password guessing
+  REFRESH_RATE_LIMIT_PER_MIN  budget for token refresh per client (default 60). Every page
+                           load refreshes once; a refresh needs a valid signed httpOnly cookie,
+                           so it does not need the login budget (which signed users out
+                           after a few reloads or tabs)
 
 The client is ``request.client.host``. Behind the Caddy reverse proxy that is
 the real visitor address because uvicorn runs with ``--proxy-headers
@@ -21,7 +25,8 @@ from fastapi import HTTPException, Request
 
 _WINDOW_S = 60.0
 _MAX_CLIENTS = 10_000
-_AUTH_PATHS = ("/api/auth/login", "/api/auth/register", "/api/auth/refresh")
+_AUTH_PATHS = ("/api/auth/login", "/api/auth/register")
+_REFRESH_PATH = "/api/auth/refresh"
 
 _buckets: "OrderedDict[str, deque]" = OrderedDict()
 _lock = threading.Lock()
@@ -52,6 +57,8 @@ def check_rate_limit(request: Request) -> tuple[int, int] | None:
         return None
     if path in _AUTH_PATHS:
         scope, limit = "auth", _env_int("AUTH_RATE_LIMIT_PER_MIN", 10)
+    elif path == _REFRESH_PATH:
+        scope, limit = "refresh", _env_int("REFRESH_RATE_LIMIT_PER_MIN", 60)
     else:
         scope, limit = "api", _env_int("RATE_LIMIT_PER_MIN", 300)
     if limit <= 0:

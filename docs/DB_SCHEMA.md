@@ -19,7 +19,7 @@ an old SQLite file).
 | `price_bars` | 0001 | daily OHLCV; `ts` is the session's local midnight in UTC | 5 y |
 | `forecasts` | 0001 | versioned forecast log (model/feature/data version) | 3 y |
 | `audit_logs` | 0001 | append-only hash chain | 7 y, chain head never purged |
-| `calibration_snapshots` | 0002, 0009 | walk-forward Brier/ECE per symbol and horizon | kept |
+| `calibration_snapshots` | 0002, 0009 | v3 walk-forward snapshots; no longer written (engine v4 keeps its record in `model_artifacts`) | kept |
 | `alerts` | 0003, 0011 | alert rules, owned by `user_id` | kept |
 | `alert_events` | 0003 | fired alerts (cascade with the rule) | kept |
 | `provider_secrets` | 0004 | AI provider keys, Fernet ciphertext | kept |
@@ -31,6 +31,9 @@ an old SQLite file).
 | `provider_health_history` | 0006 | provider health samples | 90 d |
 | `indicator_cache` | 0006 | cached indicator payloads | 30 d |
 | `users` | 0008, 0011 | email, bcrypt hash, `is_admin`, `token_version` | kept |
+| `model_artifacts` | 0012 | forecast engine v4 bundles (JSON) with their walk-forward report; `active` marks the live one | kept |
+| `forecast_scores` | 0012 | latest forecast per (symbol, horizon) from the daily `predict` job | overwritten daily |
+| `cross_sections` | 0012 | one day's universe distribution (quantile grids, sector medians) used to rank a single stock | kept (small) |
 
 Retention runs weekly from the scheduler (`backend/observability/retention.py`);
 override a window with `RETENTION_<DATASET>_DAYS` in `.env`.
@@ -72,6 +75,8 @@ ai_token_ledger.user_id         nullable (scheduled/system calls)
 | 0009 | ensemble-v3 skill columns on calibration_snapshots |
 | 0010 | RLS on all tables, grants revoked from anon/authenticated |
 | 0011 | billing and tier columns dropped; users.token_version; alerts.user_id FK |
+| 0012 | model_artifacts, forecast_scores, cross_sections (forecast engine v4) |
+| 0013 | index instruments moved to their venue; instrument time zones; daily bars re-stamped to exchange-local midnight (duplicates at 00:00 UTC removed) |
 
-Add a migration as the next number (`0012_short_name.sql`), make it safe to
+Add a migration as the next number (`0014_short_name.sql`), make it safe to
 re-run where possible, and say in its header if it deletes data.
