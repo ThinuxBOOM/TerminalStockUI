@@ -1,3 +1,4 @@
+import "../features/landing/landing.css";
 import React, { useEffect, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -63,20 +64,23 @@ function LoginPage() {
 
   const registering = mode === "register";
   return (
-    <div className="flex min-h-screen items-center justify-center bg-term-bg px-4">
-      <div className="w-full max-w-md">
-        <Link to="/" className="text-[11px] tracking-widest text-term-muted hover:text-term-text">
-          ← ONEMARKET ANALYZER
+    <div className="lp relative flex min-h-screen items-center justify-center px-4">
+      <div className="lp-grid" />
+      <div className="relative w-full max-w-sm">
+        <Link to="/" className="flex items-center justify-center gap-2.5" aria-label="OneMarket home">
+          <img src="/logo.svg" alt="" className="h-9 w-9" width="36" height="36" />
+          <span className="text-lg font-semibold tracking-tight text-white">OneMarket</span>
         </Link>
-        <h1 className="mt-2 text-xl font-bold text-term-text">
-          {registering ? "Create an account" : "Sign in"}
-        </h1>
-        <form onSubmit={onSubmit} className="term-panel mt-4 space-y-3 p-4">
+        <form onSubmit={onSubmit} className="lp-glass mt-8 space-y-4 rounded-2xl p-6">
           <div>
-            <label className="term-label" htmlFor="login-email">Email</label>
+            <h1 className="text-lg font-semibold text-white">{registering ? "Create your account" : "Welcome back"}</h1>
+            <p className="mt-1 text-sm text-term-muted">{registering ? "Use at least 10 characters for your password." : "Sign in to the terminal."}</p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-term-muted" htmlFor="login-email">Email</label>
             <input
               id="login-email"
-              className="term-input mt-1 w-full"
+              className="term-input mt-1.5 w-full"
               type="email"
               required
               autoComplete="email"
@@ -86,12 +90,10 @@ function LoginPage() {
             />
           </div>
           <div>
-            <label className="term-label" htmlFor="login-password">
-              Password{registering ? " (at least 10 characters)" : ""}
-            </label>
+            <label className="text-xs font-medium text-term-muted" htmlFor="login-password">Password</label>
             <input
               id="login-password"
-              className="term-input mt-1 w-full"
+              className="term-input mt-1.5 w-full"
               type="password"
               required
               minLength={registering ? 10 : 1}
@@ -102,15 +104,15 @@ function LoginPage() {
             />
           </div>
           {error ? (
-            <p className="text-xs text-term-red" role="alert">{error}</p>
+            <p className="rounded-md border border-term-red/30 bg-term-redDim px-3 py-2 text-xs text-term-red" role="alert">{error}</p>
           ) : null}
-          <button className="term-btn w-full text-sm" type="submit" disabled={busy || status === "loading"}>
-            {busy ? "PLEASE WAIT…" : registering ? "CREATE ACCOUNT →" : "SIGN IN →"}
+          <button className="term-btn w-full py-2.5" type="submit" disabled={busy || status === "loading"}>
+            {busy ? "Please wait…" : registering ? "Create account" : "Sign in"}
           </button>
           {registrationOpen ? (
             <button
               type="button"
-              className="term-btn-ghost w-full text-xs"
+              className="w-full text-center text-xs text-term-muted hover:text-term-text"
               onClick={() => {
                 setMode(registering ? "login" : "register");
                 setError(null);
@@ -118,11 +120,11 @@ function LoginPage() {
             >
               {registering ? "Have an account? Sign in" : "New here? Create an account"}
             </button>
-          ) : null}
+          ) : (
+            <p className="text-center text-xs text-term-faint">Accounts are created by your administrator.</p>
+          )}
         </form>
-        <p className="mt-3 text-2xs text-term-muted">
-          Forecasts are experimental probabilities, not investment advice.
-        </p>
+        <p className="mt-6 text-center text-2xs text-term-faint">Statistical estimates, not investment advice.</p>
       </div>
     </div>
   );

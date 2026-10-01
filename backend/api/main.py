@@ -33,6 +33,7 @@ from backend.api.market_data import router as market_data_router
 from backend.api.market_data import securities_router
 from backend.api.market_index import router as market_index_router
 from backend.api.risk import router as risk_router
+from backend.api.public import router as public_router
 from backend.api.markets import router as markets_router
 from backend.api.news import router as news_router
 from backend.api.premarket import router as premarket_router
@@ -113,6 +114,7 @@ def create_app() -> FastAPI:
         markets_router,
         market_index_router,
         risk_router,
+        public_router,
     ):
         app.include_router(router)
 

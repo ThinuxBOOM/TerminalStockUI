@@ -302,3 +302,15 @@ def test_daily_bars_are_stored_at_exchange_midnight():
     assert a == b == datetime(2026, 1, 25, 16, 0, tzinfo=utc)
     us = canonical_session_ts(datetime(2026, 3, 6, 5, 0, tzinfo=utc), "America/New_York")
     assert us == datetime(2026, 3, 6, 5, 0, tzinfo=utc)
+
+
+def test_public_model_summary_is_aggregate_only():
+    from backend.api.public import router as public_router
+
+    app = FastAPI()
+    app.include_router(public_router)
+    body = TestClient(app).get("/api/public/model").json()  # no auth header
+    assert body["universe_size"] > 400 and set(body["horizons"]) == {"1", "7", "14", "21"}
+    assert len(body["horizons"]["21"]["out_deciles"]) == 10
+    text = json.dumps(body)
+    assert "per_symbol" not in text and "AAPL" not in text

@@ -173,7 +173,8 @@ def test_refresh_without_cookie_401(env):
 # --- authorization ---------------------------------------------------------------
 
 
-_PUBLIC = {"/", "/health", "/api/auth/config", "/api/auth/register", "/api/auth/login", "/api/auth/refresh"}
+_PUBLIC = {"/", "/health", "/api/auth/config", "/api/auth/register", "/api/auth/login", "/api/auth/refresh",
+           "/api/public/model"}
 
 
 def test_every_data_route_requires_login(env):
