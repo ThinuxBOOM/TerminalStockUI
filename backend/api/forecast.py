@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from backend.forecasting.common import FORECAST_HORIZONS
+from backend.forecasting.measured_skill import measured_skill, measured_skill_table
 from backend.forecasting.service import DISCLOSURE as FORECAST_DISCLOSURE
 from backend.forecasting.service import ForecastService, get_forecast_service
 from backend.market_data.provenance import build_provenance
@@ -248,6 +249,15 @@ def forecast_drivers(
     return why[:6], risks[:6]
 
 
+@router.get("/measured-skill")
+def get_measured_skill() -> dict:
+    """Pooled walk-forward skill of the direction probabilities, per horizon.
+
+    Declared before ``/{symbol}`` so it is not read as a ticker.
+    """
+    return measured_skill_table()
+
+
 @router.get("/{symbol}/calibration/history")
 def calibration_history(
     symbol: str,
@@ -412,6 +422,9 @@ def get_forecast(
     # issues must never break the forecast path).
     payload["calibration"] = cal_rows
     payload["calibration_meta"] = cal_meta
+    # Measured track record for this horizon and calibration (None when the
+    # running model version has not been evaluated).
+    payload["measured_skill"] = measured_skill(int(horizon), result.get("calibration_method"))
     # Persist the versioned record so GET /api/audit/forecasts (homepage
     # "Latest research") is fed by live runs. Off the read path: scheduled
     # as a background task so the forecast response never waits on the DB

@@ -15,6 +15,7 @@ import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
 import EmptyState from "../../components/EmptyState";
 import ExperimentalBadge from "../../components/ExperimentalBadge";
+import { DirectionLean, ForecastOutlook } from "../../components/ForecastOutlook";
 import { SourceBadge, BlendedForecastBar } from "../../components/ResearchSection";
 
 // PriceChart (and lightweight-charts) loads on demand — the brief header,
@@ -46,13 +47,6 @@ function eventsFromAnalytics(a) {
     }
   }
   return out.slice(0, 12);
-}
-
-function signalWord(prob) {
-  if (typeof prob !== "number" || !Number.isFinite(prob)) return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
-  if (prob >= 0.55) return { word: "RISING", arrow: "↑", cls: "text-term-green" };
-  if (prob <= 0.45) return { word: "FALLING", arrow: "↓", cls: "text-term-red" };
-  return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
 }
 
 // ChartControls — timeframe presets (1D/1W/1M/3M/1Y/2Y/5Y, each wired to a
@@ -540,16 +534,11 @@ function ForecastUnavailable({ detail, onRetry }) {
 function ForecastCard({ price, currency, forecast: f, symbol, horizon, onHorizon, compact = false }) {
   const why = (f.why ?? []).slice(0, 6);
   const risks = (f.risks ?? []).slice(0, 6);
-  const prob = Number(f.probability);
-  const probPct = Number.isFinite(prob) ? `${(prob * 100).toFixed(0)}%` : "—";
-  const sig = signalWord(prob);
+  const iv = f.intervals;
   const plainSummary = (() => {
-    if (!Number.isFinite(prob)) return "Not enough data to form a view right now.";
-    if (prob >= 0.65) return `Leaning up — about a ${probPct} chance of rising over ${f.horizon_days}d. Research starting point, never a guarantee.`;
-    if (prob >= 0.55) return `Slightly positive — about a ${probPct} chance of rising over ${f.horizon_days}d. Worth watching.`;
-    if (prob > 0.45) return `No clear direction — about ${probPct}. Waiting is a perfectly fine decision.`;
-    if (prob > 0.35) return `Slightly negative — only about a ${probPct} chance of rising over ${f.horizon_days}d. Be extra careful.`;
-    return `Leaning down — only about a ${probPct} chance of rising over ${f.horizon_days}d. Avoid chasing.`;
+    if (!iv || !Number.isFinite(iv.low) || !Number.isFinite(iv.high)) return "Not enough history to estimate a range right now.";
+    const pct = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(0)}%`;
+    return `Over ${f.horizon_days} trading days this stock has usually moved between ${pct(iv.low)} and ${pct(iv.high)}. That shows how far it may move, not which way: the up/down lean below has not beaten a simple baseline in testing.`;
   })();
   const quantProb = typeof f.quant_probability === "number" && Number.isFinite(f.quant_probability) ? f.quant_probability : f.probability;
   const versions = f.versions ?? {};
@@ -577,22 +566,16 @@ function ForecastCard({ price, currency, forecast: f, symbol, horizon, onHorizon
           ))}
         </div>
       </div>
-      <p className={`tnum term-num mt-2 text-2xl font-black ${sig.cls}`} aria-label={`${probPct} ${sig.word} over ${f.horizon_days} days`}>
-        {probPct} <span aria-hidden="true">{sig.arrow}</span>{sig.word}
-      </p>
-      <dl className="tnum mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs">
-        <div>Confidence: <b>{f.confidence}</b></div>
-        <div>Data Quality: <b className="text-term-cyan">{f.quality_grade}</b></div>
-        <div>Horizon: <b>{f.horizon_days}d</b></div>
-      </dl>
+      <ForecastOutlook forecast={f} currency={currency} size="sm" className="mt-2" />
       <div className="mt-2 rounded bg-term-panel2 p-3 text-sm text-term-text" role="status">
         <b>In plain English:</b> {plainSummary}
       </div>
+      <DirectionLean forecast={f} className="mt-2" />
       <div className="mt-2 space-y-1 text-sm">
-        <p>
-          Forecast: <b className="text-term-text">{f.label}, {f.horizon_days} days</b> <FreshnessBadge p={f.provenance} />
+        <p className="text-xs">
+          Freshness: <FreshnessBadge p={f.provenance} />
         </p>
-        <p className="text-xs">Confidence: <b>{f.confidence}</b> <span className="text-term-muted">(how much the models agree)</span></p>
+        <p className="text-xs">Model agreement: <b>{f.confidence}</b> <span className="text-term-muted">(how much the models agree, not how often they are right)</span></p>
         <p className="text-xs">Data quality: <b className="text-term-cyan">{f.quality_grade}</b></p>
         <p className="text-xs">
           Model: <b>{versions.model_version ?? versions.model_name ?? f.provider}</b>

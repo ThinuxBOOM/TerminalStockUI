@@ -5,7 +5,7 @@ import Reveal from "./Reveal.jsx";
 
 const STEPS = [
   { id: "SEARCH", Icon: Search, t: "Search", d: "One box, six markets. AAPL, 600519.SS, ASML.AS — all resolve.", to: "/search", cta: "Try search" },
-  { id: "UNDERSTAND", Icon: Eye, t: "Understand", d: "Up or down in plain words, with the probability attached.", to: "/forecast/AAPL", cta: "See a forecast" },
+  { id: "UNDERSTAND", Icon: Eye, t: "Understand", d: "How far it may move, in plain words, with the model's measured track record.", to: "/forecast/AAPL", cta: "See a forecast" },
   { id: "COMPARE", Icon: SlidersHorizontal, t: "Compare", d: "Top Picks ranks ideas by the math — not hype.", to: "/screener", cta: "Browse picks" },
   { id: "RESEARCH", Icon: FileText, t: "Research", d: "One brief per stock: chart, story and full trail.", to: "/security/AAPL", cta: "Open a brief" },
   { id: "FOLLOW", Icon: Star, t: "Follow", d: "One tap to My List. Check back any time.", to: "/watchlist", cta: "Open My List" },

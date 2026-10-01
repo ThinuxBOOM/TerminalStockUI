@@ -78,33 +78,55 @@ Spec §§5 (M3), §6 testing, §7 definition of done.
 ### Measured skill (2026-10-01)
 
 `scripts/evaluate_forecasts.py` runs the Backtest Lab's fold scorer over many
-symbols and compares the probabilities the app shows with the **base rate**:
-each fold's share of "up" labels in its training window. Stocks rise slightly
-more often than they fall, so that base rate, not 0.5, is the bar to beat.
+symbols and compares the up probabilities with the **base rate**: each fold's
+share of "up" labels in its training window. Stocks rise slightly more often
+than they fall, so that base rate, not 0.5, is the bar to beat.
+
+The app shows one of two probabilities. Until the nightly calibration job has
+written a snapshot for a symbol it shows the shrinkage-calibrated ensemble;
+afterwards, the isotonic/Platt-calibrated one. Both are scored; the isotonic
+calibrator is fit walk-forward on earlier points whose outcome was known.
 
 100 random symbols from the stored history (about two years of daily bars),
 expanding walk-forward, train >= 100 bars, 21-bar test folds, gap 21:
 
-| Horizon | Points | Brier model | Brier base rate | Skill (95% CI) | Hit rate model / base |
-|---|---|---|---|---|---|
-| 1 day | 31,521 | 0.2544 | 0.2503 | -0.016 (-0.020 to -0.013) | 50.7% / 51.4% |
-| 7 days | 31,450 | 0.2599 | 0.2520 | -0.031 (-0.038 to -0.024) | 50.6% / 52.4% |
-| 21 days | 30,382 | 0.2615 | 0.2586 | -0.011 (-0.030 to 0.007) | 52.1% / 53.1% |
+| Horizon | Points | Brier base rate | Shrinkage: Brier, skill (95% CI) | Isotonic: Brier, skill (95% CI) |
+|---|---|---|---|---|
+| 1 day | 31,521 | 0.2503 | 0.2544, -0.016 (-0.020 to -0.013) | 0.2556, -0.021 (-0.026 to -0.017) |
+| 7 days | 31,450 | 0.2520 | 0.2599, -0.031 (-0.038 to -0.024) | 0.2722, -0.080 (-0.099 to -0.063) |
+| 14 days | 31,082 | 0.2547 | 0.2611, -0.025 (-0.039 to -0.013) | 0.2805, -0.101 (-0.129 to -0.073) |
+| 21 days | 30,382 | 0.2586 | 0.2615, -0.011 (-0.030 to 0.007) | 0.2797, -0.082 (-0.107 to -0.054) |
 
 Skill = 1 - Brier(model) / Brier(base rate); CI by bootstrap over symbols.
-The model is worse than the base rate at 1 and 7 days, with confidence
-intervals clear of zero, and no better at 21 days. Its Brier score is above
-0.25 at every horizon, so it is also worse than always saying 50%. Blending
-it toward the base rate (`brier_blend` in the report) helps slightly at 21
-days and not at all at 1 or 7. That is too small to rely on given overlapping
-21-day labels and two years of data.
 
-This is why forecasts carry `validation_status: "experimental"`. Re-run the
-script after any model change:
+- The shrinkage probabilities are worse than the base rate at 1, 7 and 14
+  days and no better at 21. Their Brier score is above 0.25 everywhere, so
+  they are also worse than always saying 50%.
+- Isotonic calibration makes them clearly worse at every horizon: fit per
+  symbol on a few hundred noisy points, it learns the noise and pushes
+  probabilities further from the truth.
+- Blending toward the base rate (`brier_blend` in the report) helps only
+  slightly at 14 and 21 days, too little to rely on with overlapping labels
+  and two years of data.
+
+**How the app uses this.** The report is committed as
+`backend/forecasting/measured_skill.json`. Every forecast response carries
+`measured_skill` for its horizon and calibration, `GET
+/api/forecast/measured-skill` serves the whole table, and the UI leads with
+the return range, volatility and drop risk. The up probability is shown as an
+experimental "direction lean" with its measured record next to it. The file
+is ignored once `ENSEMBLE_VERSION` changes, and the UI then says "not
+measured". Re-run after any model change:
 
 ```bash
-python scripts/evaluate_forecasts.py --symbols 100 --horizons 1 7 21 --out report.json
+python scripts/evaluate_forecasts.py --symbols 100 --horizons 1 7 14 21 \
+    --out backend/forecasting/measured_skill.json
 ```
+
+The return range and drop probability have not been back-tested the same
+way yet (does the 80% band contain about 80% of outcomes?). They rest on
+volatility persistence, which is well documented, but should get the same
+treatment.
 
 ### Calibration snapshots (Phase 2b)
 

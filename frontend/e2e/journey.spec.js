@@ -36,6 +36,9 @@ test("sign in, read a security brief, survive a reload, sign out", async ({ page
   await expect(page.getByText(/price at /)).toBeVisible();
   await expect(page.getByText("PRICE CHART", { exact: false })).toBeVisible();
   await expect(page.getByText("EXPERIMENTAL", { exact: true }).first()).toBeVisible();
+  // Range leads; the direction lean carries its measured track record.
+  await expect(page.getByText(/-day range · 80% of comparable past periods/).first()).toBeVisible();
+  await expect(page.getByText(/^Measured: /).first()).toBeVisible();
   await expect(page.getByText(/Not investment advice/i).first()).toBeVisible();
 
   // A full reload restores the session from the httpOnly refresh cookie.

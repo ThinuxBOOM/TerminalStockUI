@@ -117,3 +117,13 @@ def test_signals_excludes_sp500_bulk():
     assert len(kept) < 60  # same order as pre-SP500 universe
     assert any(str(getattr(i, "provider_symbol", "") or "").upper() == "TSLA" for i in kept)
     assert signals.top_signals  # endpoint still wired
+
+
+def test_signal_buckets_never_list_a_stock_twice():
+    from backend.api.signals import _buckets
+
+    rows = [{"symbol": s, "signal_probability": p} for s, p in (("A", 0.65), ("B", 0.52), ("C", 0.4))]
+    out = _buckets(rows, 5)
+    assert [r["symbol"] for r in out["top_buy"]] == ["A", "B"]
+    assert [r["symbol"] for r in out["top_short"]] == ["C"]
+    assert out["count"] == 3

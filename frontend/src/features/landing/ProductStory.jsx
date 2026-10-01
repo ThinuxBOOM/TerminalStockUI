@@ -5,7 +5,7 @@ import Reveal from "./Reveal.jsx";
 const STEPS = [
   { n: "01", t: "Markets", d: "Six venues, one search box. NYSE to Shanghai without tab-switching.", to: "/search" },
   { n: "02", t: "Watchlists", d: "Keep the signals you care about close, saved in this browser.", to: "/watchlist" },
-  { n: "03", t: "Forecasts", d: "1–21 day odds in plain words, with confidence and quality grades.", to: "/forecast/AAPL" },
+  { n: "03", t: "Forecasts", d: "1–21 day price ranges and drop risk in plain words, graded against a baseline.", to: "/forecast/AAPL" },
   { n: "04", t: "Research", d: "Analytics, events, technicals, fundamentals — one brief per stock.", to: "/security/AAPL" },
   { n: "05", t: "Backtests", d: "Judge past calls honestly: wins and misses, before you trust.", to: "/backtest" },
 ];

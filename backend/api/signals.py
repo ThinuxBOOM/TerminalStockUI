@@ -45,14 +45,28 @@ def _plain_verdict(prob: float) -> tuple[str, str]:
     except Exception:
         return "No signal", "Not enough data to form a view."
     if p >= 0.65:
-        return "Likely to rise", "Models + recent news lean positive. Still risky — prices can fall."
+        return "Leans up", "Models + recent news lean positive. The lean is experimental — prices can fall."
     if p >= 0.55:
         return "Slightly positive", "A gentle upward lean. Treat as watch, not a buy order."
     if p > 0.45:
         return "Mixed / flat", "Signals conflict. No clear direction — waiting is fine."
     if p > 0.35:
         return "Slightly negative", "A gentle downward lean. Extra caution if holding."
-    return "Likely to fall", "Models + recent news lean negative. Avoid chasing dips."
+    return "Leans down", "Models + recent news lean negative. The lean is experimental, not a sell signal."
+
+
+def _buckets(rows: list[dict], n: int) -> dict:
+    """Strongest up-leans (p >= 0.5) and down-leans (p < 0.5), n each.
+
+    Disjoint by construction: taking the top and bottom n of one ranking
+    listed the same stock under both buckets in markets with < 2n symbols.
+    """
+    ranked = sorted(rows, key=lambda r: r["signal_probability"], reverse=True)
+    return {
+        "top_buy": [r for r in ranked if r["signal_probability"] >= 0.5][:n],
+        "top_short": [r for r in reversed(ranked) if r["signal_probability"] < 0.5][:n],
+        "count": len(ranked),
+    }
 
 
 def _blend(ensemble_p: float, sentiment: float) -> float:
@@ -249,13 +263,7 @@ def top_signals(
                     rows.append(row)
                 elif skip is not None:
                     skipped.append(skip)
-        ranked = sorted(rows, key=lambda r: r["signal_probability"], reverse=True)
-        n = max(1, min(int(per_market), 10))
-        markets[mic] = {
-            "top_buy": ranked[:n],
-            "top_short": list(reversed(ranked[-n:])) if ranked else [],
-            "count": len(ranked),
-        }
+        markets[mic] = _buckets(rows, max(1, min(int(per_market), 10)))
     try:
         provs = []
         for mic_data in markets.values():

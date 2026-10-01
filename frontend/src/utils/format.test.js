@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMetric } from "./format";
+import { formatMetric, formatRange } from "./format";
 
 describe("formatMetric", () => {
   it("shows the value, with the formula as a tooltip", () => {
@@ -17,5 +17,15 @@ describe("formatMetric", () => {
     expect(formatMetric({ value: { kind: "series", latest: 61.2 }, formula: "", source_fields: [], quality_flag: "ok" }).text).toBe("61.2");
     expect(formatMetric({ value: { kind: "frame", latest: { macd: 1.5, signal: 1.25 } }, formula: "", source_fields: [], quality_flag: "ok" }).text).toBe("macd 1.5 · signal 1.25");
     expect(formatMetric("plain").text).toBe("plain");
+  });
+});
+
+describe("formatRange", () => {
+  it("formats a return band with signs", () => {
+    expect(formatRange({ low: -0.081, high: 0.094 })).toBe("−8% to +9%");
+  });
+  it("returns an em dash for a missing band", () => {
+    expect(formatRange(null)).toBe("—");
+    expect(formatRange({ low: Number.NaN, high: 0.1 })).toBe("—");
   });
 });

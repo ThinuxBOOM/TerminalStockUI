@@ -9,7 +9,7 @@ import EmptyState from "../components/EmptyState";
 import Skeleton from "../components/Skeleton";
 import StatusPill from "../components/StatusPill";
 import FXProvenanceBanner from "../components/FXProvenanceBanner";
-import { changeArrow, changeColor, formatPct1, formatDateTime } from "../utils/format";
+import { changeArrow, changeColor, formatPct1, formatDateTime, formatRange } from "../utils/format";
 
 const GATE_MESSAGE = "Cross-market comparison unavailable — FX provenance missing";
 const MAX_WATCHLIST_ROWS = 100;
@@ -39,11 +39,11 @@ async function fetchNativeQuotes(symbols, signal) {
   return settled;
 }
 
-function forecastSignal(prob) {
-  if (typeof prob !== "number" || !Number.isFinite(prob)) return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
-  if (prob >= 0.55) return { word: "RISING", arrow: "↑", cls: "text-term-green" };
-  if (prob <= 0.45) return { word: "FALLING", arrow: "↓", cls: "text-term-red" };
-  return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
+// Experimental up/down lean, deliberately muted (see components/ForecastOutlook).
+function forecastLean(prob) {
+  if (typeof prob !== "number" || !Number.isFinite(prob)) return "—";
+  const arrow = prob >= 0.55 ? "↑" : prob <= 0.45 ? "↓" : "→";
+  return `${(prob * 100).toFixed(0)}% ${arrow}`;
 }
 
 function ForecastCells({ symbol }) {
@@ -54,7 +54,6 @@ function ForecastCells({ symbol }) {
     staleTime: 300000,
   });
   const prob = typeof f.data?.probability === "number" ? f.data.probability : null;
-  const sig = forecastSignal(prob);
   if (f.isLoading) {
     return (
       <>
@@ -65,11 +64,11 @@ function ForecastCells({ symbol }) {
   }
   return (
     <>
-      <td className="tnum term-num p-2 text-right font-semibold text-term-text">
-        {prob === null ? "—" : `${(prob * 100).toFixed(0)}%`}
+      <td className="tnum term-num p-2 text-right font-semibold text-term-text" title="80% of comparable past 21-day periods">
+        {formatRange(f.data?.intervals)}
       </td>
-      <td className={`p-2 text-xs font-bold ${sig.cls}`} title={f.data ? `21D forecast ${prob !== null ? `${(prob * 100).toFixed(0)}%` : ""}` : "Forecast unavailable"}>
-        {prob === null ? "—" : `${sig.arrow}${sig.word}`}
+      <td className="tnum p-2 text-xs text-term-muted" title="Experimental up probability: has not beaten the historical base rate in testing">
+        {forecastLean(prob)}
       </td>
     </>
   );
@@ -309,14 +308,14 @@ function WatchlistPage() {
       ) : (
         <div className="term-panel-hero overflow-x-auto">
           <table className="w-full min-w-[760px] text-sm">
-            <caption className="sr-only">Watchlist — symbol, price, change, forecast, signal, freshness</caption>
+            <caption className="sr-only">Watchlist — symbol, price, change, 21-day range, experimental lean, freshness</caption>
             <thead className="sticky top-0 z-10 bg-term-panel">
               <tr className="border-b border-term-border text-left text-xs text-term-muted">
                 <th scope="col" className="p-2">Symbol</th>
                 <th scope="col" className="p-2 text-right">Price{gated ? "" : ` (${rankQuery.data?.target_ccy ?? targetCcy})`}</th>
                 <th scope="col" className="p-2 text-right">Change</th>
-                <th scope="col" className="p-2 text-right">Forecast 21D</th>
-                <th scope="col" className="p-2">Signal</th>
+                <th scope="col" className="p-2 text-right">Range 21D</th>
+                <th scope="col" className="p-2">Lean (exp.)</th>
                 <th scope="col" className="p-2">Freshness</th>
                 <th scope="col" className="p-2"><span className="sr-only">Actions</span></th>
               </tr>

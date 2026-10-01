@@ -2,12 +2,12 @@ import React from "react";
 import { Link } from "react-router-dom";
 
 /* Living miniature terminal for the hero: AAPL $193.42 +1.42% with an SVG
- * sparkline and a 21D 64%↑ meter. Subtle CSS-only motion (live dot, line
+ * sparkline and its 21-day range. Subtle CSS-only motion (live dot, line
  * draw, meter fill) — no JS timers, respects reduced motion via CSS. */
 function HeroTerminal() {
   const spark = "M4,52 L20,48 L36,50 L52,44 L68,46 L84,40 L100,42 L116,36 L132,38 L148,30 L164,33 L180,26 L196,28 L212,20 L228,23 L236,16";
   return (
-    <div className="lp-term" id="hero-terminal" role="img" aria-label="Preview of the OneMarket terminal: Apple at 193 dollars 42 cents, up 1.42 percent, 21-day forecast 64 percent chance of rising">
+    <div className="lp-term" id="hero-terminal" role="img" aria-label="Preview of the OneMarket terminal: Apple at 193 dollars 42 cents, up 1.42 percent, 21-day range minus 9 to plus 10 percent">
       <div className="lp-term-bar" aria-hidden="true">
         <span className="dot" style={{ background: "#ff5c5c" }} />
         <span className="dot" style={{ background: "#ffb454" }} />
@@ -33,9 +33,8 @@ function HeroTerminal() {
         </svg>
         <div className="lp-panel-nested" style={{ marginTop: 10, padding: "8px 10px", display: "flex", alignItems: "center", gap: 10 }}>
           <span className="lp-num" style={{ fontSize: "0.72rem", color: "#8b94a7" }}>21D</span>
-          <span className="lp-num" style={{ fontSize: "1.05rem", fontWeight: 800, color: "#3ddc84" }}>64% ↑</span>
-          <div className="lp-meter" style={{ flex: 1 }} aria-hidden="true"><span style={{ width: "64%" }} /></div>
-          <span className="lp-num" style={{ fontSize: "0.68rem", color: "#8b94a7" }}>HIGH</span>
+          <span className="lp-num" style={{ fontSize: "1.05rem", fontWeight: 800 }}>−9% to +10%</span>
+          <span className="lp-num" style={{ fontSize: "0.68rem", color: "#8b94a7", marginLeft: "auto" }}>RANGE · VOL NORMAL</span>
         </div>
         <p className="mut" style={{ fontSize: "0.7rem", margin: "8px 0 0" }}>
           Source Demo feed · updated 12s ago · <span className="up" style={{ fontWeight: 700 }}>● FRESH</span>

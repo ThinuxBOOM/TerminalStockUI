@@ -95,8 +95,10 @@ from backend.market_data.service import MarketDataService
 #: skill until the scoring cron has matured forecasts to compare against, so
 #: the probabilities are presented as experimental rather than calibrated.
 DISCLOSURE = (
-    "Experimental model output: these probabilities have not been validated "
-    "against realized outcomes unless a skill score is shown. Not investment advice."
+    "Experimental model output. In walk-forward tests the up/down "
+    "probabilities did not beat the historical base rate; the return range, "
+    "volatility regime and drawdown estimates are the more useful outputs. "
+    "Not investment advice."
 )
 #: Machine-readable twin of the disclosure (UI badges key off this).
 VALIDATION_STATUS = "experimental"

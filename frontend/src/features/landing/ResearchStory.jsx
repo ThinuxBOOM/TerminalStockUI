@@ -4,7 +4,7 @@ import { TrendingUp, SlidersHorizontal, Clock, Activity, Database, ShieldCheck, 
 import Reveal from "./Reveal.jsx";
 
 const ROWS = [
-  { title: "Forecast", d: "1–21 day odds with confidence and quality.", to: "/forecast/AAPL", Icon: TrendingUp },
+  { title: "Forecast", d: "1–21 day ranges and drop risk, with a measured track record.", to: "/forecast/AAPL", Icon: TrendingUp },
   { title: "Analytics", d: "Drivers behind the lean: trend, momentum, volatility.", to: "/forecast/AAPL", Icon: SlidersHorizontal },
   { title: "Events", d: "Earnings and dividends on the same timeline.", to: "/security/AAPL", Icon: Clock },
   { title: "Technical", d: "Overlays and levels on the chart, explained.", to: "/security/AAPL", Icon: Activity },

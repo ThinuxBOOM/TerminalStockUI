@@ -16,7 +16,7 @@ import { BreadthBar, MarketDetailGraphs } from "../components/MarketGraphs";
 import { useMarketDetail, useMarketLiquidity } from "../hooks/useMarketLiquidity";
 import useWatchlist from "../hooks/useWatchlist";
 import CurrencyValue from "../components/CurrencyValue";
-import { changeArrow, changeColor, formatPct1 } from "../utils/format";
+import { changeArrow, changeColor, formatPct1, formatRange } from "../utils/format";
 import Skeleton from "../components/Skeleton";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
@@ -44,11 +44,11 @@ function formatResearchDate(r) {
   }
 }
 
-function forecastSignal(prob) {
-  if (typeof prob !== "number" || !Number.isFinite(prob)) return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
-  if (prob >= 0.55) return { word: "RISING", arrow: "↑", cls: "text-term-green" };
-  if (prob <= 0.45) return { word: "FALLING", arrow: "↓", cls: "text-term-red" };
-  return { word: "NEUTRAL", arrow: "→", cls: "text-term-muted" };
+// Experimental up/down lean, deliberately muted (see components/ForecastOutlook).
+function forecastLean(prob) {
+  if (typeof prob !== "number" || !Number.isFinite(prob)) return "—";
+  const arrow = prob >= 0.55 ? "↑" : prob <= 0.45 ? "↓" : "→";
+  return `${(prob * 100).toFixed(0)}% ${arrow}`;
 }
 
 const MAX_HOME_WATCHLIST = 10;
@@ -107,7 +107,6 @@ function WatchlistPreviewRow({ symbol, onRemove }) {
   const d = q.data;
   const chg = d.change_pct;
   const prob = typeof f.data?.probability === "number" ? f.data.probability : null;
-  const sig = forecastSignal(prob);
   return (
     <tr
       className="group cursor-pointer border-b border-term-border transition-colors last:border-0 hover:bg-term-panel2 focus-within:bg-term-panel2"
@@ -127,11 +126,11 @@ function WatchlistPreviewRow({ symbol, onRemove }) {
       <td className={`tnum term-num p-2 text-right font-semibold ${changeColor(chg)}`}>
         {Number.isFinite(chg) ? `${changeArrow(chg)} ${formatPct1(Math.abs(chg) / 100)}` : "—"}
       </td>
-      <td className="tnum term-num p-2 text-right text-term-text">
-        {f.isLoading ? "…" : prob === null ? "—" : `${(prob * 100).toFixed(0)}%`}
+      <td className="tnum term-num p-2 text-right text-term-text" title="80% of comparable past 21-day periods">
+        {f.isLoading ? "…" : formatRange(f.data?.intervals)}
       </td>
-      <td className={`p-2 text-xs font-bold ${sig.cls}`}>
-        {sig.arrow}{sig.word}
+      <td className="tnum p-2 text-xs text-term-muted" title="Experimental up probability: has not beaten the historical base rate in testing">
+        {f.isLoading ? "…" : forecastLean(prob)}
       </td>
       <td className="p-2"><StatusPill freshness={d.provenance} marketState={d.market_state} provenance={d.provenance} size="sm" /></td>
       <td className="p-2 text-right">
@@ -297,9 +296,30 @@ function MarketDetail({ mic, market, newsData }) {
   );
 }
 
+// Mounted only when its section is opened, so the signal scan runs on demand.
+function SignalsPanel() {
+  const [horizon, setHorizon] = useState(21);
+  const signals = useQuery({
+    queryKey: ["signals-top", horizon],
+    queryFn: ({ signal }) => getTopSignals(horizon, 5, { signal }),
+    retry: false,
+    staleTime: 60000,
+  });
+  return (
+    <TopSignals
+      data={signals.data ?? null}
+      isLoading={signals.isLoading}
+      isError={signals.isError}
+      error={signals.error}
+      horizon={horizon}
+      onHorizon={setHorizon}
+      onRetry={() => void signals.refetch()}
+    />
+  );
+}
+
 function HomePage() {
   const navigate = useNavigate();
-  const [signalHorizon, setSignalHorizon] = useState(21);
   const providers = useQuery({
     queryKey: ["providers-health"],
     queryFn: getProvidersHealth,
@@ -309,12 +329,6 @@ function HomePage() {
   const research = useQuery({
     queryKey: ["audit-forecasts", "recent"],
     queryFn: () => getAuditForecasts(5),
-    retry: false,
-    staleTime: 60000,
-  });
-  const signals = useQuery({
-    queryKey: ["signals-top", signalHorizon],
-    queryFn: ({ signal }) => getTopSignals(signalHorizon, 5, { signal }),
     retry: false,
     staleTime: 60000,
   });
@@ -446,7 +460,7 @@ function HomePage() {
         </>
       )}
 
-      {/* Watchlist preview — Symbol/Price/Change/Forecast/Signal/Freshness, max 10 */}
+      {/* Watchlist preview — Symbol/Price/Change/Range/Lean/Freshness, max 10 */}
       <section className="term-panel-hero min-w-0 p-4" aria-labelledby="home-watchlist">
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -470,8 +484,8 @@ function HomePage() {
                   <th scope="col" className="p-2">Symbol</th>
                   <th scope="col" className="p-2 text-right">Price</th>
                   <th scope="col" className="p-2 text-right">Change</th>
-                  <th scope="col" className="p-2 text-right">Forecast</th>
-                  <th scope="col" className="p-2">Signal</th>
+                  <th scope="col" className="p-2 text-right">Range 21D</th>
+                  <th scope="col" className="p-2">Lean (exp.)</th>
                   <th scope="col" className="p-2">Freshness</th>
                   <th scope="col" className="p-2"><span className="sr-only">Actions</span></th>
                 </tr>
@@ -490,16 +504,6 @@ function HomePage() {
           </p>
         )}
       </section>
-
-      <TopSignals
-        data={signals.data ?? null}
-        isLoading={signals.isLoading}
-        isError={signals.isError}
-        error={signals.error}
-        horizon={signalHorizon}
-        onHorizon={setSignalHorizon}
-        onRetry={() => void signals.refetch()}
-      />
 
 
       {/* Research + News split */}
@@ -553,6 +557,15 @@ function HomePage() {
           </div>
         </section>
       </div>
+
+      <CollapsibleSection
+        id="home-signals"
+        title="🧪 Direction leans (experimental)"
+        subtitle="Where the model leans most strongly per market. In testing these leans did not beat the historical base rate."
+        defaultOpen={false}
+      >
+        <SignalsPanel />
+      </CollapsibleSection>
 
       <CollapsibleSection id="home-liquidity" title="💧 Market activity (liquidity)" subtitle="How busy is each market? Busy usually means easier to buy/sell." defaultOpen={false}>
         <MarketLiquidityPanel data={liquidity.data ?? null} isLoading={liquidity.isLoading} isError={liquidity.isError} error={liquidity.error} onRetry={() => void liquidity.refetch()} />

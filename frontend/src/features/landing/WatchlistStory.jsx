@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import Reveal from "./Reveal.jsx";
-import { DEMO_SYMBOLS, getDemoSymbol } from "./demo/demoData.js";
+import { DEMO_SYMBOLS, demoRange, formatDemoRange, getDemoSymbol } from "./demo/demoData.js";
 
 /* WatchlistStory: "KEEP THE SIGNALS YOU CARE ABOUT CLOSE." Rows animate in,
  * hover/focus expands to reveal forecast + market + freshness, and hovering
@@ -10,14 +10,13 @@ const ORDER = ["AAPL", "NVDA", "TSLA", "ASML"];
 
 function vizFor(symbol) {
   if (symbol === "ASML") {
-    return { symbol: "ASML", name: "ASML Holding", price: "€682.40", change: "+0.9%", market: "Euronext Amsterdam (XAMS)", forecast: "58% ↑ 21D · MEDIUM", fresh: "FRESH · 31s ago" };
+    return { symbol: "ASML", name: "ASML Holding", price: "€682.40", change: "+0.9%", market: "Euronext Amsterdam (XAMS)", forecast: "21D range −10% to +11%", fresh: "FRESH · 31s ago" };
   }
   const d = getDemoSymbol(symbol);
-  const f = d.forecast[21];
   return {
     symbol: d.symbol, name: d.name,
     price: `$${d.price.toFixed(2)}`, change: `${d.changePct >= 0 ? "+" : ""}${d.changePct.toFixed(2)}%`,
-    market: `${d.market} (${d.mic})`, forecast: `${f.prob}% ${f.direction === "up" ? "↑" : "↓"} 21D · ${f.confidence}`,
+    market: `${d.market} (${d.mic})`, forecast: `21D range ${formatDemoRange(demoRange(d, 21))}`,
     fresh: `${d.freshness} · ${d.updatedAgo}`,
   };
 }

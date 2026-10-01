@@ -3,14 +3,13 @@ import { Link } from "react-router-dom";
 import Reveal from "./Reveal.jsx";
 import { useCountUp } from "./useCountUp.js";
 
-/* ForecastStory: "DON'T JUST SEE THE PRICE. UNDERSTAND THE SIGNAL."
- * 21D 64% CHANCE OF RISING, count-up 0->64 once on enter, then
- * Confidence/Quality/Model reveal sequentially + plain-English line.
- * Never implies a guarantee. */
+/* ForecastStory: forecasts that grade themselves. The demo panel leads with
+ * the 21-day range (count-up once on enter), then volatility, drop risk and
+ * the measured record of the direction lean. Never implies a guarantee. */
 function ForecastStory() {
   const ref = useRef(null);
   const [entered, setEntered] = useState(false);
-  const value = useCountUp(64, entered, 1100);
+  const value = useCountUp(10, entered, 1100);
 
   useEffect(() => {
     const el = ref.current;
@@ -27,9 +26,9 @@ function ForecastStory() {
   }, []);
 
   const steps = [
-    { k: "CONFIDENCE", v: "HIGH" },
+    { k: "VOLATILITY", v: "NORMAL" },
+    { k: "10%+ DROP RISK", v: "16%" },
     { k: "DATA QUALITY", v: "A" },
-    { k: "MODEL", v: "ENSEMBLE v3" },
   ];
 
   return (
@@ -37,20 +36,20 @@ function ForecastStory() {
       <div className="landing-inner lp-split">
         <Reveal>
           <p className="lp-kicker">Forecasts</p>
-          <h2 className="lp-h2" id="forecast-h">Don&rsquo;t just see the price. Understand the signal.</h2>
+          <h2 className="lp-h2" id="forecast-h">Forecasts that show their own report card.</h2>
           <p className="lp-sub">
-            Every forecast is a probability with its workings shown — confidence, data quality
-            and the model behind it. A 64% chance means it could still fall 36 times out of 100.
-            That honesty is the feature.
+            Each forecast leads with how far a stock has typically moved over the horizon, its
+            volatility and its risk of a large drop. The up/down lean comes second, next to its
+            measured record: in walk-forward tests it has not beaten a simple baseline, and the
+            app tells you so instead of hiding it.
           </p>
           <p style={{ marginTop: 12 }}>
             <Link to="/forecast/AAPL" className="lp-btn-ghost" style={{ fontSize: "0.8rem" }}>See a full forecast →</Link>
           </p>
         </Reveal>
-        <div ref={ref} className="lp-panel" style={{ padding: "1.6rem" }} aria-label="Forecast example: 21-day, 64 percent chance of rising (demo data)">
-          <p className="lp-label">21D · Chance of rising · Demo data</p>
-          <p className="lp-big-num" aria-live="polite"><span className="lp-num">{value}</span>%</p>
-          <div className="lp-meter" aria-hidden="true"><span style={{ width: `${value}%` }} /></div>
+        <div ref={ref} className="lp-panel" style={{ padding: "1.6rem" }} aria-label="Forecast example: 21-day range minus 7 to plus 10 percent (demo data)">
+          <p className="lp-label">21D range · 80% of past periods · Demo data</p>
+          <p className="lp-big-num" aria-live="polite"><span className="lp-num">&minus;{Math.round(value * 0.7)}% to +{value}</span>%</p>
           <div className="lp-meta-row">
             {steps.map((s, i) => (
               <div key={s.k} className={`lp-meta${entered ? " is-on" : ""}`} style={{ transitionDelay: `${500 + i * 220}ms` }}>
@@ -60,7 +59,7 @@ function ForecastStory() {
             ))}
           </div>
           <p style={{ fontSize: "0.85rem", lineHeight: 1.6, margin: "14px 0 0", opacity: entered ? 1 : 0, transition: "opacity 400ms ease 1150ms" }}>
-            Models currently lean positive over the next 21 trading days — a signal to research further, never a promise.
+            Direction lean 58% up · measured: no better than the base rate. Use the range to size risk, not to pick a side.
           </p>
         </div>
       </div>

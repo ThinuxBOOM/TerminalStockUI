@@ -24,12 +24,12 @@ import CollapsibleSection from "../../components/CollapsibleSection";
 import NewsPanel from "../../components/NewsPanel";
 import Skeleton from "../../components/Skeleton";
 import EmptyState from "../../components/EmptyState";
-import ExperimentalBadge from "../../components/ExperimentalBadge";
+import { DirectionLean, ForecastOutlook } from "../../components/ForecastOutlook";
 import { ResearchSection, AuditLink, SourceBadge } from "../../components/ResearchSection";
 import { formatDateTime, formatMetric, formatPct1 } from "../../utils/format";
 import ErrorState from "../../components/ErrorState";
 
-const DISCLOSURE = "Not investment advice. Forecasts are experimental probabilities from the deterministic engine (check the Backtest Lab for their measured track record); AI opinions are capped at 20% influence.";
+const DISCLOSURE = "Not investment advice. Forecasts are experimental: in walk-forward tests the direction probabilities did not beat the historical base rate, so the range and risk figures lead. AI opinions are capped at 20% influence.";
 const MAX_CAL_TABLE_ROWS = 20;
 const MAX_CAL_TREND_ROWS = 10;
 const MAX_ANALYTICS_CELLS = 12;
@@ -47,12 +47,6 @@ function directionWord(probability, fallbackLabel, fallbackDirection) {
   if (/rising|up|bull/.test(hay)) return "RISING";
   if (/falling|down|bear/.test(hay)) return "FALLING";
   return "NEUTRAL";
-}
-
-function directionTone(word) {
-  if (word === "RISING") return "text-term-green";
-  if (word === "FALLING") return "text-term-red";
-  return "text-term-muted";
 }
 
 function lastSuccessText(dataUpdatedAt) {
@@ -216,7 +210,6 @@ function ForecastDetails({ symbol }) {
   const analyticsEvents = useMemo(() => eventsFromAnalytics(analytics), [analytics]);
 
   const dirWord = f ? directionWord(f.probability, f.label, f.direction) : "NEUTRAL";
-  const headline = f ? `${f.horizon_days}D ${formatPct1(f.probability)} CHANCE OF ${dirWord}` : null;
 
   return (
     <div className="min-w-0 space-y-4">
@@ -235,7 +228,7 @@ function ForecastDetails({ symbol }) {
             </button>
           ))}
         </div>
-        <span className="text-term-muted">targets: direction probability · return range · vol regime · drawdown</span>
+        <span className="text-term-muted">targets: return range · vol regime · drawdown · direction lean (experimental)</span>
       </div>
 
       {/* Scroll progression anchor: Quote */}
@@ -363,8 +356,8 @@ function ForecastDetails({ symbol }) {
       <section id="research-forecast" aria-label="Forecast" className="scroll-mt-4">
         <CollapsibleSection
           id="research-forecast-h"
-          title={`5 · Forecast — ${horizon}d signal`}
-          subtitle="Neutral Rising / Falling / Neutral language. Signal first, explanation after."
+          title={`5 · Forecast — ${horizon}d range and risk`}
+          subtitle="How far the price may move, then the experimental direction lean with its measured record."
           defaultOpen
           badge={f?.provenance ? <StatusPill provenance={f.provenance} /> : <SourceBadge source="SOURCE: DETERMINISTIC" />}
         >
@@ -392,19 +385,22 @@ function ForecastDetails({ symbol }) {
 
           {f && (
             <div className="min-w-0 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className={`term-num text-display-sm font-bold ${directionTone(dirWord)}`}>
-                  {headline} <FreshnessBadge p={f.provenance} /> <ExperimentalBadge status={f.validation_status} />
-                </h2>
-                <AuditLink symbol={symbol} />
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <h2 className="sr-only">{`${f.horizon_days}-day forecast for ${normalizedSymbol}`}</h2>
+                <ForecastOutlook forecast={f} currency={quoteCurrency} />
+                <div className="flex items-center gap-2">
+                  <FreshnessBadge p={f.provenance} />
+                  <AuditLink symbol={symbol} />
+                </div>
               </div>
+              <DirectionLean forecast={f} />
               <dl className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
                 <div className="term-panel-nested p-2">
-                  <dt className="text-term-muted">Signal</dt>
-                  <dd className={`term-num font-bold ${directionTone(dirWord)}`}>{dirWord}</dd>
+                  <dt className="text-term-muted">Direction lean</dt>
+                  <dd className="term-num font-bold text-term-text">{dirWord}</dd>
                 </div>
                 <div className="term-panel-nested p-2">
-                  <dt className="text-term-muted">Confidence</dt>
+                  <dt className="text-term-muted" title="How much the ensemble members agree. Agreement is not accuracy.">Model agreement</dt>
                   <dd className="term-num font-bold text-term-text">
                     {String(f.confidence ?? "Unknown").toUpperCase()}
                     {typeof f.confidence_score === "number" && Number.isFinite(f.confidence_score) ? <span className="text-term-muted"> ({f.confidence_score.toFixed(2)})</span> : null}
@@ -413,10 +409,6 @@ function ForecastDetails({ symbol }) {
                 <div className="term-panel-nested p-2">
                   <dt className="text-term-muted">Data Quality</dt>
                   <dd className="term-num font-bold text-term-cyan">{f.quality_grade ?? "U"}</dd>
-                </div>
-                <div className="term-panel-nested p-2">
-                  <dt className="text-term-muted">Forecast</dt>
-                  <dd className="term-num font-bold text-term-text">{formatPct1(f.probability)}</dd>
                 </div>
                 <div className="term-panel-nested p-2">
                   <dt className="text-term-muted">Provider</dt>
@@ -472,7 +464,7 @@ function ForecastDetails({ symbol }) {
                 </div>
               </div>
               <p className="text-[11px] text-term-muted" role="note">
-                Signal wording is neutral (Rising / Falling / Neutral) with Confidence and Data Quality shown first — explanation follows.
+                Range and risk come first; the direction lean is experimental and has not beaten the base rate. Model agreement measures how much the members agree, not how often they are right.
               </p>
             </div>
           )}

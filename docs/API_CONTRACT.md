@@ -14,7 +14,8 @@ All routes are served under the app's origin (Caddy proxies `/api/*` and
 - **Fail closed.** Market data is live or an error (`502`), never a stale or
   synthetic `200`. Missing fields are listed, never zero-filled.
 - **Disclosure.** Forecast and AI responses carry `disclosure`; clients must
-  show it. Forecasts carry `validation_status: "experimental"`.
+  show it. Forecasts carry `validation_status: "experimental"` and
+  `measured_skill` (below).
 
 ### Provenance envelope
 
@@ -45,6 +46,31 @@ Every data-bearing response includes:
 Daily bars carry `ts` (the session's local midnight, as a UTC instant) and
 `date` (the exchange-local session day). Use `date` for calendar logic: the
 UTC date of `ts` is a day early for Shanghai and Euronext.
+
+### Measured skill
+
+`measured_skill` on a forecast (one entry of the `measured-skill` table) is
+the pooled walk-forward record of the up probability for that horizon and
+calibration, from `scripts/evaluate_forecasts.py`. `null` when the running
+model version has not been evaluated.
+
+```json
+{
+  "horizon_days": 7,
+  "calibration": "shrinkage",
+  "skill": -0.0311,
+  "ci95": [-0.0382, -0.0239],
+  "verdict": "worse",
+  "symbols": 100,
+  "points": 31450,
+  "as_of": "2026-10-01",
+  "summary": "In walk-forward tests on 100 stocks, 7-day direction probabilities scored worse than the historical base rate (skill -0.031, 95% CI -0.038 to -0.024)."
+}
+```
+
+`skill` is the Brier skill score against the base rate (> 0 beats it).
+`verdict` is `worse` or `better` only when the 95% interval excludes zero,
+otherwise `indistinguishable`.
 
 ### Errors
 
@@ -104,7 +130,8 @@ FastAPI shape: `{"detail": "..."}` (or an object for structured errors).
 | Method | Path | Query / body |
 |---|---|---|
 | GET | `/api/analytics/{symbol}` | `indicators` |
-| GET | `/api/forecast/{symbol}` | `horizon ∈ {1, 7, 14, 21}` |
+| GET | `/api/forecast/{symbol}` | `horizon ∈ {1, 7, 14, 21}`; includes `measured_skill` |
+| GET | `/api/forecast/measured-skill` | pooled walk-forward skill per horizon, `shrinkage` and `isotonic` |
 | GET | `/api/forecast/{symbol}/calibration/history` | `horizon, limit` |
 | POST | `/api/backtest/run` | `{symbol, horizons}` (walk-forward, leakage-guarded) |
 | GET | `/api/backtest/{symbol}` | `include_reliability` |

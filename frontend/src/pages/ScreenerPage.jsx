@@ -9,6 +9,9 @@ import MarketStateBadge from "../components/MarketStateBadge";
 import ProvenanceBadge from "../components/ProvenanceBadge";
 import Skeleton from "../components/Skeleton";
 import StatusPill from "../components/StatusPill";
+import ExperimentalBadge from "../components/ExperimentalBadge";
+import { MeasuredSkillNote } from "../components/ForecastOutlook";
+import useMeasuredSkill from "../hooks/useMeasuredSkill";
 import { changeArrow, changeColor } from "../utils/format";
 
 const MARKET_OPTIONS = [
@@ -91,6 +94,8 @@ function ScreenerPage() {
   const urlQ = params.get("q") ?? "";
   const [market, setMarket] = useState(urlMarket);
   const [horizon, setHorizon] = useState(21);
+  // The screener scan never applies the isotonic calibrator.
+  const measured = useMeasuredSkill(horizon, "shrinkage");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [symbolFilter, setSymbolFilter] = useState(urlQ);
   const SCREENER_LIMIT = 20;
@@ -167,7 +172,10 @@ function ScreenerPage() {
     <div className="max-w-full">
       <nav className="mb-3 text-xs" aria-label="Breadcrumb"><Link to="/app" className="text-term-muted hover:text-term-text">← Home</Link></nav>
       <h1 className="text-lg font-extrabold text-term-text">Discover — Screener</h1>
-      <p className="mt-0.5 text-xs text-term-muted">Search + filters + ranked results. Forecasts are research starting points, never guarantees.</p>
+      <p className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-term-muted">
+        Ranked by the model&rsquo;s experimental up probability. Use it to find names to research, not as a signal. <ExperimentalBadge />
+      </p>
+      <MeasuredSkillNote skill={measured.skill} className="mt-1" />
       <div className="mt-3 grid min-w-0 items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
         {/* Filters drawer on mobile, side panel on desktop */}
         <div className="lg:hidden">
@@ -208,8 +216,8 @@ function ScreenerPage() {
                           <th scope="col" className="p-2">Symbol</th>
                           <th scope="col" className="p-2 text-right">Price</th>
                           <th scope="col" className="p-2 text-right">Change</th>
-                          <th scope="col" className="p-2 text-right">Prob {horizon}d</th>
-                          <th scope="col" className="p-2">Confidence</th>
+                          <th scope="col" className="p-2 text-right" title="Experimental: has not beaten the historical base rate in testing">Up prob. {horizon}d (exp.)</th>
+                          <th scope="col" className="p-2" title="How much the models agree, not how often they are right">Agreement</th>
                           <th scope="col" className="p-2">Quality</th>
                           <th scope="col" className="p-2">Market</th>
                           <th scope="col" className="p-2">Freshness</th>

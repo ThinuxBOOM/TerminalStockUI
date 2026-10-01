@@ -481,6 +481,7 @@ const ForecastSchema = z.object({
   probability: z.number().min(0).max(1),
   confidence: z.string().optional().default("Unknown"),
   validation_status: z.string().optional().default("experimental"),
+  measured_skill: z.record(z.unknown()).nullable().optional().default(null),
   quality_grade: z.string().optional().default("U"),
   provider: z.string().optional().default("deterministic-engine"),
   why: z.array(z.string()).optional().default([]),
@@ -604,6 +605,9 @@ function normalizeForecast(raw, symbol, horizon) {
     // Disclosure rendered verbatim by the UI — never rewritten client-side.
     disclosure: r.disclosure,
     validation_status: typeof r.validation_status === "string" ? r.validation_status : "experimental",
+    // Pooled walk-forward skill for this horizon (null until measured);
+    // components/ForecastOutlook normalizes it.
+    measured_skill: r.measured_skill && typeof r.measured_skill === "object" ? r.measured_skill : null,
     provenance: normalizeProvenance(r, "forecast-api")
   };
   return ForecastSchema.parse(candidate);

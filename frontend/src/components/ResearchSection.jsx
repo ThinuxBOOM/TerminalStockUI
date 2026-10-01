@@ -12,6 +12,7 @@ import {
   sourceLabelForAIOpinion,
 } from "../api/client";
 import { formatPct1 } from "../utils/format";
+import { MeasuredSkillNote } from "./ForecastOutlook";
 
 // Explicit source badges — every research number carries its origin.
 function SourceBadge({ source }) {
@@ -101,9 +102,10 @@ function DeterministicEngineBlock({ forecast, calibrationHistory = [], maxWhy = 
         <SourceBadge source="SOURCE: DETERMINISTIC" />
         <FreshnessBadge p={f.provenance} />
       </div>
-      <p className="term-num mt-1 text-2xl font-bold text-term-green">
-        {formatPct1(f.probability)} <span className="text-xs font-normal text-term-muted">direction probability · {f.horizon_days}d</span>
+      <p className="term-num mt-1 text-sm font-bold text-term-text">
+        {formatPct1(f.probability)} <span className="text-xs font-normal text-term-muted">direction lean (experimental) · {f.horizon_days}d</span>
       </p>
+      <MeasuredSkillNote skill={f.measured_skill} compact />
       <dl className="mt-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
         <div className="term-panel-nested p-2">
           <dt className="text-term-muted">model_version</dt>
@@ -118,7 +120,7 @@ function DeterministicEngineBlock({ forecast, calibrationHistory = [], maxWhy = 
           <dd className="truncate font-bold" title={String(dataVersion)}>{String(dataVersion)}</dd>
         </div>
         <div className="term-panel-nested p-2">
-          <dt className="text-term-muted">confidence</dt>
+          <dt className="text-term-muted">model agreement</dt>
           <dd className="font-bold">{f.confidence}</dd>
         </div>
         <div className="term-panel-nested p-2">

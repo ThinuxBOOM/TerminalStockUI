@@ -6,7 +6,7 @@ import Reveal from "./Reveal.jsx";
 const FAQS = [
   { q: "Do I need to know investing words?", a: "No. Everything is written in plain words — up, down, and why. If a chart looks complex, read the one-sentence summary above it." },
   { q: "Is this telling me what to buy?", a: "No. OneMarket gives you a shortlist to research further — not orders and not financial advice. Always do your own research." },
-  { q: "How are forecasts made?", a: "A deterministic engine (statistical baselines plus small machine-learning models) produces a probability for each horizon. Treat them as experimental: they are scored against what actually happened, and you can check that track record in the Backtest Lab before trusting any number." },
+  { q: "How are forecasts made?", a: "A deterministic engine (statistical baselines plus small machine-learning models) estimates, for each horizon, the likely price range, the volatility regime and the chance of a large drop. It also gives an up/down lean, but in walk-forward tests that lean has not beaten a simple baseline, so the app labels it experimental and shows its measured record next to it." },
   { q: "Where do the numbers come from?", a: "Live market feeds. Each number shows its source, time, and freshness (live, delayed, closed, or stale) — so you can trust what you see." },
   { q: "Do I need an account?", a: "Yes. The terminal is private to members of this server. Sign in with the account your administrator created for you." },
   { q: "Which markets can I look up?", a: "One search covers NYSE (XNYS), Nasdaq (XNAS), Shanghai (XSHG), Paris (XPAR), Amsterdam (XAMS) and Brussels (XBRU). Try AAPL, 600519.SS or ASML.AS." },
@@ -45,7 +45,7 @@ function FinalCTA() {
               <rect x="120" y="60" width="220" height="90" rx="8" fill="none" stroke="#2a3448" />
               <rect x="860" y="80" width="220" height="90" rx="8" fill="none" stroke="#2a3448" />
               <text x="140" y="100" fill="#3ddc84" fontSize="26" fontFamily="monospace" opacity="0.5" className="lp-num">$193.42</text>
-              <text x="880" y="120" fill="#3ddc84" fontSize="26" fontFamily="monospace" opacity="0.5" className="lp-num">64% ↑</text>
+              <text x="880" y="120" fill="#3ddc84" fontSize="26" fontFamily="monospace" opacity="0.5" className="lp-num">−7% / +10%</text>
             </svg>
             <div style={{ position: "relative" }}>
               <p className="lp-kicker" style={{ justifyContent: "center" }}><Zap aria-hidden="true" style={{ width: 13, height: 13 }} /> Every number shows its source and age</p>

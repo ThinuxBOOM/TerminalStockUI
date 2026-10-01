@@ -2,8 +2,8 @@
 
 OneMarket Analyzer is a research terminal for NYSE, Nasdaq, Shanghai (SSE)
 and Euronext Paris/Amsterdam/Brussels. Every number shows where it came
-from, when, and how fresh it is. Forecasts are experimental probabilities,
-not investment advice.
+from, when, and how fresh it is. Forecasts describe how far a price may
+move; they are not investment advice.
 
 Sign in at `/login` with the account your administrator created. The
 landing page (`/`) is public; everything else needs an account.
@@ -17,18 +17,20 @@ landing page (`/`) is public; everything else needs an account.
   was set on the exchange.
 - **DAILY**: built from daily bars, which are as current as the last
   completed trading session.
-- **EXPERIMENTAL**: on every forecast. The models' real track record is in the
-  Backtest Lab; treat probabilities as unvalidated until it says otherwise.
+- **EXPERIMENTAL**: on every up/down probability ("direction lean"). Next to
+  it, **Measured: ...** gives its walk-forward record against the historical
+  base rate. Today that record says the lean has no edge, so use the range
+  and risk figures instead.
 
 When a source returns no live data the app says "unavailable" rather than
 showing an old or made-up number.
 
 ## Pages
 
-**Overview** (`/app`): market open/closed strip, "What should I look at
-today?" (top forecast signals per market, a starting point for research, not
-orders), your watchlist, market news, and collapsible sections for market
-indexes, market activity and data health.
+**Overview** (`/app`): market open/closed strip, your watchlist (21-day
+range and the experimental lean per symbol), recent research, market news,
+and collapsible sections for experimental direction leans per market,
+market indexes, market activity and data health.
 
 **Discover** (`/search`): one search across all markets by ticker, name or
 provider symbol (`AAPL`, `Moutai`, `600519.SS`, `MC.PA`). A market filter
@@ -40,12 +42,16 @@ chart (1D to 5Y, with SMA/EMA/RSI/MACD/Bollinger/VWAP/ATR overlays), events,
 analytics snapshot and the forecast card.
 
 **Forecast** (`/forecast/:symbol`): the deterministic forecast for 1, 7, 14
-or 21 trading days: probability of rising, expected return range, volatility
-regime, drawdown probability, model versions, calibration history and
-limitations. You can also request an AI opinion here (see below).
+or 21 trading days. It leads with the return range (where 80% of comparable
+past periods ended), the volatility regime and the chance of a 10%+ drop;
+then the experimental direction lean with its measured record, model
+agreement, versions, calibration history and limitations. You can also
+request an AI opinion here (see below).
 
-**Screener** (`/screener`): ranks a market (or the S&P 500 universe) by
-forecast probability. Per-symbol failures are listed, not hidden.
+**Screener** (`/screener`): ranks a market (or the S&P 500 universe) by the
+experimental up probability, with its measured record shown above the
+results. Use it to find names to research. Per-symbol failures are listed,
+not hidden.
 
 **Backtest** (`/backtest`): walk-forward backtests with Brier score
 (0 is perfect, 0.25 is a coin flip), calibration error and a reliability

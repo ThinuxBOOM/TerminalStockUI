@@ -4,6 +4,8 @@ import Skeleton from "./Skeleton";
 import ErrorState from "./ErrorState";
 import EmptyState from "./EmptyState";
 import CurrencyValue from "./CurrencyValue";
+import { MeasuredSkillNote } from "./ForecastOutlook";
+import useMeasuredSkill from "../hooks/useMeasuredSkill";
 
 const MIC_LABELS = {
   XNYS: "New York (NYSE)",
@@ -80,19 +82,22 @@ function SignalRow({ row, tone, horizon }) {
   );
 }
 
+// Strongest model leans per market. Shown collapsed and labelled
+// experimental: walk-forward tests found the direction probabilities no
+// better than the historical base rate.
 function TopSignals({ data, isLoading, isError, error, horizon, onHorizon, onRetry }) {
   const horizons = [1, 7, 14, 21];
   const entries = Object.entries(data?.markets ?? {});
+  // The signals scan never applies the isotonic calibrator.
+  const { skill } = useMeasuredSkill(horizon, "shrinkage");
   return (
-    <section className="term-panel-hero min-w-0 p-4" aria-labelledby="home-signals">
+    <div className="min-w-0" aria-label="Experimental direction leans">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
-          <h2 id="home-signals" className="text-base font-extrabold text-term-text">
-            Forecast signals
-          </h2>
-          <p className="mt-0.5 text-xs text-term-muted">
-            What to research further vs be careful with — {horizon}D outlook, math + news. Not investment advice.
+          <p className="text-xs text-term-muted">
+            Where the model leans most strongly, {horizon}D, math + news. A lean is not a recommendation.
           </p>
+          <MeasuredSkillNote skill={skill} className="mt-0.5" />
         </div>
         <div className="flex items-center gap-1" role="group" aria-label="Signal horizon">
           {horizons.map((h) => (
@@ -133,19 +138,19 @@ function TopSignals({ data, isLoading, isError, error, horizon, onHorizon, onRet
               <h3 className="text-xs font-bold uppercase tracking-widest text-term-muted">
                 {MIC_LABELS[mic] ?? mic}
               </h3>
-              <p className="mt-2 text-[11px] font-bold text-term-green">▲ RESEARCH FURTHER ({bucket.top_buy.length})</p>
+              <p className="mt-2 text-[11px] font-bold text-term-muted">↑ LEANING UP ({bucket.top_buy.length})</p>
               {bucket.top_buy.length === 0 ? (
                 <p className="mt-1 text-[11px] text-term-muted" role="status">No ideas — data still warming up.</p>
               ) : (
-                <ul className="mt-1" aria-label={`${mic} research further`}>
+                <ul className="mt-1" aria-label={`${mic} leaning up`}>
                   {bucket.top_buy.map((r) => <SignalRow key={`b-${r.symbol}`} row={r} tone="buy" horizon={horizon} />)}
                 </ul>
               )}
-              <p className="mt-3 text-[11px] font-bold text-term-red">▼ BE CAREFUL ({bucket.top_short.length})</p>
+              <p className="mt-3 text-[11px] font-bold text-term-muted">↓ LEANING DOWN ({bucket.top_short.length})</p>
               {bucket.top_short.length === 0 ? (
                 <p className="mt-1 text-[11px] text-term-muted" role="status">Nothing flagged.</p>
               ) : (
-                <ul className="mt-1" aria-label={`${mic} be careful`}>
+                <ul className="mt-1" aria-label={`${mic} leaning down`}>
                   {bucket.top_short.map((r) => <SignalRow key={`s-${r.symbol}`} row={r} tone="short" horizon={horizon} />)}
                 </ul>
               )}
@@ -155,10 +160,10 @@ function TopSignals({ data, isLoading, isError, error, horizon, onHorizon, onRet
       )}
       {!isLoading && !isError && (
         <p className="mt-2 text-[11px] text-term-muted">
-          How it works: 80% math forecast + 20% news mood. {data?.formula ?? ""} Signals are research starting points, never guarantees.
+          How it works: 80% math forecast + 20% news mood. {data?.formula ?? ""} Leans are experimental, never guarantees.
         </p>
       )}
-    </section>
+    </div>
   );
 }
 

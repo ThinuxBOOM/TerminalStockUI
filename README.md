@@ -56,10 +56,11 @@ to Postgres and runs a Playwright suite against the booted stack
 
 ## Notes
 
-- Forecast probabilities are experimental. Measured walk-forward over 100
-  symbols they are slightly worse than the historical base rate at 1, 7 and
-  21 days (`docs/DATA_QUALITY.md`, "Measured skill"). Treat them as a
-  research aid, not a signal.
+- Forecasts lead with the return range, volatility and drop risk. The
+  up/down probability is shown as an experimental "lean" next to its
+  measured record: walk-forward over 100 symbols it does not beat the
+  historical base rate at any horizon (`docs/DATA_QUALITY.md`, "Measured
+  skill").
 - Market data comes from free/personal-use sources (yfinance, optional
   Alpaca/Finnhub/TwelveData keys). Check their terms before giving other
   people access.

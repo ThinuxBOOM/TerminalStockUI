@@ -1,6 +1,10 @@
 """Walk-forward skill of the forecast ensemble against an honest baseline.
 
-    python scripts/evaluate_forecasts.py --symbols 60 --horizons 1 7 21
+    python scripts/evaluate_forecasts.py --symbols 100 --horizons 1 7 14 21         --out backend/forecasting/measured_skill.json
+
+Writing the report to backend/forecasting/measured_skill.json is what the
+app shows next to every direction probability (backend/forecasting/
+measured_skill.py); it is ignored once ENSEMBLE_VERSION changes.
 
 Uses the stored daily bars in DATABASE_URL (read-only) and the same fold
 scorer as the Backtest Lab (``backend.api.backtest._score_backtest_fold``:
@@ -9,12 +13,21 @@ scored point it also records the **base rate**: the share of "up" labels in
 that fold's training data. Stocks rise slightly more often than they fall,
 so the base rate, not a 50/50 coin, is the bar a direction model must beat.
 
+The app shows one of two probabilities: the shrinkage-calibrated ensemble
+until the nightly job has written a calibration snapshot, then the
+isotonic/Platt-calibrated one. Both are scored; the isotonic variant is fit
+walk-forward (per fold, on earlier points whose outcomes were already known),
+the way the nightly snapshot is used live.
+
 Reported per horizon (pooled over symbols):
-  brier_model     Brier score of the probabilities the app shows (calibrated)
+  brier_model     Brier score of the shrinkage-calibrated probability
+  brier_isotonic  Brier score of the isotonic/Platt-calibrated probability
   brier_base      Brier score of the training base rate
   skill           Brier skill score = 1 - brier_model / brier_base
                   (> 0 beats the base rate; < 0 is worse than it)
   skill_ci95      cluster bootstrap over symbols
+  skill_isotonic, skill_isotonic_ci95
+                  the same for the isotonic variant
   hit_rate        accuracy of p > 0.5 vs the base rate's majority call
   brier_blend     Brier of (1 - k) * base + k * model for a few k: shows
                   whether any share of the model's signal adds information
@@ -30,6 +43,7 @@ import json
 import random
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,10 +54,16 @@ import pandas as pd  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
 from backend.api.backtest import _score_backtest_fold  # noqa: E402
+from backend.forecasting.calibration.calibrators import (  # noqa: E402
+    MIN_ISOTONIC_SAMPLES,
+    apply_calibrator,
+    fit_isotonic,
+)
 from backend.db.models import Instrument, PriceBar  # noqa: E402
 from backend.db.session import get_session_factory  # noqa: E402
 from backend.forecasting.backtesting import WalkForwardSplitter  # noqa: E402
 from backend.forecasting.features.features import build_feature_bundle, direction_label  # noqa: E402
+from backend.forecasting.registry import ENSEMBLE_VERSION  # noqa: E402
 
 
 def load_frames(min_bars: int) -> dict[str, pd.DataFrame]:
@@ -74,33 +94,47 @@ def score_symbol(frame: pd.DataFrame, horizon: int, train: int, test: int, gap: 
     labels = direction_label(closes, horizon)
     splitter = WalkForwardSplitter(train_size=train, test_size=test, gap=gap, expanding=True)
     out = []
+    history: list[tuple[int, float, float]] = []  # (pos, raw, label) scored so far
     for train_idx, test_idx in splitter.splits(len(features)):
         train_labels = labels.iloc[train_idx].dropna()
         if train_labels.empty:
             continue
         base = float(train_labels.mean())
+        # Calibrator from earlier points whose outcome was known at this fold's start.
+        start = int(min(test_idx))
+        known = [(r, lab) for pos, r, lab in history if pos + horizon <= start]
+        calibrator = (
+            fit_isotonic([r for r, _ in known], [lab for _, lab in known], kind="auto")
+            if len(known) >= MIN_ISOTONIC_SAMPLES else None
+        )
         scored, _ = _score_backtest_fold(train_idx, test_idx, features, closes, labels, frame, horizon, gap)
-        for _pos, label, _raw, proba in scored:
-            out.append((float(label), float(proba), base))
+        for pos, label, raw, proba in scored:
+            iso = apply_calibrator(raw, calibrator) if calibrator else float(proba)
+            out.append((float(label), float(proba), base, float(iso)))
+            history.append((int(pos), float(raw), float(label)))
     return out
 
 
 def summarize(per_symbol: dict[str, list[tuple]], n_boot: int, seed: int) -> dict:
-    def stats(symbols):
-        pts = [p for s in symbols for p in per_symbol[s]]
-        y = np.array([p[0] for p in pts]); pm = np.array([p[1] for p in pts]); pb = np.array([p[2] for p in pts])
-        bm = float(np.mean((pm - y) ** 2)); bb = float(np.mean((pb - y) ** 2))
-        return y, pm, pb, bm, bb
+    arrays = {s: np.array(pts, dtype=float) for s, pts in per_symbol.items() if pts}
+    symbols = sorted(arrays)
 
-    symbols = [s for s, pts in per_symbol.items() if pts]
-    y, pm, pb, bm, bb = stats(symbols)
+    def stats(sample):
+        a = np.concatenate([arrays[s] for s in sample])
+        y, pm, pb, pi = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+        return y, pm, pb, pi, float(np.mean((pm - y) ** 2)), float(np.mean((pb - y) ** 2)), float(np.mean((pi - y) ** 2))
+
+    def ci(values):
+        values = sorted(values)
+        return [round(values[int(0.025 * n_boot)], 4), round(values[int(0.975 * n_boot) - 1], 4)]
+
+    y, pm, pb, pi, bm, bb, bi = stats(symbols)
     rng = random.Random(seed)
-    boots = []
+    boots, boots_iso = [], []
     for _ in range(n_boot):
-        sample = [rng.choice(symbols) for _ in symbols]
-        _, _, _, bm_b, bb_b = stats(sample)
+        _, _, _, _, bm_b, bb_b, bi_b = stats([rng.choice(symbols) for _ in symbols])
         boots.append(1 - bm_b / bb_b)
-    boots.sort()
+        boots_iso.append(1 - bi_b / bb_b)
     return {
         "symbols": len(symbols),
         "points": int(len(y)),
@@ -109,7 +143,10 @@ def summarize(per_symbol: dict[str, list[tuple]], n_boot: int, seed: int) -> dic
         "brier_base": round(bb, 5),
         "brier_coin": 0.25,
         "skill": round(1 - bm / bb, 4),
-        "skill_ci95": [round(boots[int(0.025 * n_boot)], 4), round(boots[int(0.975 * n_boot) - 1], 4)],
+        "skill_ci95": ci(boots),
+        "brier_isotonic": round(bi, 5),
+        "skill_isotonic": round(1 - bi / bb, 4),
+        "skill_isotonic_ci95": ci(boots_iso),
         "hit_rate_model": round(float(np.mean((pm > 0.5) == (y == 1))), 4),
         "hit_rate_base": round(float(np.mean((pb > 0.5) == (y == 1))), 4),
         "mean_prob_model": round(float(pm.mean()), 4),
@@ -140,7 +177,12 @@ def main(argv: list[str] | None = None) -> int:
         names = sorted(random.Random(args.seed).sample(names, args.symbols))
     gap = max(args.horizons)
     print(f"{len(names)} symbols, horizons {args.horizons}, train>={args.train}, test={args.test}, gap={gap}", flush=True)
-    report: dict = {"params": vars(args) | {"gap": gap, "universe": names}, "horizons": {}}
+    report: dict = {
+        "model_version": ENSEMBLE_VERSION,
+        "as_of": date.today().isoformat(),
+        "params": {k: v for k, v in vars(args).items() if k != "out"} | {"gap": gap, "universe": names},
+        "horizons": {},
+    }
     for h in args.horizons:
         started = time.time()
         per_symbol = {}
@@ -152,7 +194,8 @@ def main(argv: list[str] | None = None) -> int:
         report["horizons"][str(h)] = summary = summarize(per_symbol, args.bootstrap, args.seed)
         print(f"h={h:>2}  {json.dumps(summary)}  ({time.time() - started:.0f}s)", flush=True)
     if args.out:
-        Path(args.out).write_text(json.dumps(report, indent=2))
+        Path(args.out).write_text(json.dumps(report, indent=2) + "
+", encoding="utf-8")
     return 0
 
 

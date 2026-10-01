@@ -56,4 +56,10 @@ function formatMetric(m) {
   }
   return { text: formatValue(m), title: "", unavailable: false };
 }
-export { changeArrow, changeColor, formatDateTime, formatMetric, formatNumber, formatPct1, formatValue };
+// Forecast return band {low, high} (fractions) as "-8% to +9%"; em dash when missing.
+function formatRange(iv) {
+  if (!iv || typeof iv.low !== "number" || typeof iv.high !== "number" || !Number.isFinite(iv.low) || !Number.isFinite(iv.high)) return "—";
+  const pct = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(0)}%`;
+  return `${pct(iv.low)} to ${pct(iv.high)}`;
+}
+export { changeArrow, changeColor, formatDateTime, formatMetric, formatNumber, formatPct1, formatRange, formatValue };

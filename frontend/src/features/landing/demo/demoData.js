@@ -32,6 +32,7 @@ export const DEMO_INDICATORS = ["SMA20", "VOL"];
 export const DEMO_SYMBOLS = [
   {
     symbol: "AAPL",
+    dailyVol: 1.5,
     name: "Apple Inc.",
     market: "NASDAQ",
     mic: "XNAS",
@@ -58,6 +59,7 @@ export const DEMO_SYMBOLS = [
   },
   {
     symbol: "NVDA",
+    dailyVol: 3.0,
     name: "NVIDIA Corp.",
     market: "NASDAQ",
     mic: "XNAS",
@@ -84,6 +86,7 @@ export const DEMO_SYMBOLS = [
   },
   {
     symbol: "TSLA",
+    dailyVol: 3.4,
     name: "Tesla Inc.",
     market: "NASDAQ",
     mic: "XNAS",
@@ -109,6 +112,17 @@ export const DEMO_SYMBOLS = [
     },
   },
 ];
+
+// Demo 80% return band for h trading days: +/-1.28 sigma * sqrt(h), in %.
+export function demoRange(d, h) {
+  const half = 1.28 * (d.dailyVol ?? 2) * Math.sqrt(h);
+  return { low: -Math.round(half), high: Math.round(half + 0.05 * h) };
+}
+
+export function formatDemoRange(r) {
+  const pct = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v)}%`;
+  return `${pct(r.low)} to ${pct(r.high)}`;
+}
 
 export function getDemoSymbol(sym) {
   return DEMO_SYMBOLS.find((d) => d.symbol === sym) || DEMO_SYMBOLS[0];
