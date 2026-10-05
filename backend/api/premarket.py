@@ -11,9 +11,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-router = APIRouter(prefix="/api/sentiment", tags=["sentiment"])
+from backend.auth.guards import get_current_user
+
+router = APIRouter(prefix="/api/sentiment", tags=["sentiment"], dependencies=[Depends(get_current_user)])
 
 DISCLOSURE = (
     "Not investment advice. For informational purposes only. "

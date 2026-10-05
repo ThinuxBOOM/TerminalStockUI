@@ -4,8 +4,6 @@ import Sidebar from "./Sidebar";
 import TopBar from "./TopBar";
 import StatusBar from "./StatusBar";
 import CommandPalette from "./CommandPalette";
-import AdSlot from "../AdSlot";
-import { useAuth } from "../../hooks/useAuth";
 
 const SIDEBAR_KEY = "onemarket.sidebar.collapsed.v1";
 
@@ -20,8 +18,8 @@ function loadCollapsed() {
 
 // Single terminal shell: <AppShell><Sidebar/><MainArea><TopBar/>
 // <Workspace><Outlet/children/></Workspace><StatusBar/></MainArea></AppShell>.
-// Owns global search navigation, command palette, focus management, and the
-// compliant AdSlot budget. No page may duplicate shell markup.
+// Owns global search navigation, command palette and focus management. No
+// page may duplicate shell markup.
 function AppShell({ children }) {
   const [q, setQ] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -29,7 +27,6 @@ function AppShell({ children }) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const navigate = useNavigate();
   const location = useLocation();
-  const { tier } = useAuth();
   const searchRef = useRef(null);
 
   const toggleCollapse = useCallback(() => {
@@ -111,10 +108,6 @@ function AppShell({ children }) {
             menuExpanded={mobileOpen}
             onOpenPalette={openPalette}
           />
-          {/* Compliant leaderboard below the header (slot index 0). */}
-          <div className="w-full px-4 pt-3">
-            <AdSlot slotId="layout-leaderboard" format="leaderboard" tier={tier} slotIndex={0} />
-          </div>
           <main
             key={location.pathname}
             id="main-content"
@@ -125,11 +118,9 @@ function AppShell({ children }) {
           </main>
           <footer
             role="contentinfo"
-            className="w-full border-t border-term-border px-4 pb-2 pt-3 text-2xs text-term-muted"
+            className="w-full border-t border-term-border px-4 pb-2 pt-3 text-2xs text-term-faint"
           >
-            {/* Footer in-feed above the disclaimer (slot index 1). */}
-            <AdSlot slotId="layout-footer" format="in-feed" tier={tier} slotIndex={1} />
-            Plain-English stock insights — no jargon needed. Numbers show their source and freshness. AI opinions are bounded and capped at 20%. Not investment advice.
+            Every number shows its source and freshness. Forecasts are statistical estimates with a measured track record (see Model Lab); past accuracy does not guarantee future results. Not investment advice.
           </footer>
           <StatusBar />
         </div>

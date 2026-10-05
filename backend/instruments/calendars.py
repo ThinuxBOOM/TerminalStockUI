@@ -216,12 +216,23 @@ def expected_delay_minutes(mic: str) -> int:
         raise ValueError(f"unsupported exchange MIC: {mic!r}") from None
 
 
+#: Benchmark indices have no venue suffix; without this map they defaulted
+#: to XNAS and their session days were computed on New York time.
+INDEX_MIC = {
+    "^FCHI": "XPAR", "^AEX": "XAMS", "^BFX": "XBRU",
+    "^NYA": "XNYS", "^GSPC": "XNYS", "^DJI": "XNYS", "^IXIC": "XNAS", "^NDX": "XNAS",
+}
+
+
 def split_provider_symbol(symbol: str) -> tuple[str, str | None]:
     """Split a provider symbol into (base, mic-or-None).
 
     Longest-suffix match so '.SS' wins correctly; bare US tickers -> None.
+    Known index symbols (``^FCHI``) map to their own venue.
     """
     text = (symbol or "").strip().upper()
+    if text in INDEX_MIC:
+        return text, INDEX_MIC[text]
     for suffix in sorted(SUFFIX_TO_MIC, key=len, reverse=True):
         if suffix and text.endswith(suffix.upper()):
             return text[: -len(suffix)], SUFFIX_TO_MIC[suffix]
@@ -231,6 +242,8 @@ def split_provider_symbol(symbol: str) -> tuple[str, str | None]:
 def provider_symbol_for(exchange_symbol: str, mic: str) -> str:
     """Canonical provider (Yahoo-style) symbol for an instrument."""
     base = (exchange_symbol or "").strip().upper()
+    if base.startswith("^"):
+        return base  # index symbols carry no venue suffix
     suffix = suffix_for_mic(mic)
     if suffix and not base.endswith(suffix.upper()):
         return base + suffix.upper()
@@ -386,6 +399,36 @@ def last_completed_trading_day(mic: str, now: datetime | None = None) -> date:
             return ref.astimezone(timezone.utc).date()
         except Exception:
             return date.today()
+
+
+def session_date(ts: object, mic: str | None = None) -> date | None:
+    """Exchange-local calendar day of a bar timestamp.
+
+    Daily bars are stored as the session's local midnight expressed in UTC,
+    so for venues east of UTC the UTC date is the PREVIOUS day (the 29 Sep
+    Shanghai bar is ``2026-09-28T16:00:00+00:00``). Comparing ``str(ts)[:10]``
+    with exchange-local session days therefore misdates every Asian and
+    European bar. Accepts datetimes and ISO strings; plain ``YYYY-MM-DD`` is
+    already a session day. Returns None when unparseable.
+    """
+    try:
+        if isinstance(ts, datetime):
+            dt = ts
+        elif isinstance(ts, date):
+            return ts
+        else:
+            text = str(ts or "").strip()
+            if len(text) == 10:
+                return date.fromisoformat(text)
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.date()
+    key = (mic or "").strip().upper()
+    if key in EXCHANGE_META:
+        return _exchange_now(key, dt).date()
+    return dt.astimezone(timezone.utc).date()
 
 
 def _exchange_now(mic: str, dt: datetime) -> datetime:

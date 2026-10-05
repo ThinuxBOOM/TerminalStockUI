@@ -63,6 +63,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
+#: Floor applied to every effective window (see get_retention_days).
+MIN_RETENTION_DAYS = 1
+
 RETENTION_TICKS_DAYS = 90
 RETENTION_BARS_DAYS = 5 * 365  # 1825
 RETENTION_FORECASTS_DAYS = 3 * 365  # 1095
@@ -74,6 +77,7 @@ RETENTION_MARKET_SNAPSHOTS_DAYS = 2 * 365  # 730 (compressed raw; heavier than b
 RETENTION_AI_TOKEN_LEDGER_DAYS = 365  # 1y (0006 successor of ai_token_logs)
 RETENTION_PROVIDER_HEALTH_HISTORY_DAYS = 90  # ops samples; 90d like ticks
 RETENTION_INDICATOR_CACHE_DAYS = 30  # stale cache eviction on updated_at
+RETENTION_CROSS_SECTIONS_DAYS = 90
 # --- Agent 3 snapshot tiers (additive; revamp values untouched) ---
 RETENTION_SNAPSHOTS_RAW_DAYS = 30  # non-gzip captures; 30d on created_at
 RETENTION_SNAPSHOTS_COMPRESSED_DAYS = 365  # gzip captures; 1y on created_at
@@ -115,6 +119,9 @@ RETENTION_RULES: list[dict[str, Any]] = [
     {"dataset": "indicator_cache", "table": "indicator_cache",
      "retention_days": RETENTION_INDICATOR_CACHE_DAYS,
      "time_column": "updated_at", "notes": "stale cache eviction; 30d on updated_at"},
+    {"dataset": "cross_sections", "table": "cross_sections",
+     "retention_days": RETENTION_CROSS_SECTIONS_DAYS,
+     "time_column": "created_at", "notes": "daily v4 universe distributions; only the latest is read; 90d"},
 ]
 
 RETENTION_DAYS: dict[str, int] = {r["dataset"]: r["retention_days"] for r in RETENTION_RULES}
@@ -130,6 +137,7 @@ _ENV_KEYS = {
     "ai_token_ledger": "RETENTION_AI_TOKEN_LEDGER_DAYS",
     "provider_health_history": "RETENTION_PROVIDER_HEALTH_HISTORY_DAYS",
     "indicator_cache": "RETENTION_INDICATOR_CACHE_DAYS",
+    "cross_sections": "RETENTION_CROSS_SECTIONS_DAYS",
     "snapshots_raw": "RETENTION_SNAPSHOTS_RAW_DAYS",
     "snapshots_compressed": "RETENTION_SNAPSHOTS_COMPRESSED_DAYS",
 }
@@ -153,7 +161,9 @@ def get_retention_days(overrides: Optional[Mapping[str, int]] = None) -> dict[st
         for k, v in overrides.items():
             if k in days:
                 days[k] = int(v)
-    return days
+    # A zero/negative window would put the cutoff at or after "now" and purge
+    # the whole table; never allow that, whatever the source.
+    return {k: max(MIN_RETENTION_DAYS, int(v)) for k, v in days.items()}
 
 
 def cutoff_for(retention_days: int, now: Optional[datetime] = None) -> datetime:

@@ -4,86 +4,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from backend.auth.guards import get_current_user, require_admin, user_id_of
+from backend.db.models import User
+
 from ..market_data.health import ProviderHealthTracker
 from .deps import get_health_tracker, get_market_service
 
-try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier  # type: ignore
-except ImportError:  # pragma: no cover - fallback until Phase 2 lands
-    from typing import Any as _Any
-
-    from fastapi import Request as _Request
-
-    from backend.auth.tiers import _TIER_RANK as _RANK
-    from backend.auth.tiers import normalize_tier as _norm
-
-    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
-        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
-        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
-        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
-        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
-        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
-    }
-
-    def require_tier(min_tier: str):  # type: ignore[no-redef]
-        need = _norm(min_tier)
-
-        async def _dep(request: _Request) -> dict[str, _Any]:
-            try:
-                auth = (request.headers.get("authorization") or "").strip()
-            except Exception:
-                auth = ""
-            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            user = _TEST_TOKENS.get(token)
-            if user is None:
-                raise HTTPException(status_code=401, detail="unauthorized")
-            if bool(user.get("is_admin")):
-                return dict(user)
-            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
-                return dict(user)
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep
-
-
-def _user_field(user: object, name: str, default: object = None) -> object:
-    try:
-        if isinstance(user, dict):
-            return user.get(name, default)  # type: ignore[union-attr]
-    except Exception:
-        pass
-    try:
-        return getattr(user, name, default)
-    except Exception:
-        return default
-
-
-def _require_ai_provider_tier(user: object | None, provider_name: str) -> None:
-    """all_providers=platinum: AI provider probes need platinum/admin.
-
-    Market-data probes (yfinance/alpaca/finnhub/twelvedata/fx) stay free.
-    Client-supplied tier is never trusted — only the verified JWT user.
-    Works with dict (fallback) and ORM (guards) users.
-    """
-    try:
-        if bool(_user_field(user, "is_admin", False)):
-            return
-    except Exception:
-        pass
-    name = (provider_name or "").strip().lower()
-    if name in ("gemini", "openai", "anthropic", "xai"):
-        try:
-            from backend.auth.tiers import _TIER_RANK as _R2
-            from backend.auth.tiers import normalize_tier as _n2
-
-            have = _n2(str(_user_field(user, "tier", "free")))  # type: ignore[arg-type]
-            if _R2[have] >= _R2["platinum"]:
-                return
-        except Exception:
-            return
-        raise HTTPException(status_code=402, detail={"message": "upgrade required: platinum or higher", "upgrade_required": True, "min_tier": "platinum"})
-
-router = APIRouter(prefix="/api/providers", tags=["providers"])
+router = APIRouter(prefix="/api/providers", tags=["providers"], dependencies=[Depends(get_current_user)])
 
 #: Reference symbol for the health probe (must exist in the seed registry).
 PROBE_SYMBOL = "AAPL"
@@ -171,52 +98,11 @@ def _enriched_stat(tracker: ProviderHealthTracker, name: str) -> dict:
     return stats
 
 
-def _probe_zero_sample_providers(tracker: ProviderHealthTracker, names: list[str]) -> None:
-    """Actively ping sample-less providers so the dashboard shows measured
-    data instead of unknown everywhere.
-
-    Passive tracker stats are per-process: on serverless every instance
-    starts empty, so a purely read-only dashboard reports all providers
-    unknown even while quotes flow on sibling instances. Pinging just the
-    zero-sample providers (parallel lightweight single quote / FX pair /
-    AI model-list; AI without a key short-circuits to unconfigured with no
-    network) fixes that. Skipped under pytest (PYTEST_CURRENT_TEST) to keep
-    the suite offline and deterministic. Never raises.
-    """
-    import os as _os
-
-    try:
-        if _os.getenv("PYTEST_CURRENT_TEST"):
-            return
-        todo: list[str] = []
-        for _n in names or []:
-            try:
-                if int((tracker.stats(_n) or {}).get("total_calls") or 0) == 0:
-                    todo.append(_n)
-            except Exception:
-                continue
-        if not todo:
-            return
-        from concurrent.futures import ThreadPoolExecutor
-
-        from backend.market_data.health import probe_provider as _probe
-
-        def _one(_name: str) -> None:
-            try:
-                _probe(_name, tracker)
-            except Exception:
-                pass
-
-        with ThreadPoolExecutor(max_workers=max(1, min(11, len(todo)))) as _pool:
-            list(_pool.map(_one, todo))
-    except Exception:
-        pass
 
 
 @router.get("/health")
 def providers_health(
     tracker: ProviderHealthTracker = Depends(get_health_tracker),
-    user: dict = Depends(require_tier("free")),
 ):
     """GET /api/providers/health -> per-provider latency/error/circuit state.
 
@@ -225,19 +111,14 @@ def providers_health(
     calls_1h/total_calls/circuit/last_check) and adds kind/state/
     error_rate_5m/calls_5m/last_success/consecutive_failures/quota
     (+ configured for authenticated providers). Rows cover every known
-    provider even before their first call. Zero-sample providers are
-    actively pinged (parallel, lightweight) so serverless instances report
-    measured rows instead of unknown everywhere; uncalled/unprobed rows
-    report null latencies, never fabricated 0ms.
+    provider even before their first call. Read-only: rows reflect real
+    traffic plus the scheduler's daily health probe; providers with no
+    samples yet report null latencies, never a fabricated 0ms.
     """
     try:
         from backend.market_data.health import KNOWN_PROVIDERS as _KNOWN
     except Exception:
         _KNOWN = ALL_PROBE_PROVIDERS
-    try:
-        _probe_zero_sample_providers(tracker, list(_KNOWN))
-    except Exception:
-        pass
     rows: list[dict] = []
     seen: set[str] = set()
     for _name in _KNOWN:
@@ -277,7 +158,7 @@ def providers_health(
 def test_provider(
     provider: str = "yfinance",
     svc=Depends(get_market_service),
-    user: dict = Depends(require_tier("free")),
+    admin: User = Depends(require_admin),
 ):
     """Health probe: lightweight per-provider ping + fresh enriched stats.
 
@@ -295,8 +176,6 @@ def test_provider(
             status_code=422,
             detail=f"unknown provider; expected one of {list(ALL_PROBE_PROVIDERS)}",
         )
-    # V2 HARD gate: all_providers=platinum for AI probes (free stays for data).
-    _require_ai_provider_tier(user, name)
     _ = svc  # kept dependency (override seam); probing is per-provider below.
     try:
         tracker = get_health_tracker()
@@ -414,10 +293,10 @@ def _is_configured(provider: str) -> bool:
 
 
 @router.post("/keys")
-def save_provider_key(body: dict, user: dict = Depends(require_tier("platinum"))) -> dict:
+def save_provider_key(body: dict, admin: User = Depends(require_admin)) -> dict:
     """POST /api/providers/keys {provider, model?, api_key} -> encrypted at rest.
 
-    V2 HARD gate: providers_configure=platinum (admin bypasses).
+    Admin only: provider keys and budgets are site-wide settings.
     """
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be {provider, model?, api_key}")
@@ -446,7 +325,7 @@ def save_provider_key(body: dict, user: dict = Depends(require_tier("platinum"))
         try:
             append_audit_log(
                 db,
-                actor="system",
+                actor=f"user:{user_id_of(admin)}",
                 action="provider.key_saved",
                 entity_type="provider",
                 entity_id=provider,
@@ -460,7 +339,7 @@ def save_provider_key(body: dict, user: dict = Depends(require_tier("platinum"))
 
 
 @router.get("/keys/status")
-def provider_keys_status(user: dict = Depends(require_tier("free"))) -> dict:
+def provider_keys_status(admin: User = Depends(require_admin)) -> dict:
     """GET /api/providers/keys/status -> config flags only, never key material."""
     rows: dict[str, object] = {}
     try:
@@ -485,10 +364,10 @@ def provider_keys_status(user: dict = Depends(require_tier("free"))) -> dict:
 
 
 @router.post("/budget")
-def save_provider_budget(body: dict, user: dict = Depends(require_tier("platinum"))) -> dict:
+def save_provider_budget(body: dict, admin: User = Depends(require_admin)) -> dict:
     """POST /api/providers/budget {provider, monthly_usd} -> upsert cap.
 
-    V2 HARD gate: providers_configure=platinum (admin bypasses).
+    Admin only: provider keys and budgets are site-wide settings.
     """
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be {provider, monthly_usd}")
@@ -512,7 +391,7 @@ def save_provider_budget(body: dict, user: dict = Depends(require_tier("platinum
         try:
             append_audit_log(
                 db,
-                actor="system",
+                actor=f"user:{user_id_of(admin)}",
                 action="provider.budget_saved",
                 entity_type="provider",
                 entity_id=provider,
@@ -526,7 +405,7 @@ def save_provider_budget(body: dict, user: dict = Depends(require_tier("platinum
 
 
 @router.get("/budget")
-def get_provider_budgets(user: dict = Depends(require_tier("free"))) -> dict:
+def get_provider_budgets(admin: User = Depends(require_admin)) -> dict:
     """GET /api/providers/budget -> {budgets: {provider: monthly_usd}}."""
     budgets: dict[str, float] = {}
     try:

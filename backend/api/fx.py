@@ -34,8 +34,9 @@ from backend.market_data.fx.provider import SUPPORTED_CURRENCIES, FXProvider
 from backend.market_data.provenance import build_provenance
 from backend.market_data.providers.base import ProviderError
 from backend.market_data.quality import grade_quality
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/fx", tags=["fx"])
+router = APIRouter(prefix="/api/fx", tags=["fx"], dependencies=[Depends(get_current_user)])
 
 _fx_provider: FXProvider | None = None
 

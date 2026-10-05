@@ -39,38 +39,6 @@ def test_registry_merges_sp500_with_seeds_winning():
     assert brk.company_name == "Berkshire Hathaway"
 
 
-def test_screener_normalize_market_sp500():
-    from backend.api.screener import _normalize_market
-
-    assert _normalize_market("SP500") == "SP500"
-    assert _normalize_market("sp500") == "SP500"
-    assert _normalize_market(None) is None
-    assert _normalize_market("ALL") is None
-    with pytest.raises(HTTPException) as exc:
-        _normalize_market("NOPE")
-    assert exc.value.status_code == 422
-
-
-def test_screener_sp500_universe_filter():
-    from backend.api.screener import _universe_for
-    from backend.instruments.registry import InstrumentRegistry
-    from backend.instruments.sp500 import SP500_SYMBOLS
-
-    reg = InstrumentRegistry()
-    uni = _universe_for("SP500", reg)
-    assert len(uni) == len(SP500_SYMBOLS) == 500
-    keys = set()
-    for inst in uni:
-        key = str(getattr(inst, "provider_symbol", None)
-                  or getattr(inst, "exchange_symbol", "")).upper()
-        keys.add(key)
-        assert getattr(inst, "exchange_mic", None) in ("XNYS", "XNAS")
-    assert keys == {s.upper() for s in SP500_SYMBOLS}
-    # MIC scopes still work and are subsets.
-    xnys = _universe_for("XNYS", reg)
-    assert xnys and all(i.exchange_mic == "XNYS" for i in xnys)
-
-
 def test_ingest_shard_symbols():
     from backend.market_data.ingest import shard_symbols, sp500_universe
 
@@ -117,3 +85,13 @@ def test_signals_excludes_sp500_bulk():
     assert len(kept) < 60  # same order as pre-SP500 universe
     assert any(str(getattr(i, "provider_symbol", "") or "").upper() == "TSLA" for i in kept)
     assert signals.top_signals  # endpoint still wired
+
+
+def test_signal_buckets_never_list_a_stock_twice():
+    from backend.api.signals import _buckets
+
+    rows = [{"symbol": s, "out_rank": p} for s, p in (("A", 0.95), ("B", 0.6), ("C", 0.1))]
+    out = _buckets(rows, 5)
+    assert [r["symbol"] for r in out["top"]] == ["A", "B"]
+    assert [r["symbol"] for r in out["bottom"]] == ["C"]
+    assert out["count"] == 3

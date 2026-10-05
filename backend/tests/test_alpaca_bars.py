@@ -281,6 +281,7 @@ def _seed_fresh_yahoo_bars(url: str, symbol: str = "AAPL"):
     from backend.db.models import PriceBar as _PriceBar
     from backend.db.session import get_session_factory, init_db
     from backend.instruments.calendars import last_completed_trading_day
+    from backend.market_data.ingest import canonical_session_ts
 
     end_day = last_completed_trading_day("XNAS")
     init_db(url)
@@ -296,7 +297,8 @@ def _seed_fresh_yahoo_bars(url: str, symbol: str = "AAPL"):
         price = 300.0
         for i in range(120):
             day = end_day - timedelta(days=(119 - i))
-            ts = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+            # What yfinance stores: the session's New York midnight.
+            ts = canonical_session_ts(datetime(day.year, day.month, day.day, tzinfo=timezone.utc), "America/New_York")
             o = round(price, 2)
             c = round(price * 1.001, 2)
             db.add(_PriceBar(

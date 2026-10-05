@@ -36,18 +36,19 @@ per page view.
   decrypted **only at call time**, never returned via any API (`describe()`
   exposes names only), redacted in logs and audit payloads (`redact_mapping` /
   `redact_string`, covered by `test_security.py`, `test_audit.py`).
-- Setup:
-  ```powershell
-  # 1. put a strong SECRET_KEY in infra/docker/.env (never commit .env)
-  # SECRET_KEY=<base64-urlsafe-32B>  (any string works; it is hashed to a Fernet key)
-  # 2. store the provider key through the settings flow (server-side only):
-  #    settings.put("gemini", "api_key", "<paste-once, never logged>")
-  ```
+- Setup (either):
+  - an administrator enters the key on the Data Health page (stored encrypted
+    with a key derived from `SECRET_KEY`), or
+  - set `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+    `XAI_API_KEY` in the server's `.env`.
+- Spend control: AI runs only on explicit request, opinions are cached by
+  evidence hash and shared across users, and each user is limited to
+  `AI_DAILY_CALLS_PER_USER` live calls per 24 h (default 50).
 - Rules: **no plaintext keys anywhere** — not in code, docs, logs, audit rows,
   evidence packets, or the browser. Audit rows are hash-chained, so a leaked
   key could never be removed; the append path redacts before hashing.
-- Rotation: overwrite via `put(provider, "api_key", ...)`; old ciphertext is
-  discarded. If `SECRET_KEY` changes, re-store all keys (decrypt raises
+- Rotation: save a new key on the Data Health page; the old ciphertext is
+  replaced. If `SECRET_KEY` changes, re-store all keys (decrypt raises
   `ValueError: cannot decrypt secret with current key` otherwise).
 
 ## Weight-cap policy (fixed for v1)

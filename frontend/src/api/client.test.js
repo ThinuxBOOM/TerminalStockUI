@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AI_TIMEOUT_MS, BACKTEST_TIMEOUT_MS, FORECAST_HORIZONS, MARKET_STATES, RANK_TIMEOUT_MS, SCREENER_TIMEOUT_MS, api, deriveMarketState, displaySymbol, extractFxGateProvenance, freshnessOf, friendlyAIError, isFreshFxProvenance, isFxProvenanceMissingError, normalizeHealthProviders, normalizeMarketState, normalizeTargetCcy } from "./client";
+import { AI_TIMEOUT_MS, FORECAST_HORIZONS, MARKET_STATES, RANK_TIMEOUT_MS, api, deriveMarketState, displaySymbol, extractFxGateProvenance, freshnessOf, friendlyAIError, isFreshFxProvenance, isFxProvenanceMissingError, normalizeHealthProviders, normalizeMarketState, normalizeTargetCcy } from "./client";
 const TS = "2026-01-15T12:00:00.000Z";
 function prov(over = {}) {
   return {
@@ -108,13 +108,12 @@ describe("constants and client defaults", () => {
     expect(MARKET_STATES).toEqual(["open", "closed", "lunch", "delayed", "stale"]);
     expect(MARKET_STATES).toHaveLength(5);
   });
-  it("timeout consts: AI/SCREENER 60s, shared axios default 60s", () => {
+  it("timeout consts: AI 60s, shared axios default 60s", () => {
     expect(AI_TIMEOUT_MS).toBe(6e4);
-    expect(SCREENER_TIMEOUT_MS).toBe(6e4);
     expect(api.defaults.timeout).toBe(6e4);
   });
-  it("Node default baseURL targets local FastAPI (resolveBaseUrl contract)", () => {
-    expect(api.defaults.baseURL).toBe("http://localhost:8000");
+  it("default baseURL is same-origin (Caddy / vite proxy route /api)", () => {
+    expect(api.defaults.baseURL).toBe("");
   });
 });
 describe("normalizeTargetCcy", () => {
@@ -227,8 +226,17 @@ describe("normalizeHealthProviders (tracker rows lack name/status)", () => {
   });
 });
 describe("slow-path timeouts (cold serverless budget)", () => {
-  it("backtest and rank get 60s like AI and screener", () => {
-    expect(BACKTEST_TIMEOUT_MS).toBe(6e4);
+  it("cross-market rank gets 60s like AI", () => {
     expect(RANK_TIMEOUT_MS).toBe(6e4);
+  });
+});
+describe("daily-bar provenance (granularity 1d)", () => {
+  it("is 'daily', never stale by minutes since ingest", () => {
+    const hoursAgo = new Date(Date.now() - 5 * 3600e3).toISOString();
+    const p = { source: "yfinance", as_of: hoursAgo, delay_minutes: 15, quality_grade: "B", fallback_used: false, missing_fields: [], granularity: "1d" };
+    expect(freshnessOf(p)).toBe("daily");
+    expect(deriveMarketState(p)).toBe("daily");
+    expect(freshnessOf({ ...p, granularity: null })).toBe("stale");
+    expect(freshnessOf({ ...p, fallback_used: true })).toBe("cached");
   });
 });

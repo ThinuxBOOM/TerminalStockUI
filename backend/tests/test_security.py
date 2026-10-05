@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from backend.security.authorization import Role, check_permission
 from backend.security.secrets import (
     EncryptedSecretStore,
     decrypt_secret,
@@ -54,9 +53,3 @@ def test_redact_string():
     assert "sk-x" not in redact_string("call failed api_key=sk-x retrying")
 
 
-def test_authorization_matrix():
-    assert check_permission(Role.ADMIN, "configure_providers")
-    assert check_permission("analyst", "research")
-    assert not check_permission("viewer", "configure_providers")
-    assert check_permission("viewer", "read")
-    assert not check_permission("nobody", "read")

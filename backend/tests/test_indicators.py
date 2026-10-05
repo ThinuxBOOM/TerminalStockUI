@@ -23,6 +23,7 @@ from backend.analytics.technical.overlays import (
 from backend.api.analytics_api import router as analytics_router
 from backend.api.market_data import router as market_router
 from backend.tests.fixtures import make_ohlcv
+from backend.tests.auth_helpers import inject_admin_auth
 
 
 def _frame(n: int = 120, seed: int = 42) -> pd.DataFrame:
@@ -35,13 +36,13 @@ def _analytics_client() -> TestClient:
     app = FastAPI()
     app.include_router(analytics_router)
     inject_admin_auth(app)
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def _market_client() -> TestClient:
     app = FastAPI()
     app.include_router(market_router)
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 # --- contract ---------------------------------------------------------------

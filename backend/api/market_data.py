@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.market_data.health import market_state as _calendar_market_state
 from backend.market_data.providers.base import ProviderError
-from backend.market_data.service import MarketDataService
+from backend.market_data.service import MarketDataService, bar_session_day
 from backend.security.validation import (
     sanitize_error,
     validate_instrument_id,
@@ -16,8 +16,9 @@ from backend.security.validation import (
 from backend.analytics.technical.overlays import compute_indicators, parse_indicators
 from backend.api.deps import get_market_service, get_registry
 from backend.api.schemas import BarsResponse, ChartResponse, QuoteResponse
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/market_data", tags=["market_data"])
+router = APIRouter(prefix="/api/market_data", tags=["market_data"], dependencies=[Depends(get_current_user)])
 
 INDICATOR_MAX_POINTS = 1000
 
@@ -35,7 +36,7 @@ def _chart_cache_key(symbol: str, timeframe: str, limit: int) -> str:
         return f"market_data:chart:{symbol}:{timeframe}:{limit}"
 
 #: Contract alias router: /api/securities/{instrument_id}/quote|bars
-securities_router = APIRouter(prefix="/api/securities", tags=["securities"])
+securities_router = APIRouter(prefix="/api/securities", tags=["securities"], dependencies=[Depends(get_current_user)])
 
 
 def _utcnow():  # type: ignore[no-untyped-def]
@@ -245,7 +246,7 @@ def market_indicators(
                 "close": [r.get("close") for r in rows],
                 "volume": [float(r.get("volume") or 0) for r in rows],
             },
-            index=_pd.to_datetime([r.get("ts") for r in rows]) if rows else [],
+            index=_pd.to_datetime([bar_session_day(r) for r in rows]) if rows else [],
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"indicators frame failed: {exc}") from exc

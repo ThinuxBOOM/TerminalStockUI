@@ -55,7 +55,7 @@ Seed symbols (see `backend/instruments/registry.py`):
 - No cross-market conversion or ranking without **fresh FX provenance**:
   envelope present, `fallback_used: false`, `delay_minutes` 0–30,
   `quality_grade` A/B (see `isFreshFxProvenance` in
-  `frontend/src/api/client.ts`).
+  `frontend/src/api/client.js`).
 - `POST /api/fx/rank` refuses stale/missing FX with
   `{"error": {"code": "FX_PROVENANCE_MISSING", ...}}` (HTTP 409). The
   client rethrows untouched (`isFxProvenanceMissingError`) so the Watchlist

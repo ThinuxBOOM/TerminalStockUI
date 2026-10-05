@@ -1,59 +1,84 @@
-import { afterEach, describe, expect, it } from "vitest";
-import {
-  authHeaderFor,
-  clearTokens,
-  extractToken,
-  getAccessToken,
-  normalizeMe,
-  setAccessToken,
-  setupAuthInterceptor,
-} from "./auth";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "./client";
+import { getAccessToken, onSessionExpired, refreshSession, setAccessToken } from "./auth";
+import { safeNext } from "../pages/LoginPage";
+
+// Route requests through a fake adapter: handler(config) -> {status, data}.
+function useAdapter(handler) {
+  const calls = [];
+  api.defaults.adapter = async (config) => {
+    calls.push({ url: config.url, auth: config.headers?.Authorization ?? null });
+    const { status, data } = await handler(config);
+    const response = { data, status, statusText: String(status), headers: {}, config, request: {} };
+    if (status >= 400) {
+      const err = new Error(`HTTP ${status}`);
+      err.config = config;
+      err.response = response;
+      throw err;
+    }
+    return response;
+  };
+  return calls;
+}
 
 afterEach(() => {
-  clearTokens();
+  delete api.defaults.adapter;
+  setAccessToken(null);
 });
 
-describe("auth token storage (memory + localStorage fallback, node-safe)", () => {
-  it("round-trips a token without throwing (memory fallback in node)", () => {
-    expect(getAccessToken()).toBeNull();
-    setAccessToken("abc123");
-    expect(getAccessToken()).toBe("abc123");
-    clearTokens();
-    expect(getAccessToken()).toBeNull();
+describe("session handling", () => {
+  it("keeps the access token in memory only", () => {
+    globalThis.localStorage = { setItem: vi.fn(), getItem: vi.fn() };
+    try {
+      setAccessToken("abc");
+      expect(getAccessToken()).toBe("abc");
+      expect(globalThis.localStorage.setItem).not.toHaveBeenCalled();
+    } finally {
+      delete globalThis.localStorage;
+    }
   });
 
-  it("trims tokens and treats blank as cleared", () => {
-    setAccessToken("  xyz  ");
-    expect(getAccessToken()).toBe("xyz");
-    setAccessToken("   ");
-    expect(getAccessToken()).toBeNull();
+  it("shares one refresh request between concurrent callers", async () => {
+    const calls = useAdapter(async () => ({ status: 200, data: { access_token: "fresh" } }));
+    const [a, b] = await Promise.all([refreshSession(), refreshSession()]);
+    expect(a).toBe("fresh");
+    expect(b).toBe("fresh");
+    expect(calls.filter((c) => c.url === "/api/auth/refresh")).toHaveLength(1);
   });
 
-  it("authHeaderFor builds Bearer headers, empty object when blank", () => {
-    expect(authHeaderFor("tok")).toEqual({ Authorization: "Bearer tok" });
-    expect(authHeaderFor("  ")).toEqual({});
-    expect(authHeaderFor(null)).toEqual({});
-    expect(authHeaderFor(undefined)).toEqual({});
+  it("refreshes once on 401 and retries with the new token", async () => {
+    setAccessToken("stale");
+    const calls = useAdapter(async (config) => {
+      if (config.url === "/api/auth/refresh") return { status: 200, data: { access_token: "fresh" } };
+      return config.headers?.Authorization === "Bearer fresh"
+        ? { status: 200, data: { ok: true } }
+        : { status: 401, data: { detail: "unauthorized" } };
+    });
+    const { data } = await api.get("/api/forecast/AAPL");
+    expect(data).toEqual({ ok: true });
+    expect(calls.map((c) => c.url)).toEqual(["/api/forecast/AAPL", "/api/auth/refresh", "/api/forecast/AAPL"]);
+  });
+
+  it("signals session expiry when the refresh fails", async () => {
+    setAccessToken("stale");
+    useAdapter(async () => ({ status: 401, data: { detail: "unauthorized" } }));
+    const expired = vi.fn();
+    const off = onSessionExpired(expired);
+    try {
+      await expect(api.get("/api/forecast/AAPL")).rejects.toThrow();
+      expect(expired).toHaveBeenCalledTimes(1);
+      expect(getAccessToken()).toBeNull();
+    } finally {
+      off();
+    }
   });
 });
 
-describe("auth payload helpers", () => {
-  it("extractToken reads access_token / accessToken / token shapes", () => {
-    expect(extractToken({ access_token: "a" })).toBe("a");
-    expect(extractToken({ accessToken: "b" })).toBe("b");
-    expect(extractToken({ token: "c" })).toBe("c");
-    expect(extractToken({})).toBeNull();
-    expect(extractToken(null)).toBeNull();
-  });
-
-  it("normalizeMe defaults tier to free and coerces admin flag", () => {
-    expect(normalizeMe({})).toMatchObject({ tier: "free", is_admin: false });
-    expect(
-      normalizeMe({ id: "1", email: "a@b.c", tier: "gold", is_admin: true })
-    ).toMatchObject({ id: "1", email: "a@b.c", tier: "gold", is_admin: true });
-  });
-
-  it("setupAuthInterceptor wires providers without throwing", () => {
-    expect(() => setupAuthInterceptor()).not.toThrow();
+describe("post-login redirect", () => {
+  it("only allows same-app paths", () => {
+    expect(safeNext("?next=%2Fsecurity%2FAAPL")).toBe("/security/AAPL");
+    expect(safeNext("?next=https://evil.example")).toBe("/app");
+    expect(safeNext("?next=//evil.example")).toBe("/app");
+    expect(safeNext("")).toBe("/app");
   });
 });

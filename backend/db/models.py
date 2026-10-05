@@ -209,6 +209,10 @@ class Alert(Base):
     )
 
     alert_id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    #: Owner. Every API read/write is filtered by it; NULL rows (created
+    #: before ownership existed) are invisible to all users.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ID_TYPE, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, default=None)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     exchange_mic: Mapped[str] = mapped_column(String(8), nullable=False, default="")
     condition: Mapped[str] = mapped_column(Text, nullable=False)
@@ -237,6 +241,7 @@ class AlertEvent(Base):
 
 
 Index("ix_alerts_symbol_active", Alert.symbol, Alert.is_active)
+Index("ix_alerts_user", Alert.user_id)
 Index("ix_alert_events_alert", AlertEvent.alert_id, AlertEvent.created_at.desc())
 
 
@@ -280,19 +285,10 @@ class QuoteSnapshot(Base):
 Index("ix_quote_snapshots_updated", QuoteSnapshot.updated_at.desc())
 
 
-# --- Market snapshots + forecast accuracy (APPENDED at end-of-file by design) --
-# Parallel agents append other models to this same file: do not move this block
-# above existing models and do not edit any line above it. Writer contracts:
-# backend/market_data/snapshot_store.py + backend/forecasting/accuracy.py
-# (DDL draft: infra/migrations/0006_snapshots.sql). Portable types
-# (LargeBinary/JSON) so unit tests run on SQLite while Postgres (BYTEA/JSONB)
-# stays the deployment target. All readers/writers treat these tables as
-# optional: a missing table degrades to the in-memory fallback instead of
-# raising. 0006 revamp union (Agent 7, merged 2026-09-15): ONLY additive
-# columns/CHECKs/indexes were added below (size_raw/size_stored/tier,
-# realized_ret/tier, scorer-guaranteed CHECKs); every writer column is kept
-# verbatim. Do NOT add a second MarketSnapshot/ForecastAccuracy class:
-# duplicate __tablename__ is a hard import crash for every test.
+# --- Market snapshots + forecast accuracy -------------------------------------
+# Writers: backend/market_data/snapshot_store.py + backend/forecasting/accuracy.py.
+# Portable types (LargeBinary/JSON) so tests run on SQLite; Postgres uses
+# BYTEA/JSONB via the migrations.
 class MarketSnapshot(Base):
     """One compressed OHLCV capture per (symbol, timeframe, ts).
 
@@ -302,7 +298,7 @@ class MarketSnapshot(Base):
     lineage-only and nullable; ``user_id`` is a nullable hook for future
     per-user tracking (no auth is implemented here). ``size_raw``/
     ``size_stored`` mirror ``raw_bytes``/``compressed_bytes`` for
-    instrument-keyed readers; ``tier`` is a nullable future-auth stub.
+    instrument-keyed readers.
     Append-only: no UNIQUE constraint (writers plain-INSERT; latest-wins).
     """
 
@@ -345,7 +341,6 @@ class MarketSnapshot(Base):
     quality_grade: Mapped[str] = mapped_column(String(1), nullable=False, default="C")
     provenance: Mapped[dict] = mapped_column(JSON, default=dict)
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
-    tier: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -361,8 +356,8 @@ class ForecastAccuracy(Base):
     ``backend/forecasting/accuracy.py``. ``confidence_before/after`` track
     confidence evolution; ``user_id`` is a nullable hook for future
     per-user tracking (no auth implemented here). ``realized_ret`` mirrors
-    ``realized_return`` for revamp readers; ``tier`` is a nullable
-    future-auth stub. CHECKs only encode scorer-guaranteed invariants.
+    ``realized_return`` for revamp readers. CHECKs only encode
+    scorer-guaranteed invariants.
     """
 
     __tablename__ = "forecast_accuracy"
@@ -398,7 +393,6 @@ class ForecastAccuracy(Base):
     model_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
     data_version: Mapped[str] = mapped_column(Text, nullable=False, default="")
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
-    tier: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -416,17 +410,7 @@ Index("ix_forecast_accuracy_scored", ForecastAccuracy.scored_at.desc())
 
 
 # --- 0006 revamp: AI token ledger, health history, indicators cache, ---------
-# --- future auth/tiers (APPENDED at end-of-file by design) --------------------
-# Parallel agents append other models to this same file: do not move this block
-# above existing models and do not edit any line above it. Mirrors
-# infra/migrations/0006_revamp.sql (Postgres BYTEA/JSONB/BIGSERIAL map to
-# portable LargeBinary/JSON/Integer here so SQLite tests stay green).
-# Additive-only: no existing table/column renamed or removed;
-# ai_weight<=0.20 and horizon 1/7/14/21 CHECKs untouched; audit_logs hash chain
-# intact. alerts/forecasts gain DB-level user_id+tier stubs in 0006
-# (migration-only, intentionally NOT mapped here to keep this file
-# append-only for concurrent agents). Do NOT redefine market_snapshots /
-# forecast_accuracy here: their single UNION classes live in the block above.
+# --- AI accounting / provider health / indicator cache ------------------------
 
 
 class AiTokenLedger(Base):
@@ -434,8 +418,8 @@ class AiTokenLedger(Base):
 
     Successor to the legacy ``ai_token_logs`` dataset name (kept in
     retention.py for backward compat): one row per AI call with token
-    counts, latency, and the evidence-hash cache key. ``user_id``/``tier``
-    are nullable future-auth stubs (no FK until the users DB lands).
+    counts, latency, and the evidence-hash cache key. ``user_id`` is the
+    authenticated caller (nullable for scheduled/system calls).
     Secrets MUST never be stored here (provider/model/counts only).
     """
 
@@ -466,7 +450,6 @@ class AiTokenLedger(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     evidence_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     user_id: Mapped[uuid.UUID | None] = mapped_column(ID_TYPE, nullable=True, default=None)
-    tier: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -524,45 +507,73 @@ Index("ix_provider_health_history_ts", ProviderHealthHistory.ts.desc())
 Index("ix_indicator_cache_updated", IndicatorCache.updated_at.desc())
 
 
-# --- V2 auth users (APPENDED at end-of-file by design) -------------------------
-# Parallel agents append other models to this same file: do not move this block
-# above existing models and do not edit any line above it. Mirrors
-# infra/migrations/0008_users_auth.sql (Postgres UUID/TIMESTAMPTZ map to
-# portable ID_TYPE/DateTime(timezone=True) here so SQLite tests stay green).
-# Additive-only: no existing table/column renamed or removed. The 0006
-# user_id/tier stubs on alerts/forecasts/ai_token_ledger/market_snapshots/
-# forecast_accuracy stay migration-only (no FK here — avoids a backfill lock;
-# app-layer enforcement only until a later migration adds NOT VALID + VALIDATE).
+# --- users --------------------------------------------------------------------
 class User(Base):
-    """Auth + subscription identity (V2 Phase 1).
-
-    ``email`` is stored normalized (lower(trim())) with app-level uniqueness
-    (DB UNIQUE). ``password_hash`` holds a bcrypt ``$2b$`` string only — never
-    plaintext, never logged, never placed in audit payloads. ``tier`` mirrors
-    the DDL CHECK (free/silver/gold/platinum). Stripe columns are the webhook
-    source of truth for payers; the admin bootstrap uses
-    ``subscription_status='comped'`` + ``is_admin=True`` with no Stripe objects.
-    """
+    """Login identity. ``email`` is stored normalized (lower(trim())) and is
+    unique; ``password_hash`` is a bcrypt string (never logged or returned).
+    ``is_admin`` gates operator-only routes (provider keys, budgets)."""
 
     __tablename__ = "users"
-    __table_args__ = (
-        _sa.CheckConstraint(
-            "tier IN ('free', 'silver', 'gold', 'platinum')",
-            name="ck_users_tier",
-        ),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    tier: Mapped[str] = mapped_column(Text, nullable=False, default="free")
-    stripe_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True, default=None)
-    stripe_subscription_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    subscription_status: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: Embedded in every token as ``ver``; bumping it (logout, password
+    #: change) revokes all outstanding access and refresh tokens at once.
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-Index("ix_users_tier", User.tier)
-Index("ix_users_stripe_customer", User.stripe_customer_id)
+# --- forecast engine v4 (0012) ---------------------------------------------------
+class ModelArtifact(Base):
+    """One trained v4 bundle (JSON coefficients + walk-forward report)."""
+
+    __tablename__ = "model_artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(ID_TYPE, primary_key=True, default=uuid.uuid4)
+    engine: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    bundle: Mapped[dict] = mapped_column(JSON, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ForecastScore(Base):
+    """Latest forecast per (symbol, horizon) from the daily ``predict`` job."""
+
+    __tablename__ = "forecast_scores"
+
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True)
+    horizon_days: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exchange_mic: Mapped[str] = mapped_column(Text, nullable=False)
+    as_of: Mapped[datetime] = mapped_column(Date, nullable=False)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    last_close: Mapped[float | None] = mapped_column(Numeric)
+    p_up: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    p_out: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    out_rank: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    sigma: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    q10: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    q50: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    q90: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    drawdown_prob: Mapped[float | None] = mapped_column(Numeric(6, 5))
+    vol_regime: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CrossSectionRow(Base):
+    """One day's universe distribution for ranking a single symbol."""
+
+    __tablename__ = "cross_sections"
+
+    as_of: Mapped[datetime] = mapped_column(Date, primary_key=True)
+    model_version: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+Index("ix_model_artifacts_active", ModelArtifact.engine, ModelArtifact.active, ModelArtifact.created_at.desc())
+Index("ix_forecast_scores_rank", ForecastScore.horizon_days, ForecastScore.out_rank.desc())

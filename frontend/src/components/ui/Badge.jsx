@@ -1,23 +1,18 @@
 import React from "react";
 
-// Semantic states: positive / negative / warning / neutral / info / fresh / stale / error.
 const TONES = {
-  positive: "border-term-green/40 bg-term-greenDim text-term-green",
-  negative: "border-term-red/40 bg-term-redDim text-term-red",
-  warning: "border-term-amber/40 bg-term-amberDim text-term-amber",
-  neutral: "border-term-border2 bg-term-panel2 text-term-muted",
-  info: "border-term-cyan/40 bg-term-panel2 text-term-cyan",
-  fresh: "border-term-green/40 bg-term-greenDim text-term-green",
-  stale: "border-term-amber/40 bg-term-amberDim text-term-amber",
-  error: "border-term-red/40 bg-term-redDim text-term-red",
+  neutral: "border-term-border2 text-term-muted",
+  accent: "border-term-accent/40 bg-term-accentDim text-term-accentHover",
+  positive: "border-term-green/30 bg-term-greenDim text-term-green",
+  negative: "border-term-red/30 bg-term-redDim text-term-red",
+  warning: "border-term-amber/30 bg-term-amberDim text-term-amber",
 };
 
-function Badge({ tone = "neutral", className = "", children, ...rest }) {
-  const t = TONES[tone] ?? TONES.neutral;
+function Badge({ tone = "neutral", children, title, className = "" }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-sans text-2xs font-semibold tracking-wide ${t} ${className}`.trim()}
-      {...rest}
+      title={title}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded border px-1.5 py-0.5 text-2xs font-semibold tracking-wide ${TONES[tone] ?? TONES.neutral} ${className}`.trim()}
     >
       {children}
     </span>

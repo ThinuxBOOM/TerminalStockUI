@@ -131,35 +131,24 @@ function benchmarkForMic(mic) {
 }
 
 // ---------------------------------------------------------------------------
-// Future-proof cache keys: namespaced by future user_id/tier so per-user or
-// tiered index caching can land without key migration. No auth is implemented
-// — callers pass nulls today and everything resolves to guest/free.
-// e.g. aspi:<mic>:<tf>:<userId||guest>:<tier||free>
-function normId(v, fallback) {
-  const s = String(v ?? "").trim();
-  return s !== "" ? s : fallback;
-}
-
-function aspiCacheKey(mic, timeframe = "1d", userId = null, tier = null) {
+// Cache keys (index data is the same for every user).
+function aspiCacheKey(mic, timeframe = "1d") {
   const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
   const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
-  return ["aspi", m, tf, `u:${normId(userId, "guest")}`, `t:${normId(tier, "free")}`];
+  return ["aspi", m, tf];
 }
 
-function aspiInflightKey(mic, timeframe = "1d", userId = null, tier = null) {
-  const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
-  const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
-  return `aspi:${m}:${tf}:${normId(userId, "guest")}:${normId(tier, "free")}`;
+function aspiInflightKey(mic, timeframe = "1d") {
+  return aspiCacheKey(mic, timeframe).join(":");
 }
 
-function top20CacheKey(mic, userId = null, tier = null) {
+function top20CacheKey(mic) {
   const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
-  return ["aspi-top20", m, `u:${normId(userId, "guest")}`, `t:${normId(tier, "free")}`];
+  return ["aspi-top20", m];
 }
 
-function top20InflightKey(mic, userId = null, tier = null) {
-  const m = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
-  return `aspi-top20:${m}:${normId(userId, "guest")}:${normId(tier, "free")}`;
+function top20InflightKey(mic) {
+  return top20CacheKey(mic).join(":");
 }
 
 // ---------------------------------------------------------------------------
@@ -528,10 +517,8 @@ async function getAspiSeries(mic, timeframe = "1d", opts = {}) {
   }
   const tf = ASPI_TIMEFRAMES.includes(timeframe) ? timeframe : "1d";
   const limit = ASPI_LIMIT[tf] ?? 90;
-  const userId = opts?.userId ?? null;
-  const tier = opts?.tier ?? null;
   const signal = opts?.signal;
-  return coalesceInflight(aspiInflightKey(cfg.mic, tf, userId, tier), async () => {
+  return coalesceInflight(aspiInflightKey(cfg.mic, tf), async () => {
     // Native endpoint first (backend owns the proxy chain + provenance).
     // 20s fail-fast: a hung index fetch must fall through to the bars chain
     // instead of holding the chart in a 60s spinner.
@@ -656,10 +643,8 @@ async function getAspiSeriesViaBars(cfg, tf, limit, signal) {
 // behind a 60s timeout.
 async function getTop20Constituents(mic, opts = {}) {
   const upper = String(mic ?? "").trim().toUpperCase() || "UNKNOWN";
-  const userId = opts?.userId ?? null;
-  const tier = opts?.tier ?? null;
   const signal = opts?.signal;
-  return coalesceInflight(top20InflightKey(upper, userId, tier), async () => {
+  return coalesceInflight(top20InflightKey(upper), async () => {
     // Liquidity is preferred; on 502/throw fall back to honestly-labelled
     // screener-rank (never a dead ErrorState when a second opinion exists).
     let liq = null;

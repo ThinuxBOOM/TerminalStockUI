@@ -24,7 +24,6 @@ from sqlalchemy.pool import StaticPool
 
 from backend.db.models import (
     Base,
-    CalibrationSnapshot,
     Forecast,
     ForecastAccuracy,
     Instrument,
@@ -257,16 +256,10 @@ def _seed_scored_world(db, *, symbol="TEST", active=True, prob=0.7,
     return inst, fc
 
 
-def test_score_due_forecasts_persists_accuracy_and_calibration():
+def test_score_due_forecasts_persists_accuracy():
     db = _session()
     try:
         _, fc = _seed_scored_world(db)
-        db.add(CalibrationSnapshot(
-            symbol="TEST", exchange_mic="XNAS", horizon_days=21,
-            model_version="m1", feature_version="f1", data_version="d1",
-            brier=0.22, ece=0.05, n_windows=12, reliability=[],
-            members={"momentum": {"hit_rate": 0.6, "n": 12}}))
-        db.commit()
         out = score_due_forecasts(db, now=_utcnow())
         assert out["scored"] == 1 and out["unscored"] == 0 and not out["errors"]
         assert out["hits"] == 1 and out["brier_mean"] == pytest.approx(0.09)
@@ -279,12 +272,6 @@ def test_score_due_forecasts_persists_accuracy_and_calibration():
         assert acc.confidence_before == "moderate"
         assert acc.confidence_after == "low"  # n=1 < 10 -> low
         assert acc.forecast_id == fc.forecast_id
-        # Calibration linkage: walk-forward metrics untouched, realized merged.
-        snap = db.query(CalibrationSnapshot).one()
-        assert float(snap.brier) == pytest.approx(0.22)
-        assert snap.members["realized"]["n"] == 1
-        assert snap.members["realized"]["hit_rate"] == 1.0
-        assert snap.members["momentum"]["hit_rate"] == 0.6
         # Idempotent re-run scores nothing twice.
         again = score_due_forecasts(db, now=_utcnow())
         assert again["scored"] == 0
@@ -440,9 +427,10 @@ def test_cron_routes_preserved_and_extended():
     for route in router.routes:
         methods = set(getattr(route, "methods", set()) or set())
         by_path.setdefault(getattr(route, "path", ""), set()).update(methods)
-    for old in ("/api/cron/ingest", "/api/cron/calibrate", "/api/cron/evaluate"):
+    for old in ("/api/cron/ingest", "/api/cron/evaluate"):
         assert {"GET", "POST"} <= by_path.get(old, set()), f"{old} regressed"
-    for new in ("/api/cron/snapshot", "/api/cron/score"):
+    assert "/api/cron/calibrate" not in by_path  # v3 snapshots replaced by predict/train
+    for new in ("/api/cron/snapshot", "/api/cron/score", "/api/cron/predict", "/api/cron/train"):
         assert {"GET", "POST"} <= by_path.get(new, set()), f"{new} missing"
 
 

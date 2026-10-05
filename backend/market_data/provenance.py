@@ -19,6 +19,14 @@ class Provenance(BaseModel):
     missing_fields: list[str] = Field(
         default_factory=list, description="Fields requested but unavailable"
     )
+    granularity: str | None = Field(
+        default=None,
+        description=(
+            "'1d' when the data is built from daily bars: it is current when it "
+            "covers the last completed session, so minute-level age rules do "
+            "not apply (as_of is then the ingest time)."
+        ),
+    )
 
 
 def build_provenance(
@@ -29,6 +37,7 @@ def build_provenance(
     quality_grade: str = "B",
     fallback_used: bool = False,
     missing_fields: list[str] | None = None,
+    granularity: str | None = None,
 ) -> Provenance:
     ts = as_of or datetime.now(timezone.utc)
     if ts.tzinfo is None:
@@ -40,4 +49,5 @@ def build_provenance(
         quality_grade=quality_grade,
         fallback_used=bool(fallback_used),
         missing_fields=list(missing_fields or []),
+        granularity=granularity,
     )

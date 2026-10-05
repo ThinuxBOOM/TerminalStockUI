@@ -351,8 +351,6 @@ def score_due_forecasts(db: Any, *,
         scored += 1
         hits += 1 if outcome["hit"] else 0
         briers.append(outcome["brier_contrib"])
-        _refresh_calibration_member(db, symbol.upper(), mic or "XNAS", horizon,
-                                    str(fc.model_version or ""), per_key[key])
 
     return {
         "scored": scored,
@@ -363,56 +361,3 @@ def score_due_forecasts(db: Any, *,
     }
 
 
-def _refresh_calibration_member(db: Any, symbol: str, mic: str, horizon: int,
-                                model_version: str, outcomes: list[dict]) -> None:
-    """Merge the realized window into the latest calibration row (additive).
-
-    Writes ``members["realized"] = {n, hit_rate, brier_mean}``; the
-    walk-forward ``brier``/``ece``/``reliability`` values are never touched.
-    Best-effort: missing table/row is a silent skip (never raises).
-    """
-    try:
-        from backend.db.models import CalibrationSnapshot
-
-        row = (
-            db.query(CalibrationSnapshot)
-            .filter(CalibrationSnapshot.symbol == symbol,
-                    CalibrationSnapshot.horizon_days == int(horizon),
-                    CalibrationSnapshot.model_version == str(model_version))
-            .order_by(CalibrationSnapshot.created_at.desc())
-            .first()
-        )
-        if row is None:
-            return
-        stats = trailing_stats([bool(o.get("hit")) for o in outcomes],
-                               [float(o.get("brier_contrib", 0.0)) for o in outcomes])
-        members = dict(row.members or {})
-        members["realized"] = {"n": stats["n"], "hit_rate": stats["hit_rate"],
-                               "brier_mean": stats["brier_mean"]}
-        row.members = members
-        try:
-            # SQLAlchemy JSON mutation needs an explicit flag on some backends.
-            from sqlalchemy.orm.attributes import flag_modified
-
-            flag_modified(row, "members")
-        except Exception:
-            pass
-        db.commit()
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-
-__all__ = [
-    "HIGH_MAX_BRIER",
-    "HIGH_MIN_HIT_RATE",
-    "MIN_EVOLUTION_WINDOWS",
-    "MODERATE_MIN_HIT_RATE",
-    "SCORING_FORMULA",
-    "confidence_trajectory",
-    "score_due_forecasts",
-    "score_one",
-    "trailing_stats",
-]

@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.vite
+.git
+.github
+.env
+*.db
+*.db-journal
+backups
+docs

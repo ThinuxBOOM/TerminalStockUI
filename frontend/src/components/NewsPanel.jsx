@@ -68,7 +68,7 @@ function NewsPanel({ data, isLoading, isError, error, onRetry }) {
                   {a.author && <span className="truncate text-term-muted">· {a.author}</span>}
                 </div>
                 {a.url ? (
-                  <a href={a.url} target="_blank" rel="noreferrer" className="mt-0.5 block text-sm font-semibold text-term-text hover:text-term-green hover:underline">
+                  <a href={a.url} target="_blank" rel="noreferrer" className="mt-0.5 block text-sm font-semibold text-term-text hover:text-term-accentHover">
                     {a.title}
                   </a>
                 ) : (

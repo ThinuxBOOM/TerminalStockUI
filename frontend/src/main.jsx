@@ -3,20 +3,32 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { AuthProvider } from "./auth/AuthProvider";
 import "./index.css";
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      // 401/403/404/422 will not succeed on retry; everything else gets one.
+      retry: (failures, error) => failures < 1 && ![401, 403, 404, 422].includes(error?.response?.status),
       retryDelay: (i) => Math.min(1000 * 2 ** i, 5000),
       refetchOnWindowFocus: false,
       refetchOnReconnect: true,
       refetchOnMount: false,
-      staleTime: 3e4,
-      gcTime: 3e5,
-    }
-  }
+      staleTime: 30_000,
+      gcTime: 300_000,
+    },
+  },
 });
+
 ReactDOM.createRoot(document.getElementById("root")).render(
-  /* @__PURE__ */ React.createElement(React.StrictMode, null, /* @__PURE__ */ React.createElement(QueryClientProvider, { client: queryClient }, /* @__PURE__ */ React.createElement(BrowserRouter, null, /* @__PURE__ */ React.createElement(App, null))))
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  </React.StrictMode>
 );

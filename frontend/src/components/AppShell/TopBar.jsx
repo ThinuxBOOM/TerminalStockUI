@@ -1,7 +1,7 @@
 import React, { memo } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LogIn, Menu, Search } from "lucide-react";
+import { Menu, Search } from "lucide-react";
 import { getHealth } from "../../api/client";
 import { useAuth } from "../../hooks/useAuth";
 import StatusDot from "../ui/StatusDot";
@@ -62,7 +62,7 @@ function ConnectionDot() {
 }
 
 function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, onOpenPalette }) {
-  const { isAuthenticated, loading } = useAuth();
+  const { user } = useAuth();
   return (
     <header className="sticky top-0 z-40 border-b border-term-border bg-term-panel">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
@@ -77,10 +77,9 @@ function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, on
           <Menu className="h-4 w-4" aria-hidden="true" />
         </button>
         <Link to="/app" className="flex shrink-0 items-center gap-2" aria-label="OneMarket home">
-          <img src="/logo.svg" alt="OneMarket logo" className="h-8 w-8 rounded-lg" width="32" height="32" />
-          <span className="font-sans text-base font-black tracking-tight text-term-green">
-            ONE<span className="text-term-text">MARKET</span>
-            <span className="ml-2 font-sans text-2xs font-normal tracking-normal text-term-muted/70">EASY INVESTING</span>
+          <img src="/logo.svg" alt="" className="h-7 w-7" width="28" height="28" />
+          <span className="hidden font-sans text-[15px] font-semibold tracking-tight text-term-text sm:inline">
+            OneMarket
           </span>
         </Link>
         <SearchBar q={q} setQ={setQ} onSubmit={onSubmit} searchRef={searchRef} />
@@ -92,23 +91,12 @@ function TopBar({ q, setQ, onSubmit, searchRef, onMenu, menuExpanded = false, on
             aria-label="Open command palette (Control K)"
             title="Command palette (Ctrl/⌘+K)"
           >
-            ⌘K PALETTE
+            ⌘K
           </button>
           <ConnectionDot />
-          {loading ? (
-            <span className="text-xs text-term-muted" role="status">···</span>
-          ) : isAuthenticated ? (
-            <Link to="/account" className="term-btn-sm" aria-label="Account">
-              ● ACCOUNT
-            </Link>
-          ) : (
-            <Link to="/login" className="term-btn-sm" aria-label="Sign in">
-              <span className="inline-flex items-center gap-1">
-                <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-                SIGN IN
-              </span>
-            </Link>
-          )}
+          <Link to="/account" className="term-btn-sm max-w-[12rem] truncate" aria-label="Account" title={user?.email ?? "Account"}>
+            ● {user?.email ?? "ACCOUNT"}
+          </Link>
         </div>
       </div>
     </header>

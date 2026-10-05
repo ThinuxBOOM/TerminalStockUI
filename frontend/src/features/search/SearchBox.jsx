@@ -223,12 +223,12 @@ function SearchBox({
                   const curr = (r.currency ?? "").toUpperCase();
                   const active = i === activeIndex;
                   return (
-                    <li key={`${sym}-${r.exchange_mic ?? ""}-${i}`} id={`search-option-${i}`} role="option" aria-selected={active} className={`flex items-center justify-between gap-2 p-3 transition-colors hover:bg-term-panel2 focus-within:bg-term-panel2 ${active ? "bg-term-panel2 outline outline-1 outline-term-green" : ""}`}>
+                    <li key={`${sym}-${r.exchange_mic ?? ""}-${i}`} id={`search-option-${i}`} role="option" aria-selected={active} className={`flex items-center justify-between gap-2 p-3 transition-colors hover:bg-term-panel2 focus-within:bg-term-panel2 ${active ? "bg-term-panel2 outline outline-1 outline-term-accent" : ""}`}>
                       <div className="min-w-0">
-                        <Link to={`/security/${encodeURIComponent(sym)}`} className="font-bold text-term-green hover:underline focus-visible:underline" onClick={() => saveRecent(submitted)}>{sym}</Link>
+                        <Link to={`/security/${encodeURIComponent(sym)}`} className="font-semibold text-term-text hover:text-term-accent" onClick={() => saveRecent(submitted)}>{sym}</Link>
                         <span className="ml-2 truncate text-xs text-term-muted">{r.company_name ?? ""} {r.exchange_mic ? `· ${r.exchange_mic}` : ""} {curr ? `· ${curr}${glyphFor(curr)}` : ""}</span>
                       </div>
-                      <Link className="term-btn-ghost shrink-0 text-xs" to={`/security/${encodeURIComponent(sym)}`} onClick={() => saveRecent(submitted)} aria-label={`Open Security Brief for ${sym}`}>BRIEF →</Link>
+                      <Link className="term-btn-ghost shrink-0 text-xs" to={`/security/${encodeURIComponent(sym)}`} onClick={() => saveRecent(submitted)} aria-label={`Open Security Brief for ${sym}`}>Open →</Link>
                     </li>
                   );
                 })}

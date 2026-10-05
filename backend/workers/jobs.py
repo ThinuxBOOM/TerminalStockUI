@@ -47,15 +47,9 @@ try:  # canonical: python -m backend.workers.jobs (repo root on path)
 except Exception:  # pragma: no cover
     BACKEND_VERSION = "0.1.0"
 
-try:
-    from backend.forecasting.features.features import FEATURE_VERSION as _FEATURE_VERSION
-except Exception:  # pragma: no cover
-    _FEATURE_VERSION = "features-v1"
+from backend.forecasting.service import FEATURE_VERSION as _FEATURE_VERSION
 
-try:
-    from backend.forecasting.models.historical_drift import MODEL_VERSION as _MODEL_VERSION
-except Exception:  # pragma: no cover
-    _MODEL_VERSION = "historical-drift-v1"
+_MODEL_VERSION = "v4"
 
 WORKER_VERSION = "workers-v1"
 QUEUE_NAME = "onemarket"

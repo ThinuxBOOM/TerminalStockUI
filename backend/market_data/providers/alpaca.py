@@ -33,9 +33,9 @@ import os
 import time
 from datetime import datetime, timezone
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed
 
-from .base import CircuitBreaker, ProviderError, QuotaLimiter, RateLimiter
+from .base import RETRY_TRANSIENT, CircuitBreaker, ProviderError, QuotaLimiter, RateLimiter
 
 NAME = "alpaca"
 DEFAULT_DELAY_MINUTES = 0
@@ -258,17 +258,17 @@ class AlpacaProvider:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_fixed(1),
-        retry=retry_if_exception_type(ProviderError),
+        retry=RETRY_TRANSIENT,
         reraise=True,
     )
     def _fetch_raw(self, symbol: str, market: str | None = None) -> dict:
         _ = market  # accepted for call-site parity; US-only feed
         if not self.configured:
-            raise ProviderError(NAME, "alpaca API keys missing")
+            raise ProviderError(NAME, "alpaca API keys missing", retryable=False)
         try:
             import httpx  # lazy: offline/test envs fall back to stub
         except Exception as exc:
-            raise ProviderError(NAME, "httpx package unavailable") from exc
+            raise ProviderError(NAME, "httpx package unavailable", retryable=False) from exc
         upper = (symbol or "").strip().upper()
         if not upper:
             raise ProviderError(NAME, "empty symbol", retryable=False)

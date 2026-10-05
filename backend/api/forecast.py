@@ -1,399 +1,151 @@
-"""GET /api/forecast/{symbol}?horizon=1|7|14|21 — validated ensemble forecast.
+"""Forecast endpoints (engine v4).
 
-Ensemble of existing baselines (historical-drift + momentum + logistic);
-quantile bands supply the return range, volatility regime and drawdown
-probability. Deterministic, no AI, no network. Every response carries the
-provenance envelope + model/feature/data versions + timestamp + the
-"Not investment advice" disclosure. Horizons outside {1, 7, 14, 21} -> 422.
+GET /api/forecast/model               model card: version, data, measured record
+GET /api/forecast/model/{symbol}      that symbol's walk-forward record
+GET /api/forecast/{symbol}?horizon=   one horizon (1, 7, 14, 21)
+GET /api/forecast/{symbol}/all        every horizon in one response
+
+Every forecast carries the provenance envelope, model/feature/data versions,
+its measured record, plain-English reasons and the disclosure.
 """
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
+from backend.auth.guards import get_current_user
 from backend.forecasting.common import FORECAST_HORIZONS
-from backend.forecasting.service import ForecastService, get_forecast_service
-from backend.market_data.provenance import build_provenance
+from backend.forecasting.persist import persist_forecast_record
+from backend.forecasting.service import ForecastService, ForecastUnavailable, get_forecast_service
+from backend.forecasting.v4.store import get_bundle
+from backend.market_data.providers.base import ProviderError
 from backend.security.validation import sanitize_error, validate_symbol
 
-try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import require_tier_optional  # type: ignore
-except ImportError:  # pragma: no cover - fallback until Phase 2 lands
-    from typing import Any as _Any
-
-    from fastapi import Request as _Request
-
-    from backend.auth.tiers import _TIER_RANK as _RANK
-    from backend.auth.tiers import normalize_tier as _norm
-
-    _TEST_TOKENS: dict[str, dict[str, _Any]] = {
-        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
-        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
-        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
-        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
-        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
-    }
-
-    def require_tier(min_tier: str):  # type: ignore[no-redef]
-        need = _norm(min_tier)
-
-        async def _dep(request: _Request) -> dict[str, _Any]:
-            try:
-                auth = (request.headers.get("authorization") or "").strip()
-            except Exception:
-                auth = ""
-            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            user = _TEST_TOKENS.get(token)
-            if user is None:
-                raise HTTPException(status_code=401, detail="unauthorized")
-            if bool(user.get("is_admin")):
-                return dict(user)
-            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
-                return dict(user)
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep
-
-    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
-        # Fallback soft-launch mirror (guards missing): guests free-only,
-        # authed pass when BILLING_ENFORCED=false.
-        import os as _os
-
-        need = _norm(min_tier)
-
-        async def _dep_opt(request: _Request) -> dict[str, _Any]:
-            try:
-                auth = (request.headers.get("authorization") or "").strip()
-            except Exception:
-                auth = ""
-            token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            user = _TEST_TOKENS.get(token)
-            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
-            if user is None:
-                if enforced:
-                    raise HTTPException(status_code=401, detail="unauthorized")
-                if need == "free":
-                    return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
-                raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-            if bool(user.get("is_admin")):
-                return dict(user)
-            if not enforced:
-                return dict(user)
-            if _RANK[_norm(user.get("tier"))] >= _RANK[need]:
-                return dict(user)
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep_opt
-
-router = APIRouter(prefix="/api/forecast", tags=["forecast"])
-
-#: Display bands for the direction probability. Thresholds mirror the
-#: frontend placeholders (0.64 -> "moderately positive") so live responses
-#: render the same labels the UI was designed around.
-LABEL_BANDS: tuple[tuple[float, str], ...] = (
-    (0.65, "clearly positive"),
-    (0.57, "moderately positive"),
-    (0.52, "slightly positive"),
-)
+router = APIRouter(prefix="/api/forecast", tags=["forecast"], dependencies=[Depends(get_current_user)])
 
 
 def direction_label(probability: float) -> str:
-    """Human label for a direction probability (deterministic bands)."""
+    """Neutral wording for the chance of rising (kept close to 50/50 by design)."""
+    p = float(probability)
+    if p >= 0.6:
+        return "leans up"
+    if p <= 0.4:
+        return "leans down"
+    return "no clear direction"
+
+
+def _pct(x: float | None, digits: int = 0) -> str:
+    return "n/a" if x is None else f"{x * 100:+.{digits}f}%"
+
+
+def explain(f: dict) -> dict:
+    """Plain-English summary, reasons for and against, and limitations."""
+    h = f["horizon_days"]
+    rng = f["expected_return_range"]
+    m = f.get("measured") or {}
+    lines = [
+        f"Over the next {h} trading day{'s' if h != 1 else ''}, {f['symbol']} has typically moved "
+        f"between {_pct(rng['low'], 1)} and {_pct(rng['high'], 1)} (80% range).",
+        f"Chance of a 10%+ drop at some point in that time: {f['drawdown_probability'] * 100:.0f}%.",
+    ]
+    if f.get("relative_available") and f.get("outperform_rank") is not None:
+        rank = f["outperform_rank"]
+        side = f"top {max(1, round((1 - rank) * 100))}%" if rank >= 0.5 else f"bottom {max(1, round(rank * 100))}%"
+        lines.append(
+            f"On the model's {h}-day outperformance score it ranks in the {side} of S&P 500 stocks "
+            f"({f['outperform_probability'] * 100:.1f}% chance of beating the median stock).")
+    why, risks = [], []
+    for d in (f.get("drivers") or {}).get("for", []):
+        why.append(_driver_text(d, supports=True))
+    for d in (f.get("drivers") or {}).get("against", []):
+        risks.append(_driver_text(d, supports=False))
+    if f.get("volatility_regime") == "high":
+        risks.append("Volatility is running well above its 1-year norm, so the range is wide.")
+    limitations = [
+        f"The 80% range contained {m['range_coverage_80'] * 100:.1f}% of outcomes in walk-forward tests."
+        if m.get("range_coverage_80") is not None else "Range coverage not yet measured.",
+        "The chance of rising stays close to the historical base rate "
+        f"({f['base_rate'] * 100:.1f}%) because no model beat it reliably in testing.",
+    ]
+    if m.get("out_ic") is not None:
+        limitations.append(
+            f"The outperformance ranking had a rank correlation of {m['out_ic']:.3f} with later returns "
+            f"(t = {m['out_ic_t']}): a small edge across many stocks, not a call on any one.")
+    if not f.get("relative_available"):
+        limitations.append("Outperformance ranking covers US listings only (the model is trained on S&P 500 stocks).")
+    limitations.append("Daily data: forecasts update after each close, not intraday.")
+    return {"summary": " ".join(lines), "why": why, "risks": risks, "limitations": limitations}
+
+
+def _driver_text(d: dict, *, supports: bool) -> str:
+    label = d.get("label") or d.get("feature")
+    pct = d.get("percentile")
+    where = ""
+    if pct is not None:
+        where = f" (higher than {pct * 100:.0f}% of S&P 500 stocks)" if pct >= 0.5 else f" (lower than {(1 - pct) * 100:.0f}% of S&P 500 stocks)"
+    verb = "supports" if supports else "weighs on"
+    return f"{label[0].upper()}{label[1:]}{where} {verb} the outperformance score."
+
+
+def _decorate(f: dict) -> dict:
+    payload = {k: v for k, v in f.items() if k not in ("record", "features")}
+    payload.update(explain(f))
+    payload["label"] = direction_label(f["direction_probability"])
+    payload["quality_grade"] = str((f.get("provenance") or {}).get("quality_grade") or "U").upper()
+    payload["provider"] = "forecast-engine-v4"
+    return payload
+
+
+def _run(svc: ForecastService, symbol: str) -> dict[int, dict]:
     try:
-        prob = float(probability)
-    except (TypeError, ValueError):
-        return "neutral"
-    for edge, label in LABEL_BANDS:
-        if prob >= edge:
-            return label
-        if prob <= 1.0 - edge:
-            return label.replace("positive", "negative")
-    return "neutral"
-
-
-def _member_hit_rate(
-    member_accuracy: dict | None, member: str | None
-) -> float | None:
-    """Trailing hit_rate for a member, or None when unknown.
-
-    Accepts the calibration-snapshot shape
-    ``{member_name: {"hit_rate": float | None, "n": int}}`` (plain dict;
-    never imports the calibration module). Tolerant: a plain numeric
-    value is also accepted as the rate.
-    """
-    if member is None or not isinstance(member_accuracy, dict):
-        return None
-    try:
-        entry = member_accuracy.get(member)
-    except AttributeError:
-        return None
-    if entry is None:
-        return None
-    if isinstance(entry, bool):
-        return None
-    if isinstance(entry, (int, float)):
-        try:
-            rate = float(entry)
-        except (TypeError, ValueError):
-            return None
-        return rate if 0.0 <= rate <= 1.0 else None
-    if isinstance(entry, dict):
-        raw = entry.get("hit_rate")
-        if raw is None or isinstance(raw, bool):
-            return None
-        if isinstance(raw, (int, float)):
-            try:
-                rate = float(raw)
-            except (TypeError, ValueError):
-                return None
-            return rate if 0.0 <= rate <= 1.0 else None
-    return None
-
-
-def _order_side_by_accuracy(
-    entries: list[str],
-    components: dict,
-    member_accuracy: dict,
-) -> list[str]:
-    """Order one side by member trailing hit_rate descending (deterministic).
-
-    Entries quoting a member (``"<name> implies ..."`` where ``<name>``
-    is a components key) use that member's rate; non-member entries
-    (regime/drawdown/mid) and member entries with unknown rate keep
-    their relative order after the known-rate member entries.
-    """
-    scored: list[tuple[float | None, int, str]] = []
-    for idx, entry in enumerate(entries):
-        member: str | None = None
-        # V2 strings use "<name> points up/down (...)"; legacy used "<name> implies ...".
-        for sep in (" implies ", " points "):
-            if sep in entry:
-                candidate = entry.split(sep, 1)[0].strip()
-                if candidate in components:
-                    member = candidate
-                    break
-        # Fallback: entry starts with "<name> " (member name + space).
-        if member is None:
-            try:
-                first = str(entry).split(" ", 1)[0].strip()
-                if first in components:
-                    member = first
-            except Exception:
-                member = None
-        scored.append((_member_hit_rate(member_accuracy, member), idx, entry))
-    known = [(r, i, e) for r, i, e in scored if r is not None]
-    unknown = [(i, e) for r, i, e in scored if r is None]
-    known.sort(key=lambda t: (-t[0], t[1]))
-    unknown.sort(key=lambda t: t[0])
-    return [e for _, _, e in known] + [e for _, e in unknown]
-
-
-def forecast_drivers(
-    result: dict, member_accuracy: dict | None = None
-) -> tuple[list[str], list[str]]:
-    """Derive detailed bull/bear driver strings from computed values only.
-
-    V2: each bullet is a full sentence quoting the actual numbers (member
-    probability + weight + trailing accuracy, expected-return band, vol
-    regime detail, drawdown, confidence reasons, target price). No narrative
-    is invented — everything quotes fields already in ``result``. Cap 6 per
-    side; empty side renders as "unavailable" in the UI.
-    """
-    why: list[str] = []
-    risks: list[str] = []
-    horizon = result.get("horizon_days", "?")
-    components = result.get("components") or {}
-    weights = result.get("ensemble_weights") or {}
-    formulas = result.get("formulas") or {}
-    for name in sorted(components):
-        try:
-            value = float(components[name])
-        except (TypeError, ValueError):
-            continue
-        try:
-            w = weights.get(name)
-            w_txt = f" (weight {float(w):.0%} in the ensemble)" if isinstance(w, (int, float)) and not isinstance(w, bool) else ""
-        except Exception:
-            w_txt = ""
-        try:
-            acc_txt = ""
-            if isinstance(member_accuracy, dict) and name in member_accuracy:
-                entry = member_accuracy[name]
-                hr = entry.get("hit_rate") if isinstance(entry, dict) else entry
-                n = entry.get("n") if isinstance(entry, dict) else None
-                if isinstance(hr, (int, float)) and not isinstance(hr, bool):
-                    acc_txt = f"; got the direction right {float(hr):.0%} of the time"
-                    if isinstance(n, int) and n > 0:
-                        acc_txt += f" over the last {n} checks"
-        except Exception:
-            acc_txt = ""
-        try:
-            formula = str(formulas.get(name) or "").strip()
-            formula_txt = f" — {formula[:160]}" if formula else ""
-        except Exception:
-            formula_txt = ""
-        direction_word = "up" if value > 0.5 else ("down" if value < 0.5 else "flat")
-        pct = f"{value:.0%}"
-        if value > 0.5:
-            why.append(
-                f"{name} points {direction_word} ({pct} chance of rising over {horizon}d){w_txt}{acc_txt}{formula_txt}."
-            )
-        elif value < 0.5:
-            risks.append(
-                f"{name} points {direction_word} (only {pct} chance of rising over {horizon}d){w_txt}{acc_txt}{formula_txt}."
-            )
-    band = result.get("expected_return_range") or {}
-    try:
-        low, mid, high = band.get("low"), band.get("mid"), band.get("high")
-        if isinstance(mid, (int, float)) and not isinstance(mid, bool):
-            lo_txt = f"{float(low):+.1%}" if isinstance(low, (int, float)) and not isinstance(low, bool) else "—"
-            hi_txt = f"{float(high):+.1%}" if isinstance(high, (int, float)) and not isinstance(high, bool) else "—"
-            n_w = band.get("n_windows")
-            n_txt = f" across {int(n_w)} past {horizon}d windows" if isinstance(n_w, int) and n_w > 0 else ""
-            if mid >= 0:
-                why.append(
-                    f"Past {horizon}d moves like this averaged {mid:+.1%} (typical range {lo_txt} to {hi_txt}){n_txt} — the middle of the road is positive."
-                )
-            else:
-                risks.append(
-                    f"Past {horizon}d moves like this averaged {mid:+.1%} (typical range {lo_txt} to {hi_txt}){n_txt} — the middle of the road is negative."
-                )
-    except Exception:
-        pass
-    regime = result.get("volatility_regime")
-    try:
-        vdet = result.get("volatility_detail") or {}
-        ann = vdet.get("annualized_vol") or vdet.get("vol") or vdet.get("volatility")
-        ann_txt = f" (yearly swing ≈ {float(ann):.0%})" if isinstance(ann, (int, float)) and not isinstance(ann, bool) else ""
-    except Exception:
-        ann_txt = ""
-    if regime in ("high", "elevated", "extreme"):
-        risks.append(f"Price swings are {regime}{ann_txt} — big up AND down days are more likely, so position sizes should be smaller.")
-    elif regime in ("low", "normal", "calm"):
-        why.append(f"Price swings look {regime}{ann_txt} — the ride has been relatively smooth, which supports holding.")
-    drawdown = result.get("drawdown_probability")
-    if isinstance(drawdown, bool):
-        drawdown = None
-    if isinstance(drawdown, (int, float)):
-        if drawdown >= 0.25:
-            risks.append(f"About a {drawdown:.0%} chance of a sharp fall (10%+ drop) within {horizon}d — have an exit plan before entering.")
-        elif drawdown <= 0.10:
-            why.append(f"Only about a {drawdown:.0%} chance of a sharp fall (10%+ drop) within {horizon}d — crash risk looks contained.")
-        else:
-            risks.append(f"Moderate crash risk: about a {drawdown:.0%} chance of a 10%+ drop within {horizon}d.")
-    try:
-        tp = result.get("target_price") or {}
-        last = tp.get("last_close")
-        tmid = tp.get("mid")
-        if isinstance(last, (int, float)) and isinstance(tmid, (int, float)):
-            chg = (float(tmid) / float(last) - 1.0) if float(last) else 0.0
-            if chg >= 0:
-                why.append(f"At {float(last):.2f}, the middle forecast points to ≈{float(tmid):.2f} ({chg:+.1%} over {horizon}d).")
-            else:
-                risks.append(f"At {float(last):.2f}, the middle forecast points to ≈{float(tmid):.2f} ({chg:+.1%} over {horizon}d).")
-    except Exception:
-        pass
-    try:
-        for reason in (result.get("confidence_reasons") or [])[:2]:
-            txt = str(reason).strip()
-            if not txt:
-                continue
-            if any(k in txt.lower() for k in ("disagree", "spread", "uncertain", "stale", "thin", "missing")):
-                risks.append(f"Caution flag: {txt[:220]}")
-            else:
-                why.append(f"Supporting note: {txt[:220]}")
-    except Exception:
-        pass
-    if not member_accuracy:
-        return why[:6], risks[:6]
-    why = _order_side_by_accuracy(why, components, member_accuracy)
-    risks = _order_side_by_accuracy(risks, components, member_accuracy)
-    return why[:6], risks[:6]
-
-
-@router.get("/{symbol}/calibration/history")
-def calibration_history(
-    symbol: str,
-    horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
-    limit: int = Query(default=20, ge=1, le=50, description="Max snapshots (cap 50)"),
-    svc: ForecastService = Depends(get_forecast_service),
-    user: dict = Depends(require_tier_optional("free")),
-) -> dict:
-    """Calibration snapshot history for (symbol, horizon), newest first.
-
-    Lists persisted snapshots [{brier, ece, n_windows, reliability, members,
-    model_version, data_version, created_at}]. DB miss -> empty history
-    (never 500).
-    """
-    from backend.forecasting.calibration.snapshots import canonical_symbol
-
-    if int(horizon) not in FORECAST_HORIZONS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
-        )
-    horizon = int(horizon)
-    market_service = getattr(svc, "market", None)
-    try:
-        canonical = canonical_symbol(symbol, market_service)
-    except Exception:
-        canonical = (symbol or "").strip().upper()
-    # Provenance: live bars envelope. Fail-closed: when bars are
-    # unavailable there is nothing honest to contextualize the history
-    # with, so the request raises instead of fabricating an envelope.
-    try:
-        bars = market_service.get_bars(
-            (symbol or "").strip().upper(), timeframe="1d", limit=5
-        )
-        provenance = dict(bars.get("provenance", {}))
-        if not provenance:
-            raise ValueError("empty provenance")
+        return svc.forecast_all(symbol)
+    except ForecastUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=sanitize_error(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=sanitize_error(exc, prefix="calibration history failed")
-        ) from exc
-    try:
-        from backend.db.session import get_session_factory, init_db
-        from backend.db.models import CalibrationSnapshot
+        raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="forecast failed")) from exc
 
-        try:
-            init_db()
-        except Exception:
-            pass
-        Session = get_session_factory()
-        db = Session()
-        try:
-            rows = (
-                db.query(CalibrationSnapshot)
-                .filter(
-                    CalibrationSnapshot.symbol == (canonical or "").strip().upper(),
-                    CalibrationSnapshot.horizon_days == int(horizon),
-                )
-                .order_by(CalibrationSnapshot.created_at.desc())
-                .limit(int(limit))
-                .all()
-            )
-            history = [_snapshot_wire(r) for r in rows]
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    except Exception:
-        history = []
+
+@router.get("/model")
+def model_card() -> dict:
+    """The active model and its walk-forward record (no per-symbol detail)."""
+    bundle = get_bundle()
+    if bundle is None:
+        raise HTTPException(status_code=423, detail="no forecast model is installed")
+    report = {k: v for k, v in bundle.report.items() if k != "per_symbol"}
     return {
-        "symbol": (canonical or "").strip().upper(),
-        "horizon": horizon,
-        "history": history,
-        "count": len(history),
-        "provenance": provenance,
-        "disclosure": "Not investment advice",
+        "version": bundle.version, "trained_at": bundle.trained_at,
+        "data_start": bundle.data_start, "data_end": bundle.data_end,
+        "universe_size": len(bundle.universe), "horizons": bundle.horizons,
+        "report": report,
     }
+
+
+@router.get("/model/{symbol}")
+def model_symbol(symbol: str) -> dict:
+    sym = validate_symbol(symbol)
+    bundle = get_bundle()
+    if bundle is None:
+        raise HTTPException(status_code=423, detail="no forecast model is installed")
+    key = sym.replace(".", "-")
+    stats = (bundle.report.get("per_symbol") or {}).get(key) or (bundle.report.get("per_symbol") or {}).get(sym)
+    return {"symbol": sym, "in_universe": stats is not None, "horizons": stats or {}, "model_version": bundle.version}
+
+
+@router.get("/{symbol}/all")
+def get_forecast_all(
+    symbol: str, background_tasks: BackgroundTasks, svc: ForecastService = Depends(get_forecast_service),
+) -> dict:
+    sym = validate_symbol(symbol)
+    results = _run(svc, sym)
+    for res in results.values():
+        background_tasks.add_task(persist_forecast_record, res, sym, market_service=getattr(svc, "market", None))
+    return {"symbol": sym, "horizons": {str(h): _decorate(f) for h, f in results.items()}}
 
 
 @router.get("/{symbol}")
@@ -402,581 +154,10 @@ def get_forecast(
     background_tasks: BackgroundTasks,
     horizon: int = Query(default=21, description="Trading-day horizon: 1, 7, 14 or 21"),
     svc: ForecastService = Depends(get_forecast_service),
-    user: dict = Depends(require_tier_optional("free")),
 ) -> dict:
-    """Forecast one symbol/horizon (ensemble direction + bands + risk)."""
     if int(horizon) not in FORECAST_HORIZONS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}",
-        )
-    symbol = validate_symbol(symbol)
-    # v3 skill pre-fetch (best-effort): trailing snapshot skill enables
-    # inverse-Brier adaptive weights + isotonic calibration + skill-aware
-    # confidence. All-None on miss keeps the fixed/shrinkage fallback.
-    try:
-        _mb, _cal, _sb, _se = _latest_skill(
-            symbol, int(horizon), market_service=getattr(svc, "market", None)
-        )
-    except Exception:
-        _mb, _cal, _sb, _se = None, None, None, None
-    try:
-        result = svc.forecast(
-            symbol, int(horizon),
-            member_brier=_mb, calibrator=_cal,
-            skill_brier=_sb, skill_ece=_se,
-        )
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        try:
-            from backend.market_data.providers.base import ProviderError as _PE
-
-            if isinstance(exc, _PE):
-                raise HTTPException(status_code=502, detail=sanitize_error(exc)) from exc
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-        try:
-            raise HTTPException(status_code=502, detail=sanitize_error(exc, prefix="forecast failed")) from exc
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=502, detail="forecast failed") from exc
-    # Flatten the record mirror out of the wire payload (kept in result["record"]).
-    payload = {k: v for k, v in result.items() if k != "record"}
-    # Display fields the terminal UI renders (derived, never invented):
-    # label bands, data-quality passthrough, engine identity, bull/bear
-    # drivers quoted from computed components, evidence = model members.
-    # Calibration snapshot (reliability rows + member accuracy for driver
-    # ordering) is best-effort; []/None when none. member_accuracy never
-    # reaches the wire — ordering input only.
-    cal_rows, member_acc, cal_meta = _latest_calibration(
-        symbol,
-        int(horizon),
-        str(result.get("model_version", "")),
-        market_service=getattr(svc, "market", None),
-    )
-    why, risks = forecast_drivers(result, member_acc)
-    provenance = result.get("provenance") or {}
-    payload["label"] = direction_label(result.get("direction_probability", 0.5))
-    payload["quality_grade"] = str(provenance.get("quality_grade", "U")).upper() or "U"
-    payload["provider"] = "deterministic-engine"
-    payload["why"] = why
-    payload["risks"] = risks
-    payload["evidence_ids"] = list(result.get("model_members", []))
-    payload["limitations"] = forecast_limitations(result)
-    payload["inputs"] = {
-        "model_version": result.get("model_version"),
-        "feature_version": result.get("feature_version"),
-        "data_version": result.get("data_version"),
-        "n_windows": (result.get("expected_return_range") or {}).get("n_windows"),
-    }
-    # Calibration rows from the latest snapshot for
-    # (symbol, horizon, model_version); [] when none (offline/tests/DB
-    # issues must never break the forecast path).
-    payload["calibration"] = cal_rows
-    payload["calibration_meta"] = cal_meta
-    # Persist the versioned record so GET /api/audit/forecasts (homepage
-    # "Latest research") is fed by live runs. Off the read path: scheduled
-    # as a background task so the forecast response never waits on the DB
-    # write (find-or-create instrument + forecast + audit). Best-effort:
-    # DB miss / constraint / offline -> skip, never breaks the path.
-    try:
-        market_service = getattr(svc, "market", None)
-        try:
-            background_tasks.add_task(
-                _persist_forecast_record, result, symbol,
-                market_service=market_service,
-            )
-        except Exception:
-            _persist_forecast_record(result, symbol, market_service=market_service)
-    except Exception:
-        pass
-    return payload
-
-
-def forecast_limitations(result: dict) -> list[str]:
-    """Honest caveats for the forecast payload (never empty on live data)."""
-    try:
-        _cal_method = str(result.get("calibration_method") or "shrinkage-0.8")
-    except Exception:
-        _cal_method = "shrinkage-0.8"
-    try:
-        _adaptive = bool(result.get("adaptive_weights"))
-    except Exception:
-        _adaptive = False
-    items = [
-        "Walk-forward validation only; no look-ahead.",
-        "Missing data renders unavailable, never silently imputed.",
-        "Disabling AI leaves forecasting intact.",
-        f"Direction probabilities are {_cal_method}-calibrated weighted means "
-        "(raw mean in direction_probability_raw, clipped to [0.05, 0.95]). "
-        f"Weights are {'inverse-Brier adaptive from trailing snapshots' if _adaptive else 'fixed reliability weights (ML 0.22 each, drift/momentum 0.18 each, heuristics 0.10 each), renormalized over members that ran'}. "
-        "Confidence labels reflect ensemble agreement downgraded by "
-        "data-quality, trailing-risk signals (vol regime, drawdown, "
-        "staleness) AND trailing skill (Brier>=0.25, ECE>=0.15, "
-        "n_effective<5 each cost a notch). High agreement near 0.5 caps at "
-        "moderate; AI disagreement downgrades the blend label.",
-        "ensemble-v3 members: historical-drift + momentum + logistic-v3 "
-        "(v2 features) + gradient-boost-v1 (v2 features) + trend-persistence + "
-        "mean-reversion (contrarian); venue blends add sse/eux drift 50/50 "
-        "then recalibrate.",
-    ]
-    band = result.get("expected_return_range") or {}
-    if band.get("n_windows") is not None:
-        try:
-            n = int(band['n_windows'])
-            ne = band.get("n_effective")
-            ne_txt = f" (~{float(ne):.1f} independent blocks)" if isinstance(ne, (int, float)) else ""
-            items.append(
-                f"Return range estimated from {n} historical windows{ne_txt} "
-                f"({band.get('coverage') or '80% empirical'})."
-            )
-            if n < 10:
-                items.append(
-                    "Insufficient windows (n<10): range and calibration unreliable."
-                )
-            elif n < 30:
-                items.append(
-                    "Small sample (n<30): range and calibration carry wide uncertainty."
-                )
-        except (TypeError, ValueError):
-            pass
-    try:
-        spread = result.get("ensemble_spread")
-        if isinstance(spread, (int, float)) and not isinstance(spread, bool):
-            if float(spread) > 0.15:
-                items.append(
-                    f"Member disagreement high (spread {float(spread):.2f}): "
-                    "treat direction as uncertain even if confidence is moderate."
-                )
-    except Exception:
-        pass
-    try:
-        reasons = result.get("confidence_reasons") or []
-        if isinstance(reasons, list) and reasons:
-            items.append("Confidence penalties: " + "; ".join(str(r) for r in reasons[:4]))
-    except Exception:
-        pass
-    return items
-
-
-def _snapshot_meta(row) -> dict | None:
-    """Wire calibration_meta for one snapshot row (never raises)."""
-    try:
-        brier = getattr(row, "brier", None)
-        ece = getattr(row, "ece", None)
-        try:
-            brier_f = None if brier is None else float(brier)
-        except (TypeError, ValueError):
-            brier_f = None
-        try:
-            ece_f = None if ece is None else float(ece)
-        except (TypeError, ValueError):
-            ece_f = None
-        try:
-            n_windows = int(getattr(row, "n_windows", 0) or 0)
-        except (TypeError, ValueError):
-            n_windows = 0
-        members = getattr(row, "members", None)
-        members_d = dict(members) if isinstance(members, dict) else {}
-        try:
-            cal_b = getattr(row, "calibrated_brier", None)
-            cal_b_f = None if cal_b is None else float(cal_b)
-        except (TypeError, ValueError):
-            cal_b_f = None
-        try:
-            cal_e = getattr(row, "calibrated_ece", None)
-            cal_e_f = None if cal_e is None else float(cal_e)
-        except (TypeError, ValueError):
-            cal_e_f = None
-        try:
-            mb = getattr(row, "member_brier", None)
-            mb_d = dict(mb) if isinstance(mb, dict) else {}
-        except Exception:
-            mb_d = {}
-        try:
-            cal = getattr(row, "calibrator", None)
-            cal_d = dict(cal) if isinstance(cal, dict) else {}
-        except Exception:
-            cal_d = {}
-        created = getattr(row, "created_at", None)
-        try:
-            created_s = created.isoformat() if hasattr(created, "isoformat") else str(created)
-        except Exception:
-            created_s = str(created)
-        return {
-            "brier": brier_f,
-            "ece": ece_f,
-            "n_windows": n_windows,
-            "members": members_d,
-            "member_brier": mb_d,
-            "calibrated_brier": cal_b_f,
-            "calibrated_ece": cal_e_f,
-            "calibrator": cal_d,
-            "model_version": str(getattr(row, "model_version", "") or ""),
-            "data_version": str(getattr(row, "data_version", "") or ""),
-            "created_at": created_s,
-        }
-    except Exception:
-        return None
-
-
-def _snapshot_wire(row) -> dict:
-    """Full wire shape for one snapshot in history (never raises)."""
-    meta = _snapshot_meta(row) or {
-        "brier": None, "ece": None, "n_windows": 0, "members": {},
-        "member_brier": {}, "calibrated_brier": None, "calibrated_ece": None,
-        "calibrator": {}, "model_version": "", "data_version": "", "created_at": "",
-    }
-    try:
-        reliability = getattr(row, "reliability", None)
-        rel = list(reliability) if isinstance(reliability, list) else []
-    except Exception:
-        rel = []
-    return {
-        "brier": meta["brier"],
-        "ece": meta["ece"],
-        "n_windows": meta["n_windows"],
-        "reliability": rel,
-        "members": meta["members"],
-        "member_brier": meta.get("member_brier") or {},
-        "calibrated_brier": meta.get("calibrated_brier"),
-        "calibrated_ece": meta.get("calibrated_ece"),
-        "model_version": meta["model_version"],
-        "data_version": meta["data_version"],
-        "created_at": meta["created_at"],
-    }
-
-
-def _latest_snapshot_row(
-    symbol: str, horizon: int, model_version: str, market_service=None
-):
-    """One best-effort snapshot read shared by skill + calibration paths.
-
-    A forecast used to pay init_db + Session + canonical-resolve + snapshot
-    query TWICE per request (``_latest_skill`` then ``_latest_calibration``);
-    this does it once and both callers derive from the row. Returns None on
-    miss/thin/DB-down (callers fall back). Never raises.
-    """
-    try:
-        from backend.db.session import get_session_factory, init_db
-        from backend.forecasting.calibration.snapshots import (
-            canonical_symbol,
-            get_latest_snapshot,
-        )
-
-        try:
-            init_db()
-        except Exception:
-            pass
-        Session = get_session_factory()
-        db = Session()
-        try:
-            canonical = canonical_symbol(symbol, market_service)
-            return get_latest_snapshot(db, canonical, int(horizon), model_version)
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    except Exception:
-        return None
-
-
-def _latest_skill(
-    symbol: str, horizon: int, market_service=None
-) -> tuple[dict | None, dict | None, float | None, float | None]:
-    """Best-effort v3 skill bundle for the live forecast path.
-
-    Returns (member_brier, calibrator, skill_brier, skill_ece) from the
-    latest ensemble-v3 snapshot with n_windows >= 10; all-None when
-    missing/thin/DB-down (caller falls back to fixed weights + shrinkage).
-    Never raises, never blocks the forecast path on DB latency beyond a
-    best-effort read.
-    """
-    try:
-        from backend.forecasting.calibration.snapshots import MIN_SCORED_WINDOWS
-        from backend.forecasting.registry import ENSEMBLE_VERSION
-
-        row = _latest_snapshot_row(symbol, int(horizon), ENSEMBLE_VERSION, market_service)
-        if row is None:
-            return None, None, None, None
-        try:
-            n_w = int(getattr(row, "n_windows", 0) or 0)
-        except (TypeError, ValueError):
-            n_w = 0
-        if n_w < MIN_SCORED_WINDOWS:
-            return None, None, None, None
-        try:
-            mb = getattr(row, "member_brier", None)
-            member_brier = dict(mb) if isinstance(mb, dict) and mb else None
-        except Exception:
-            member_brier = None
-        try:
-            cal = getattr(row, "calibrator", None)
-            calibrator = dict(cal) if isinstance(cal, dict) and cal else None
-        except Exception:
-            calibrator = None
-        try:
-            sb = getattr(row, "brier", None)
-            skill_brier = None if sb is None else float(sb)
-        except (TypeError, ValueError):
-            skill_brier = None
-        try:
-            se = getattr(row, "ece", None)
-            skill_ece = None if se is None else float(se)
-        except (TypeError, ValueError):
-            skill_ece = None
-        return member_brier, calibrator, skill_brier, skill_ece
-    except Exception:
-        return None, None, None, None
-
-
-def _latest_calibration(
-    symbol: str, horizon: int, model_version: str, market_service=None
-) -> tuple[list, dict | None, dict | None]:
-    """Best-effort (reliability rows, member accuracy, calibration_meta)."""
-    try:
-        row = _latest_snapshot_row(symbol, int(horizon), model_version, market_service)
-        if row is None:
-            return [], None, None
-        reliability = getattr(row, "reliability", None)
-        rows = list(reliability) if isinstance(reliability, list) else []
-        members = getattr(row, "members", None)
-        acc = dict(members) if isinstance(members, dict) and members else None
-        return rows, acc, _snapshot_meta(row)
-    except Exception:
-        return [], None, None
-
-
-#: quantile_bands emits "high"; the forecasts table CHECK allows
-#: low/normal/elevated/extreme. Map on persist (display keeps "high").
-_REGIME_PERSIST_MAP = {"high": "elevated"}
-
-
-def _persist_forecast_record(result: dict, symbol: str, market_service=None) -> None:
-    """Insert the versioned forecast row + audit event (best-effort, never raises).
-
-    Feeds GET /api/audit/forecasts (homepage "Latest research"). Skipped
-    under pytest (PYTEST_CURRENT_TEST) so unit runs never pollute the dev
-    sqlite file; production/server always attempts the write. Duplicate
-    runs (same instrument+horizon+target+versions UNIQUE key) are ignored.
-    """
-    try:
-        if os.getenv("PYTEST_CURRENT_TEST"):
-            return
-        from backend.db.session import get_session_factory, init_db
-
-        try:
-            init_db()
-        except Exception:
-            pass
-        Session = get_session_factory()
-        db = Session()
-        try:
-            from backend.db.models import Forecast as DBForecast
-            from backend.db.models import Instrument as DBInstrument
-
-            # Resolve canonical identity via the registry (never bare ticker).
-            # Unknown symbols (no registry entry) are NOT persisted: writing
-            # stub forecasts for garbage tickers would pollute instruments.
-            mic: str | None = None
-            exchange_symbol: str | None = None
-            provider_symbol: str | None = None
-            company_name = ""
-            currency = "USD"
-            resolved = False
-            try:
-                registry = getattr(market_service, "registry", None)
-                if registry is not None:
-                    inst, _, _ = registry.resolve(symbol)
-                    if inst is None:
-                        # Valid non-seed tickers (GOOGL/META/...) resolve via
-                        # the provisional path so the audit trail is kept.
-                        # Alphabet-invalid input yields None and stays
-                        # unpersisted (never pollute instruments with stubs).
-                        try:
-                            from backend.market_data.service import (
-                                _provisional_instrument as _prov,
-                            )
-                            from backend.security.validation import (
-                                validate_symbol as _vsym,
-                            )
-
-                            _vsym(symbol, field="symbol")
-                            inst = _prov(symbol)
-                        except Exception:
-                            inst = None
-                    if inst is not None:
-                        resolved = True
-                        mic = str(inst.exchange_mic or "").strip().upper() or None
-                        exchange_symbol = str(inst.exchange_symbol or "").strip() or None
-                        provider_symbol = str(
-                            inst.provider_symbol or exchange_symbol or ""
-                        ).strip() or None
-                        company_name = str(inst.company_name or "")
-                        currency = str(inst.currency or "USD").strip().upper() or "USD"
-            except Exception:
-                pass
-            if not resolved or not mic or not exchange_symbol:
-                return
-            # Find-or-create the DB instrument row (UUID PK; registry id
-            # "XNAS-AAPL" is a string key, not the DB key).
-            db_inst = (
-                db.query(DBInstrument)
-                .filter(
-                    DBInstrument.exchange_mic == mic,
-                    DBInstrument.exchange_symbol == exchange_symbol,
-                )
-                .first()
-            )
-            if db_inst is None:
-                db_inst = DBInstrument(
-                    exchange_mic=mic,
-                    exchange_symbol=exchange_symbol,
-                    provider_symbol=provider_symbol,
-                    company_name=company_name,
-                    currency=(currency[:3] if currency else "USD"),
-                    trading_calendar=mic,
-                    is_active=True,
-                )
-                db.add(db_inst)
-                try:
-                    db.flush()
-                except Exception:
-                    db.rollback()
-                    db_inst = (
-                        db.query(DBInstrument)
-                        .filter(
-                            DBInstrument.exchange_mic == mic,
-                            DBInstrument.exchange_symbol == exchange_symbol,
-                        )
-                        .first()
-                    )
-                    if db_inst is None:
-                        return
-            # Parse fields from the service record (tolerant, never raises).
-            record = result.get("record") if isinstance(result, dict) else None
-            record = record if isinstance(record, dict) else {}
-            horizon = int(result.get("horizon_days") or record.get("horizon_days") or 0)
-            if horizon not in FORECAST_HORIZONS:
-                return
-            target_raw = result.get("target_date") or record.get("target_date")
-            try:
-                from datetime import date as _date
-
-                target_date = _date.fromisoformat(str(target_raw)[:10])
-            except Exception:
-                return
-            try:
-                direction = result.get("direction_probability")
-                direction_f = None if direction is None else float(direction)
-            except (TypeError, ValueError):
-                direction_f = None
-            band = result.get("expected_return_range") or {}
-            try:
-                ret_low = None if band.get("low") is None else float(band["low"])
-                ret_high = None if band.get("high") is None else float(band["high"])
-            except (TypeError, ValueError):
-                ret_low, ret_high = None, None
-            regime_raw = str(result.get("volatility_regime") or "")
-            regime = _REGIME_PERSIST_MAP.get(regime_raw, regime_raw) or None
-            if regime not in ("low", "normal", "elevated", "extreme"):
-                regime = None
-            try:
-                dd_raw = result.get("drawdown_probability")
-                dd = None if dd_raw is None else float(dd_raw)
-            except (TypeError, ValueError):
-                dd = None
-            confidence = str(result.get("confidence") or "")
-            if confidence not in ("low", "moderate", "high"):
-                # Conservative fallback: unknown labels must not inflate to moderate.
-                confidence = "low"
-            model_version = str(result.get("model_version") or "")
-            feature_version = str(result.get("feature_version") or "")
-            data_version = str(result.get("data_version") or "")
-            if not (model_version and feature_version and data_version):
-                return
-            provenance = result.get("provenance")
-            provenance = dict(provenance) if isinstance(provenance, dict) else {}
-            # Idempotency: same (instrument, horizon, target, versions) run
-            # already logged -> skip instead of stacking duplicate rows.
-            try:
-                existing = (
-                    db.query(DBForecast)
-                    .filter(
-                        DBForecast.instrument_id == db_inst.instrument_id,
-                        DBForecast.horizon_days == horizon,
-                        DBForecast.target_date == target_date,
-                        DBForecast.model_version == model_version,
-                        DBForecast.feature_version == feature_version,
-                        DBForecast.data_version == data_version,
-                    )
-                    .first()
-                )
-                if existing is not None:
-                    return
-            except Exception:
-                pass
-            row = DBForecast(
-                instrument_id=db_inst.instrument_id,
-                horizon_days=horizon,
-                target_date=target_date,
-                direction_prob=direction_f,
-                expected_ret_low=ret_low,
-                expected_ret_high=ret_high,
-                volatility_regime=regime,
-                drawdown_prob=dd,
-                confidence=confidence,
-                model_version=model_version,
-                feature_version=feature_version,
-                data_version=data_version,
-                ai_provider=None,
-                ai_model=None,
-                ai_weight=0,
-                provenance=provenance,
-            )
-            db.add(row)
-            try:
-                db.commit()
-            except Exception:
-                # Duplicate UNIQUE run or constraint miss -> ignore, keep serving.
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                return
-            try:
-                db.refresh(row)
-            except Exception:
-                pass
-            # Audit event for the new version (redacted inside; never raises).
-            try:
-                from backend.api.audit import log_forecast_created
-
-                log_forecast_created(
-                    db,
-                    forecast_id=str(row.forecast_id),
-                    payload={
-                        "symbol": (symbol or "").strip().upper(),
-                        "horizon_days": horizon,
-                        "model_version": model_version,
-                        "feature_version": feature_version,
-                        "data_version": data_version,
-                    },
-                    actor="system",
-                )
-            except Exception:
-                pass
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    except Exception:
-        pass
+        raise HTTPException(status_code=422, detail=f"horizon must be one of {list(FORECAST_HORIZONS)}, got {horizon}")
+    sym = validate_symbol(symbol)
+    result = _run(svc, sym)[int(horizon)]
+    background_tasks.add_task(persist_forecast_record, result, sym, market_service=getattr(svc, "market", None))
+    return _decorate(result)

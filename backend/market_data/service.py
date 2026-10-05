@@ -68,6 +68,24 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _iso_or_none(value: object) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def bar_session_day(row: dict) -> str:
+    """Session day of a bars-payload row: ``date`` when present (exchange-
+    local), else the UTC date of ``ts`` (payloads cached before ``date``)."""
+    return str(row.get("date") or str(row.get("ts") or "")[:10])
+
+
+def _bar_day(ts: object, mic: str | None) -> str | None:
+    """Exchange-local session day (YYYY-MM-DD) of a daily bar timestamp."""
+    from backend.instruments.calendars import session_date
+
+    day = session_date(ts, mic)
+    return day.isoformat() if day is not None else None
+
+
 def _to_yahoo_sse_symbol(provider_symbol: str) -> str:
     """Ensure Yahoo-style ``.SS`` form for SSE (``600519`` -> ``600519.SS``)."""
     text = (provider_symbol or "").strip().upper()
@@ -387,43 +405,11 @@ class MarketDataService:
             return None
 
     # -- quotes ---------------------------------------------------------
-    # Future subscription tiers (Free/Silver/Gold/Platinum): provider
-    # gating will happen HERE, in one place, keyed off ``tier`` (and
-    # ``user_id`` for per-user keys/quotas) — never inside providers.
-    # Draft mapping (no behavior today; both params are accepted and
-    # ignored): Free -> keyless only (yfinance); Silver ->
-    # + keyed free tiers (Alpaca/Finnhub/TwelveData shared keys);
-    # Gold/Platinum -> + paid providers (SIP, real-time Euronext, full
-    # TwelveData markets) with per-user keys. Paid provider slots should
-    # be added as new ``*_provider`` constructor args following the
-    # existing opt-in pattern (None = skipped, chain behavior unchanged).
-    @staticmethod
-    def _scope_prefix(user_id: str | None, tier: str | None) -> str:
-        """User-scoped cache prefix u:{id}:t:{tier}: (V2: prevents cross-tier poisoning)."""
-        try:
-            uid = str(user_id).strip() if user_id else "anon"
-            if not uid:
-                uid = "anon"
-        except Exception:
-            uid = "anon"
-        try:
-            from backend.auth.tiers import normalize_tier as _nt
-
-            t = _nt(str(tier) if tier else None)
-        except Exception:
-            t = "free"
-        return f"u:{uid}:t:{t}:"
-
     def get_quote(
         self,
         symbol: str,
         market: str | None = None,
-        *,
-        user_id: str | None = None,
-        tier: str | None = None,
     ) -> dict:
-        # V2: user_id/tier scope the quote cache (u:{id}:t:{tier}: prefix).
-        # Provider gating still happens via routers (quote/bars stay Free).
         # Harden: coerce non-str/None symbols to str (avoids AttributeError
         # on symbol.strip()); empty still flows to ProviderError via provider.
         try:
@@ -453,7 +439,6 @@ class MarketDataService:
                 provider_symbol = yahoo_symbol
         # Canonical cache key: upper-case symbol+MIC so aapl:XNAS and
         # AAPL:XNAS share one entry instead of double-fetching.
-        # V2: prefixed u:{id}:t:{tier}: so per-tier views never poison each other.
         try:
             _cache_sym = str(provider_symbol or "").strip().upper()
         except Exception:
@@ -462,11 +447,7 @@ class MarketDataService:
             _cache_mic = str(mic or "").strip().upper()
         except Exception:
             _cache_mic = str(mic)
-        try:
-            _prefix = self._scope_prefix(user_id, tier)
-        except Exception:
-            _prefix = "u:anon:t:free:"
-        cache_key = f"{_prefix}quote:{_cache_sym}:{_cache_mic}"
+        cache_key = f"quote:{_cache_sym}:{_cache_mic}"
         if self.cache is not None:
             try:
                 hit = self.cache.get(cache_key)  # type: ignore[union-attr]
@@ -664,6 +645,7 @@ class MarketDataService:
             or (instrument.currency if instrument else ("CNY" if sse else "USD")),
             "change": quote.get("change"),
             "change_pct": quote.get("change_pct"),
+            "price_time": _iso_or_none(quote.get("price_time")),
             "market_state": _market_state,
             "provenance": provenance.model_dump(mode="json"),
         }
@@ -678,18 +660,8 @@ class MarketDataService:
         return Provenance(**payload["provenance"])
 
     # -- bars (DB-first, then on-demand live fetch, else raise) ---
-    def _bars_cache_key(
-        self, symbol: str, timeframe: str, limit: int,
-        user_id: str | None = None, tier: str | None = None,
-    ) -> str:
-        """User-scoped bars key (V2: u:{id}:t:{tier}: prefix).
-
-        NOTE: indicator_cache (backend/db/writers.py put_indicator/get_indicator)
-        stays UNSCOPED by design: indicator payloads are pure deterministic
-        functions of (instrument, timeframe, key) — identical for every tier —
-        so scoping would only multiply rows with zero correctness gain.
-        Quote/bars envelopes carry tier-visible provenance/quotas, hence scoped.
-        """
+    def _bars_cache_key(self, symbol: str, timeframe: str, limit: int) -> str:
+        """Bars cache key (market data is identical for every user)."""
         try:
             sym = str(symbol or "").strip().upper()
         except Exception:
@@ -698,11 +670,7 @@ class MarketDataService:
             n = max(1, min(int(limit), 1000))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             n = 30
-        base = f"bars:{sym}:{(timeframe or '1d')}:{n}"
-        try:
-            return f"{self._scope_prefix(user_id, tier)}{base}"
-        except Exception:
-            return base
+        return f"bars:{sym}:{(timeframe or '1d')}:{n}"
 
     def warm_bar_counts(
         self, symbols: list[str] | tuple[str, ...] | None, timeframe: str = "1d"
@@ -774,7 +742,6 @@ class MarketDataService:
 
     def get_bars(
         self, symbol: str, timeframe: str = "1d", limit: int = 30,
-        user_id: str | None = None, tier: str | None = None,
     ) -> dict:
         """Serve daily bars from ``price_bars`` when coverage is sufficient.
 
@@ -790,15 +757,11 @@ class MarketDataService:
         fetch (``1d`` only); when that also yields nothing fresh the request
         raises instead of serving synthetic stub bars or days-old history.
         No fallbacks, ever.
-
-        V2: cache is user-scoped (u:{id}:t:{tier}: prefix) to prevent
-        cross-tier poisoning. indicator_cache stays unscoped by design
-        (deterministic per instrument/timeframe/key — see _bars_cache_key).
         """
         cache_key: str | None = None
         if self.cache is not None:
             try:
-                cache_key = self._bars_cache_key(symbol, timeframe, limit, user_id, tier)
+                cache_key = self._bars_cache_key(symbol, timeframe, limit)
                 hit = self.cache.get(cache_key)  # type: ignore[union-attr]
                 if isinstance(hit, dict) and isinstance(hit.get("bars"), list):
                     return hit
@@ -899,7 +862,7 @@ class MarketDataService:
                     from backend.market_data.ingest import _get_or_create_db_instrument as _get_inst
                     from backend.market_data.ingest import _upsert_bars as _upsert
                     from backend.db.session import get_session_factory as _GSF2
-                    from backend.db.session import init_db as _init2
+                    from backend.db.session import ensure_schema as _init2
 
                     _live_bars, _live_src = _live_fetch(symbol_text)
                     # Yahoo throttle fallback: Stooq CSV is delayed but far
@@ -946,6 +909,7 @@ class MarketDataService:
                                 continue
                             _rows.append({
                                 "ts": _ts_iso,
+                                "date": _bar_day(_ts, getattr(instrument, "exchange_mic", None)),
                                 "open": _b.get("open"),
                                 "high": _b.get("high"),
                                 "low": _b.get("low"),
@@ -968,6 +932,7 @@ class MarketDataService:
                                     delay_minutes=_exp, quality_grade="C",
                                     fallback_used=False,
                                     missing_fields=[f"live-serve-db-thin-{int(total)}-rows"],
+                                    granularity="1d" if (timeframe or "1d") == "1d" else None,
                                 ).model_dump(mode="json")
                             except Exception:
                                 _prov = {}
@@ -1088,6 +1053,7 @@ class MarketDataService:
                 ts = quote_day
             rows.append({
                 "ts": ts,
+                "date": quote_day,
                 "open": session_open,
                 "high": high,
                 "low": low,
@@ -1140,12 +1106,16 @@ class MarketDataService:
             as_of_raw = ((quote.get("provenance") or {}).get("as_of")
                          if isinstance(quote.get("provenance"), dict) else None)
             as_of_raw = as_of_raw if as_of_raw is not None else quote.get("as_of")
-            quote_day = str(as_of_raw)[:10]
-            if len(quote_day) != 10:
+            # The session the PRICE belongs to (price_time), not when it was
+            # fetched: a Saturday fetch of Friday's close must update Friday's
+            # bar, not grow a weekend candle.
+            stamp = quote.get("price_time") or as_of_raw
+            quote_day = _bar_day(stamp, mic)
+            if quote_day is None:
                 return rows, False, "quote-undated", False
             last = rows[-1]
-            last_day = str((last or {}).get("ts") or "")[:10]
-            if len(last_day) != 10:
+            last_day = (last or {}).get("date") or _bar_day((last or {}).get("ts"), mic)
+            if last_day is None:
                 return rows, False, "bars-undated", False
         except Exception:
             return rows, False, "quote-undated", False
@@ -1353,15 +1323,6 @@ class MarketDataService:
             if raw_ts is None:
                 return True
             try:
-                latest_day = str(raw_ts)[:10]
-                if len(latest_day) != 10:
-                    return True
-                from datetime import date as _date
-
-                latest = _date.fromisoformat(latest_day)
-            except (TypeError, ValueError):
-                return True
-            try:
                 symbol_text = str(symbol or "").strip()
             except Exception:
                 return True
@@ -1388,13 +1349,13 @@ class MarketDataService:
                 return True
             if not mic:
                 return True
-            try:
-                from backend.instruments.calendars import last_completed_trading_day
-            except Exception:
-                try:
-                    from ..instruments.calendars import last_completed_trading_day  # type: ignore[no-redef]
-                except Exception:
-                    return True
+            from backend.instruments.calendars import last_completed_trading_day, session_date
+
+            # Exchange-local session day, not the UTC date of the stored
+            # timestamp (which is a day early for every venue east of UTC).
+            latest = session_date(raw_ts, mic)
+            if latest is None:
+                return True
             try:
                 expected = last_completed_trading_day(mic)
             except Exception:
@@ -1476,16 +1437,11 @@ class MarketDataService:
         self,
         symbols: list[str],
         market: str | None = None,
-        *,
-        user_id: str | None = None,
-        tier: str | None = None,
     ) -> dict[str, dict]:
         """Bulk quotes for a symbol list (bounded pool, per-symbol degrade).
 
         Never raises; failures are skipped. Homepage/screener fan-outs use
-        this instead of N sequential ``get_quote`` calls. ``user_id``/``tier``
-        are reserved for future per-user tier routing (passed through to
-        :meth:`get_quote`); no-op today.
+        this instead of N sequential ``get_quote`` calls.
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -1503,7 +1459,7 @@ class MarketDataService:
 
         def _one(sym: str) -> tuple[str, dict | None]:
             try:
-                return sym, self.get_quote(sym, market, user_id=user_id, tier=tier)
+                return sym, self.get_quote(sym, market)
             except Exception:
                 return sym, None
 
@@ -1516,7 +1472,7 @@ class MarketDataService:
         except Exception:
             for sym in wanted:
                 try:
-                    payload = self.get_quote(sym, market, user_id=user_id, tier=tier)
+                    payload = self.get_quote(sym, market)
                 except Exception:
                     continue
                 if isinstance(payload, dict):
@@ -1551,7 +1507,7 @@ class MarketDataService:
         """
         try:
             from backend.db.models import QuoteSnapshot
-            from backend.db.session import get_session_factory, init_db
+            from backend.db.session import get_session_factory, ensure_schema
         except Exception:
             return
         price = self._safe_num(quote.get("price"))
@@ -1588,7 +1544,7 @@ class MarketDataService:
         for attempt in range(2):
             try:
                 if attempt:
-                    init_db()
+                    ensure_schema()
                 Session = get_session_factory()
                 db = Session()
                 try:
@@ -1762,7 +1718,7 @@ class MarketDataService:
             except Exception:
                 pass
         try:
-            from backend.db.session import get_session_factory, init_db
+            from backend.db.session import get_session_factory, ensure_schema
             from backend.market_data.ingest import (
                 _get_or_create_db_instrument,
                 _upsert_bars,
@@ -1849,7 +1805,7 @@ class MarketDataService:
                 self._remember_fetch_miss(miss_key)
                 return False
         try:
-            init_db()
+            ensure_schema()
             Session = get_session_factory()
             db = Session()
             try:
@@ -2020,10 +1976,16 @@ class MarketDataService:
         rows, *, db_inst, response_symbol: str, response_inst_id,
         timeframe: str,
     ) -> dict | None:
-        """Build the bars payload from ascending PriceBar rows (shared tail)."""
+        """Build the bars payload from ascending PriceBar rows (shared tail).
+
+        Each bar carries ``ts`` (the stored instant) and ``date``, its
+        exchange-local session day: charts and freshness checks must use the
+        latter, because the instant's UTC date is a day early east of UTC.
+        """
         bars: list[dict] = []
         sources: list[str] = []
         latest_as_of = None
+        bar_mic = getattr(db_inst, "exchange_mic", None)
         for row in rows:
             ts = row.ts
             if isinstance(ts, datetime):
@@ -2042,6 +2004,7 @@ class MarketDataService:
                 sources.append(str(row.source))
             bars.append({
                 "ts": ts_iso,
+                "date": _bar_day(ts, bar_mic),
                 "open": float(row.open) if row.open is not None else None,
                 "high": float(row.high) if row.high is not None else None,
                 "low": float(row.low) if row.low is not None else None,
@@ -2063,7 +2026,10 @@ class MarketDataService:
         except ValueError:
             expected = 15
         as_of_stamp = latest_as_of or _utcnow()
-        age_min = max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
+        # Daily payloads only leave get_bars after the session freshness gate,
+        # so minutes since ingest say nothing about their quality.
+        daily = (timeframe or "1d") == "1d"
+        age_min = 0.0 if daily else max(0.0, (_utcnow() - as_of_stamp).total_seconds() / 60)
         grade, _reasons = grade_quality(
             delay_minutes=expected,
             age_minutes=age_min,
@@ -2074,6 +2040,7 @@ class MarketDataService:
         provenance = build_provenance(
             source, as_of=as_of_stamp, delay_minutes=expected,
             quality_grade=grade, fallback_used=False, missing_fields=[],
+            granularity="1d" if daily else None,
         )
         return {
             "symbol": response_symbol,

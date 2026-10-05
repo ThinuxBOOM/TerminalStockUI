@@ -143,9 +143,7 @@ def test_model_and_migration_contract(isolated_db):
                 "provenance", "created_at"} <= event_cols
 
         root = Path(__file__).resolve().parents[2]
-        infra = (root / "infra" / "migrations" / "0003_alerts.sql").read_text()
-        supa = (root / "supabase" / "migrations" / "0003_alerts.sql").read_text()
-        for text in (infra, supa):
+        for text in ((root / "migrations" / "0003_alerts.sql").read_text(),):
             lowered = text.lower()
             assert "create table if not exists alerts" in lowered
             assert "create table if not exists alert_events" in lowered
@@ -156,7 +154,7 @@ def test_model_and_migration_contract(isolated_db):
             assert "on delete cascade" in lowered
             assert "ix_alerts_symbol_active" in lowered
             assert "ix_alert_events_alert" in lowered
-        assert "enable row level security" in supa.lower()
+        assert "enable row level security" in lowered
 
         # sqlite round-trip via init_db.
         db = _session()

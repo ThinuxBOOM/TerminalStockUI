@@ -1,211 +1,175 @@
-# OneMarket Analyzer — Operations (v1)
+# Operations
 
-Compose-first (no K8s in v1). Services: `postgres:16`, `redis:7` (AOF persistence),
-`backend` (FastAPI :8000), `frontend` (Vite :5173). Full layout: `README.md`.
+Running OneMarket on a single Linux server with Docker Compose. The
+database is Supabase Postgres; everything else runs on the server.
 
-## 1. Env setup
+Resources: the backend idles at ~400 MB. The weekly training job (a child
+process of the backend container) downloads ten years of S&P 500 history
+(~50 MB, cached under `MODEL_CACHE_DIR`) and peaks around 1.5-2 GB of RAM
+for ~10 minutes. The daily scoring job takes 1-2 minutes.
 
-```powershell
-cd "C:\Users\thinu\OneDrive\Pictures\Documents\STOCK ANALYSIS MAIN\onemarket-analyzer"
-copy infra\docker\.env.example infra\docker\.env
-# edit infra\docker\.env: POSTGRES_PASSWORD + SECRET_KEY at minimum.
-#   SECRET_KEY=<base64-urlsafe-32B> (any string works; it is hashed to a Fernet key).
-#   AI keys empty by default — the app must run fully AI-disabled.
-# never commit infra\docker\.env (gitignored)
-```
+## Services
 
-Key names: `GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / XAI_API_KEY` are
-compose-level placeholders. Runtime provider keys live in the encrypted server-side
-store (`backend/security/secrets.py`, Fernet over `SECRET_KEY`), set via the Provider
-Settings flow — never in code, docs, logs, audit rows, or the browser.
-
-Feature flags (live readers: `is_billing_enforced()` in `backend/auth/tiers.py`,
-`_enabled()` in `backend/market_data/providers/investopedia.py` — unset/empty = disabled):
-
-| Var | Purpose | Default |
-|---|---|---|
-| `BILLING_ENFORCED` | Master kill-switch for billing/tier gates | unset = off |
-| `INVESTOPEDIA_ENABLED` | Investopedia premarket scrape toggle (best-effort, grade C, never raises) | unset = off |
-
-## 2. Bring-up
-
-```powershell
-docker compose up --build
-docker compose config          # validate without a running daemon
-docker compose ps
-docker compose logs -f backend # follow one service
-docker compose down            # stop; add -v to drop pgdata/redisdata volumes
-```
-
-- Frontend: http://localhost:5173 · Backend: http://localhost:8000 (`/health`, `/api/...`)
-- Postgres: localhost:5432 · Redis: localhost:6379
-- Local dev without compose: see `README.md` (backend venv + `uvicorn`, frontend `npm`).
-
-Apply the schema (until Alembic autogenerate lands; rerun is safe):
-
-```powershell
-psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0001_initial.sql
-# — or inside compose:
-docker compose exec postgres psql -U onemarket -d onemarket -f /docker-entrypoint-initdb.d/0001_initial.sql
-```
-
-## 3. Backup / restore
-
-There is no `infra/scripts/` helper yet — run these `docker compose` commands directly
-(they are the normative procedure until a script lands):
-
-```powershell
-# postgres backup + restore
-docker compose exec postgres pg_dump -U onemarket onemarket | Out-File -Encoding utf8 backup-yyyyMMdd.sql
-Get-Content backup-*.sql | docker compose exec -T postgres psql -U onemarket -d onemarket
-# redis persistence snapshot (AOF + RDB on demand)
-docker compose exec redis redis-cli BGSAVE
-docker cp onemarket-redis:/data/appendonlydir ./redis-backup/
-```
-
-Backup/restore is covered by backend tests per spec §6.
-
-## 4. Retention
-
-Source: `docs/DATA_QUALITY.md` (M3/M4 appendix extends it for forecasts).
-
-| Data | Retention | Notes |
-|---|---|---|
-| Raw intraday bars | 2 years | Then downsample to daily, drop raw |
-| Daily bars + adjustments | Indefinite | Corporate-action-adjusted; point-in-time |
-| Fundamentals filings snapshots | Indefinite | Point-in-time, restatements preserved |
-| Forecasts + feature/model/data versions | Indefinite | Calibration dashboards + leakage tests |
-| Calibration snapshots (Brier/ECE/reliability) | Indefinite | Tied to the version triple |
-| Backtest fold results (incl. failures) | Indefinite | Failures kept visible, not pruned |
-| AI opinions + evidence hashes | 3 years | Token usage logged; prompts versioned |
-| Audit logs | 7 years, append-only | Hash-chained; backup-tested |
-| Redis cache | TTL 5 min – 24 h by endpoint | Provider-health state persistent (AOF) |
-
-## 4b. Scheduled market-data calls, snapshots, and compression lifecycle
-
-Daily bars move once per session, so the schedule is session-aware rather
-than frequent. All times UTC.
-
-| What runs | Where | Cadence | Why this time |
+| Service | Image | Reachable from | Role |
 |---|---|---|---|
-| `GET /api/cron/ingest` (universe bars; Alpaca-first for US when `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` resolve, else yfinance/AKShare/Stooq) | Vercel cron | `30 5 * * *` (05:30) | After the US close, after daily bars finalize; SSE/Euronext long closed |
-| `GET /api/cron/ingest?universe=sp500&shard=N&shards=10` (S&P 500 warm, 10 parallel shards) | GH Actions `sp500-ingest.yml` | `0 6 * * *` (06:00) | After the default-universe ingest; sharded so each tick fits serverless budgets |
-| `GET /api/cron/calibrate` (walk-forward snapshots) | Vercel cron | `30 6 * * *` (06:30) | After ingest lands, before the EU open |
-| `GET /api/cron/evaluate` (alerts) | GH Actions `alerts.yml` | every 15 min | Intraday cadence Vercel Hobby can't host (2-slot cap) |
-| `GET /api/cron/snapshot` (compressed 1d snapshot per universe symbol, feed-attributed in `market_snapshots.source`) | GH Actions `snapshots.yml` | hourly (`7 * * * *`) | Bounds replay-point staleness to ~1h for scoring/audits |
-| `GET /api/cron/score` (matured-forecast scoring) | GH Actions `score.yml` | `0 7 * * *` (07:00) | After calibrate lands |
-| `GET /api/cron/health` (provider health probe) | GH Actions `health.yml` | `0 8 * * *` (08:00) | After score; feeds the health dashboard |
-| `POST /api/cron/retention` `{"apply": true}` | GH Actions `retention.yml` | weekly Sun 03:00 | Windows are days-to-years wide; weekly keeps DELETE sets small |
+| `web` | `deploy/web.Dockerfile` (Caddy + built SPA) | internet, ports 80/443 | HTTPS (automatic Let's Encrypt), serves the app, proxies `/api/*` and `/health` to the backend |
+| `backend` | `backend/Dockerfile` | compose network only | FastAPI (uvicorn, one worker) |
+| `redis` | `redis:7-alpine` | compose network only | cache (bounded, not persisted) |
+| `scheduler` | `deploy/scheduler/` | compose network only | runs the data jobs below by calling `/api/cron/*` with `CRON_SECRET` |
 
-Local hosting: every row above runs on the machine itself via
-`scripts/cron/local-cron.*` (Task Scheduler on Windows with
-`install-windows-tasks.ps1`, cron on Linux with `crontab.local.example`)
-or the self-hosted-runner example
-(`.github/workflows/local-selfhosted.yml.example`) — see
-`scripts/cron/README.md`. GitHub-hosted runners cannot reach localhost,
-so keep exactly ONE scheduler active per database.
+The backend runs a single worker on purpose: rate limits, in-flight AI jobs
+and hot caches live in process memory.
 
-Snapshots compress **at capture** (smallest of gzip+json /
-delta-q100+gzip / zlib / zstd wins, ~30–60 rows/KB), so no monthly
-recompress batch exists by design — the scheduled work is the tiered
-lifecycle (`retention.py`, env-overridable via `RETENTION_*_DAYS`):
-raw (non-gzip) snapshots 30d → gzip snapshots 1y → 2y backstop; bars 5y;
-forecasts/accuracy 3y; audit 7y (head never deleted). Every scheduled
-ingest/backfill call also persists one snapshot row for exactly what it
-sourced (`source` = winning chain link); snapshot writes are best-effort
-and never break ingestion. `GET /api/cron/retention` is always a dry-run
-report; deletion needs explicit `{"apply": true}` (same as the local
-`python -m backend.observability.retention --apply`).
+## First deployment
 
-Alpaca is US-only end to end: quote chain, bar chain (skipped silently
-for `.SS/.PA/.AS/.BR`), statements are never asked of it, and the
-15-minute bars-failure cooldown keeps one slow view per outage (fast
-honest yfinance cover until it lapses).
-
-## 5. Health / audit verification
-
-```powershell
-# provider latency/error/circuit dashboard payload
-curl http://localhost:8000/api/providers/health
-# safe health probe (records a reference quote fetch; never key material)
-curl -X POST "http://localhost:8000/api/providers/health/test?provider=yfinance"
-# audit hash-chain verification (fails loudly on any gap/rewrite; exit 1)
-python -m backend.observability.audit_verify
-$env:DATABASE_URL="postgresql+psycopg://onemarket:<pw>@localhost:5432/onemarket"
-python -m backend.observability.audit_verify --database-url $env:DATABASE_URL
-# backend test slices
-python -m pytest backend/tests/test_audit.py backend/tests/test_observability.py -q
-python -m pytest backend/tests -q
-# v1 definition-of-done checker (this agent)
-python scripts/verify_v1.py
-python -m py_compile scripts/verify_v1.py
+```bash
+git clone <repo> onemarket && cd onemarket
+cp .env.example .env
+# fill in DOMAIN, SECRET_KEY, CRON_SECRET, DATABASE_URL (see .env.example)
+docker compose up -d --build
+docker compose exec backend python scripts/migrate.py baseline 0010   # only for a DB migrated by hand before
+docker compose exec backend python scripts/migrate.py up
+docker compose exec backend python scripts/create_user.py you@example.com --admin
 ```
 
-Note: `README.md` also mentions `infra/scripts/verify_audit.py` — that path does not
-exist; `python -m backend.observability.audit_verify` is the working command (tracked as
-a PARTIAL in `docs/V1_CHECKLIST.md`). The default `./onemarket.db` sqlite stub has no
-`audit_logs` table; point the verifier at Postgres (above) after applying
-`infra/migrations/0001_initial.sql`.
+- DNS: an A/AAAA record for `DOMAIN` must point at the server before the
+  first start, or Caddy cannot obtain a certificate.
+- Firewall: allow inbound 80 and 443 (TCP, plus 443/UDP for HTTP/3). Nothing
+  else needs to be open.
+- `DATABASE_URL`: use Supabase's **session pooler** (port 5432) or the direct
+  connection. The transaction pooler (6543) works for the app but not for
+  migrations (`migrate.py` refuses it).
+- A fresh Supabase project also needs the seed once:
+  `psql "$DIRECT_URL" -f migrations/seed.sql`.
+- Forecasts work straight away with the model bundled in
+  `backend/forecasting/v4/default_bundle.json`. The screener fills in after
+  the first scoring run, which starts by itself the first time someone opens
+  it (or run `docker compose exec scheduler run-job predict`).
 
-## 6. Secret rotation
+The backend refuses to start in production (`APP_ENV` unset or
+`production`) when `SECRET_KEY` or `CRON_SECRET` is missing or weak (fewer
+than 32 characters or a placeholder) or `DATABASE_URL` is empty. Read the
+error in `docker compose logs backend`.
 
-- Provider key: overwrite via the settings flow (`put(provider, "api_key", ...)`); old
-  ciphertext is discarded. No restart needed.
-- `SECRET_KEY`: set a new value in `infra/docker/.env`, restart the backend, then
-  **re-store every provider key** — ciphertext from the old key raises
-  `ValueError: cannot decrypt secret with current key` by design.
-- Never print keys: API `describe()` exposes names only; logs/audit payloads pass
-  through `redact_mapping` / `redact_string` (covered by `test_security.py`,
-  `test_audit.py`). If a key ever lands in an audit row it cannot be removed
-  (append-only hash chain) — rotate the key immediately.
+## Updating
 
-## 7. Troubleshooting
+```bash
+git pull
+docker compose up -d --build
+docker compose exec backend python scripts/migrate.py up
+```
 
-| Symptom | Likely cause / fix |
+`migrate.py status` lists applied and pending migrations. Migrations that
+drop data say so in their header: take a backup first.
+
+| Migration | What it does |
 |---|---|
-| `AI request failed` in the UI, forecast intact | No provider key stored (AI-disabled mode is supported: `ai_enabled=False → weight 0`, `backend/ai/blend.py:23-32,87-99`). Profile-label drift is RESOLVED — server normalizes (`backend/api/ai.py:72-76`), so both `Forecast Assist` (sent by `frontend/src/api/client.ts:290-296,666-673`) and `forecast_assist` (`PROFILES` in `backend/ai/prompts/__init__.py:23`) are accepted; unknown profiles 422 with `unknown AI profile` detail. Check 60s AI timeout (`AI_TIMEOUT_MS`, `frontend/src/api/client.ts:664`) vs serverless `maxDuration 60` (`vercel.json:7-11`); see `docs/V1_CHECKLIST.md` item 5 |
-| `Cross-market comparison unavailable — FX provenance missing` | Working as designed: FX stale (>24h, `MAX_AGE_HOURS = 24.0`, `backend/market_data/fx/convert.py:24`)/fallback-without-`allow_fallback`/missing (refuse `423 FX_PROVENANCE_MISSING`, `backend/api/fx.py:243-254`); pass `allow_fallback=true` explicitly to rank on fallback (`backend/api/fx.py:68-71,240-242`); see User Guide §5 |
-| Forecast/analytics show placeholder or `unavailable` | RESOLVED fetcher drift — client now calls path-style first (`GET /api/forecast/{symbol}`, `GET /api/analytics/{symbol}`, `POST /api/backtest/run`; `frontend/src/api/client.ts:461-476,513-526,577-590`) matching `backend/api/forecast.py:163`, `backend/api/analytics_api.py:159`, `backend/api/backtest.py:243`. If still stale, check backend reachability (`VITE_API_BASE_URL`) or horizon 422 (`backend/api/forecast.py:170-174`) |
-| Cron returns `401 {"detail": "unauthorized"}` | `CRON_SECRET` is set but `Authorization: Bearer <secret>` missing/wrong (constant-time compare, `backend/api/cron.py:65-80`); when unset endpoints are open (local dev). Actions workflow sends the header (`../.github/workflows/alerts.yml:33-39`); Vercel crons must also send it |
-| Cache stays in-memory despite Redis vars / `redis ... using memory fallback` warnings | `get_cache()` reads `REDIS_URL` or `UPSTASH_REDIS_URL` lazily (`backend/cache.py:87-100`); visible log lines: `REDIS_URL set but redis unavailable (%s); using memory cache` (`backend/cache.py:98`), `redis GET/SET failed, using memory fallback` (`backend/cache.py:67,74`). `/health` reports `"redis": "not-configured"` when `REDIS_URL` unset (`backend/api/health.py:37`). Set `UPSTASH_REDIS_URL` (preferred on Vercel) or `REDIS_URL` |
-| Postgres `DuplicatePreparedStatement` / pooled-connection errors on Supabase `:6543` | Transaction-mode pooler can't keep named prepared statements: engine uses `NullPool` + `connect_args = {"prepare_threshold": None}` when URL contains `pgbouncer`/`:6543` or `APP_ENV=production`/`VERCEL=1` (`backend/db/session.py:31-40,70-76`); detection-only `?pgbouncer=true` is stripped pre-connect (`backend/db/session.py:64-69`) |
-| `npm` blocked by NVM (`NVM4306`) | Run `nvm reshim` (or `nvm doctor --autofix`), then `npm install` / `npm run typecheck` in `frontend/` |
-| `market_state` shows delayed/stale instead of closed | Holiday-calendar stubs (see `docs/SSE_NOTES.md`, `docs/EURONEXT_NOTES.md`); freshness fallback is by design |
+| 0011 | drops the old billing/tier columns (destructive: back up first) |
+| 0012 | adds `model_artifacts`, `forecast_scores`, `cross_sections` for forecast engine v4 |
+| 0013 | moves benchmark indices (^FCHI, ^AEX, ^BFX) to their own venue, fixes instrument time zones, and de-duplicates any daily bars stamped at 00:00 UTC |
 
-## 8. Admin bootstrap + rotation (V2 auth foundation)
+## Accounts
 
-One-off platinum access without paying: `scripts/bootstrap_admin.py` upserts
-`users(email, password_hash, is_admin=true, tier='platinum',
-subscription_status='comped')` + an `admin.bootstrapped` audit row
-(actor `'system'`, payload carries tier/status only — never secrets). Why
-`comped` + `is_admin` instead of a fake Stripe row: Stripe stays the source of
-truth for payers only — no fake `stripe_subscription_id`, no webhook spoof, no
-charge/refund churn. Entitlement = `if user.is_admin: allow all`.
+Sign-up is closed unless `ALLOW_REGISTRATION=true`. Manage accounts with:
 
-```powershell
-# 1. Schema first (DIRECT :5432 URL, never :6543 pooler):
-psql "postgresql://onemarket:<pw>@localhost:5432/onemarket" -f infra\migrations\0008_users_auth.sql
-# 2. Generate a bcrypt hash OFFLINE (preferred — hash travels, password never does):
-python -c "import bcrypt; print(bcrypt.hashpw(b'<password>', bcrypt.gensalt()).decode())"
-# 3. Set env (never commit real values; infra\docker\.env is gitignored):
-$env:ADMIN_EMAIL = "admin@example.com"
-$env:ADMIN_PASSWORD_HASH = '<bcrypt $2b$ string from step 2>'
-# 4. Bootstrap (idempotent upsert — safe to re-run):
-python scripts/bootstrap_admin.py
-#    alt without a prebuilt hash: set $env:ADMIN_PASSWORD (or answer the
-#    getpass prompt); it is hashed in memory only, never stored or logged.
+```bash
+docker compose exec backend python scripts/create_user.py friend@example.com
+docker compose exec backend python scripts/create_user.py friend@example.com --reset-password
+docker compose exec backend python scripts/create_user.py friend@example.com --admin      # or --no-admin
 ```
 
-Verify: the script prints `{"ok": true, "tier": "platinum",
-"subscription_status": "comped", "is_admin": true, ...}`; confirm the row and
-audit (`SELECT tier, subscription_status, is_admin FROM users WHERE email=...`;
-`SELECT action FROM audit_logs WHERE action='admin.bootstrapped' ORDER BY id
-DESC LIMIT 1`). App login (`GET /api/auth/me` showing
-`{tier:'platinum', is_admin:true, subscription_status:'comped'}`) arrives with
-the Phase 2 auth routes; until then the DB/audit rows are the check.
+Resetting a password or changing the admin flag signs that user out
+everywhere. Admins manage AI provider keys and budgets on the Data Health
+page; those settings apply to every user.
 
-Rotation: set a new `ADMIN_PASSWORD_HASH` in `infra\docker\.env` + rerun the
-script (upsert overwrites the hash, re-asserts platinum/comped/is_admin), then
-restart the backend. Never print keys/hashes: logs and audit payloads pass
-through `redact_mapping`; if a secret ever lands in an audit row it cannot be
-removed (append-only hash chain) — rotate immediately (same rule as §6).
+## Scheduled jobs
+
+`deploy/scheduler/crontab` (UTC). Output goes to `docker compose logs scheduler`.
+
+| Job | Schedule | What it does |
+|---|---|---|
+| `evaluate` | every 15 min | evaluates alerts |
+| `snapshot` | hourly at :07 | stores a compressed daily-bar snapshot per universe symbol |
+| `ingest` | 05:30 daily | refreshes daily bars for the default universe |
+| `sp500` | 06:00 daily | refreshes S&P 500 daily bars in 10 shards |
+| `predict` | 06:30 daily | scores every instrument for every horizon into `forecast_scores` (screener, signals, watchlist ranks) and stores the day's cross-section; runs as a child process |
+| `train` | Saturdays 02:00 | retrains forecast engine v4 on ten years of S&P 500 history, re-runs the walk-forward evaluation, stores and activates the new bundle, then rescores; child process |
+| `score` | 07:00 daily | scores matured forecasts against realized prices |
+| `health` | 08:00 daily | pings each provider and records health |
+| `retention` | Sundays 03:00 | purges rows past their retention window |
+
+Run one by hand: `docker compose exec scheduler run-job ingest`. `predict`
+and `train` return immediately and log their progress in
+`docker compose logs backend`; only one of each runs at a time.
+
+### Forecast model
+
+The active model, its training date and its walk-forward record are on the
+Model Lab page and at `GET /api/forecast/model`. Each weekly retrain stores
+a new row in `model_artifacts` and activates it; older bundles stay in the
+table. To roll back, set `active` on the previous row (and clear it on the
+newer one); the backend picks the change up within five minutes.
+
+Train by hand (writes a file, does not touch the database):
+
+```bash
+docker compose exec backend python scripts/train_models.py --out /tmp/bundle.json
+```
+
+Retention windows are set only through `RETENTION_<DATASET>_DAYS` in `.env`
+(defaults in `backend/observability/retention.py`, never below 1 day). The
+HTTP endpoint cannot change them.
+
+## Backups and restore
+
+Supabase keeps its own daily backups (plan-dependent). For a copy you
+control:
+
+```bash
+scripts/backup.sh     # writes backups/onemarket-<UTC stamp>.dump and verifies it is readable
+```
+
+Restore into a database (this overwrites matching objects):
+
+```bash
+docker run --rm -i -v "$PWD/backups:/backups" postgres:17-alpine \
+  pg_restore --clean --if-exists --no-owner -d "$URL" /backups/<file>.dump
+```
+
+Redis holds only cache data and needs no backup.
+
+## Secret rotation
+
+| Secret | Effect of rotating |
+|---|---|
+| `SECRET_KEY` | every user is signed out; AI provider keys stored through the UI can no longer be decrypted and must be re-entered |
+| `CRON_SECRET` | none, the backend and scheduler read it from the same `.env` |
+| Supabase password | update `DATABASE_URL` |
+
+After editing `.env`: `docker compose up -d` (recreates the affected containers).
+
+## Audit log
+
+`audit_logs` is an append-only hash chain. Verify it with:
+
+```bash
+docker compose exec backend python -m backend.observability.audit_verify
+```
+
+Exit status 1 means a gap or a rewritten row. The chain is stored in the same
+database, so it detects accidental edits, not an attacker with write access.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| backend exits with `SECRET_KEY is missing or weak` / `CRON_SECRET ...` / `DATABASE_URL is required` | set it in `.env` (`openssl rand -hex 32` for secrets), then `docker compose up -d` |
+| Caddy logs certificate errors | DNS does not point at this server yet, or port 80 is blocked |
+| scheduler logs `FAILED(22) ... 401` | backend and scheduler disagree on `CRON_SECRET`; recreate both with `docker compose up -d` |
+| a chart or quote shows "unavailable" | the upstream source returned no live data; the app refuses to show stale data. Retry later or check `docker compose logs backend` |
+| `migrate.py` refuses the URL | you used the :6543 transaction pooler; use the session pooler or direct URL |
+| `429 rate limit exceeded` | more than `RATE_LIMIT_PER_MIN` API calls (or `AUTH_RATE_LIMIT_PER_MIN` logins, `REFRESH_RATE_LIMIT_PER_MIN` token refreshes) per minute from one address |
+| `429 daily AI limit reached` | the user hit `AI_DAILY_CALLS_PER_USER` in the last 24 h |
+| screener says it is scoring for the first time | the first `predict` run is in progress (1-2 min); it refreshes by itself |
+| `train` ends with exit code 2 | the history download failed (network or Yahoo throttling); the previous model stays active. Rerun later |
+| a stock's forecast says it needs 253 daily bars | fewer than a year of daily bars is stored; run `ingest` for it or wait for the nightly job |

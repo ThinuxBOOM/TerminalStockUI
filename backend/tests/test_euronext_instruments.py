@@ -13,6 +13,7 @@ from backend.instruments.calendars import is_holiday, is_trading_day, market_sta
 from backend.instruments.registry import InstrumentRegistry
 from backend.instruments.search import search_instruments
 from backend.market_data.health import market_state
+from backend.tests.auth_helpers import inject_admin_auth
 
 PAR = ZoneInfo("Europe/Paris")
 AMS = ZoneInfo("Europe/Amsterdam")
@@ -258,7 +259,7 @@ def test_us_sse_unaffected():
 
 def test_http_resolve_surfaces_market_state_currency_exchange():
     reset_deps()
-    client = TestClient(create_app())
+    client = TestClient(inject_admin_auth(create_app()))
     for symbol, mic in (("MC.PA", "XPAR"), ("ASML.AS", "XAMS"), ("UCB.BR", "XBRU")):
         body = client.get("/api/instruments/resolve", params={"symbol": symbol}).json()
         assert body["instrument"]["exchange_mic"] == mic
@@ -274,7 +275,7 @@ def test_http_resolve_surfaces_market_state_currency_exchange():
 
 def test_http_quote_euronext_currency_and_state():
     reset_deps()
-    client = TestClient(create_app())
+    client = TestClient(inject_admin_auth(create_app()))
     resp = client.get("/api/market_data/quote", params={"symbol": "MC.PA"})
     assert resp.status_code == 200, resp.text
     body = resp.json()

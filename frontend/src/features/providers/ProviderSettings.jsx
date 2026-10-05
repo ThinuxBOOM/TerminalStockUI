@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "../../hooks/useAuth";
 import {
   AI_PROFILES,
   api,
@@ -85,6 +86,7 @@ function freshnessFor(lastCheck, latencyMs) {
 }
 
 function ProviderSettings() {
+  const { isAdmin } = useAuth();
   const [provider, setProvider] = useState("gemini");
   const [model, setModel] = useState("gemini-3.7-flash");
   const [apiKey, setApiKey] = useState("");
@@ -108,12 +110,14 @@ function ProviderSettings() {
   const keyStatus = useQuery({
     queryKey: ["provider-keys-status"],
     queryFn: getProviderKeysStatus,
+    enabled: isAdmin,
     retry: false,
     staleTime: 30000,
   });
   const savedBudgets = useQuery({
     queryKey: ["provider-budgets"],
     queryFn: getProviderBudgets,
+    enabled: isAdmin,
     retry: false,
     staleTime: 60000,
   });
@@ -300,83 +304,89 @@ function ProviderSettings() {
         )}
       </section>
 
-      <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
-        <section className="term-panel min-w-0 p-4" aria-labelledby="ps-keys">
-          <h2 id="ps-keys" className="term-label">Provider keys (encrypted at rest, never exposed)</h2>
-          <label className="mt-2 block text-xs text-term-muted" htmlFor="ps-provider">Provider</label>
-          <select id="ps-provider" className="term-input mt-1 w-full" value={provider} onChange={(e) => setProvider(e.target.value)}>
-            {PROVIDER_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-          </select>
-          <label className="mt-2 block text-xs text-term-muted" htmlFor="ps-model">Model</label>
-          <input id="ps-model" className="term-input mt-1 w-full" value={model} onChange={(e) => setModel(e.target.value)} placeholder="gemini-3.7-flash" spellCheck={false} />
-          <label className="mt-2 block text-xs text-term-muted" htmlFor="ps-key">API key</label>
-          <input id="ps-key" className="term-input mt-1 w-full" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="paste key — sent once, stored encrypted" autoComplete="off" />
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button className="term-btn text-xs" type="button" disabled={!apiKey || save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? "SAVING…" : "SAVE KEY"}
-            </button>
-            <button className="term-btn-ghost text-xs" type="button" disabled={test.isPending} onClick={() => test.mutate()}>
-              {test.isPending ? "TESTING…" : "⟳ HEALTH TEST"}
-            </button>
-          </div>
-          {save.isSuccess && <p className="mt-2 text-xs text-term-green">Key stored (server confirms receipt only).</p>}
-          {save.isError && <p className="mt-2 text-xs text-term-red" role="alert">Save failed — backend unreachable or rejected.</p>}
-          {keyStatus.isLoading && <p className="mt-2 text-xs text-term-muted" role="status">loading key status…</p>}
-          {keyStatus.isError && <p className="mt-2 text-xs text-term-amber" role="status">⚠ key status unavailable ({keyStatus.error instanceof Error ? keyStatus.error.message : "backend unreachable"}) — keys can still be saved.</p>}
-          {!keyStatus.isLoading && !keyStatus.isError && (!keyStatus.data || keyStatus.data.length === 0) && (
-            <p className="mt-2 text-xs text-term-muted" role="status">No provider keys configured yet.</p>
-          )}
-          {keyStatus.data && keyStatus.data.length > 0 && (
-            <ul className="mt-2 space-y-1 text-xs" aria-label="Configured providers">
-              {keyStatus.data.map((k) => (
-                <li key={k.provider} className="flex justify-between gap-2 border-b border-term-border pb-1">
-                  <span className="text-term-muted">{k.provider}</span>
-                  <span className={k.configured ? "text-term-green" : "text-term-muted"}>
-                    {k.configured ? `✓ configured${k.model ? ` · ${k.model}` : ""}` : "○ no key"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {test.data && (
-            <p className={`mt-2 text-xs ${test.data.ok ? "text-term-green" : "text-term-red"}`}>
-              Test: {test.data.ok ? "✓ OK" : "✕ FAIL"} {test.data.latency_ms !== undefined ? `· ${test.data.latency_ms}ms` : ""} {test.data.message ?? ""}
-            </p>
-          )}
-          {test.isError && <p className="mt-2 text-xs text-term-red">Health test failed to run ({test.error instanceof Error ? test.error.message : "backend unreachable"}).</p>}
-        </section>
+      {isAdmin ? (
+        <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
+          <section className="term-panel min-w-0 p-4" aria-labelledby="ps-keys">
+            <h2 id="ps-keys" className="term-label">Provider keys (encrypted at rest, never exposed)</h2>
+            <label className="mt-2 block text-xs text-term-muted" htmlFor="ps-provider">Provider</label>
+            <select id="ps-provider" className="term-input mt-1 w-full" value={provider} onChange={(e) => setProvider(e.target.value)}>
+              {PROVIDER_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+            </select>
+            <label className="mt-2 block text-xs text-term-muted" htmlFor="ps-model">Model</label>
+            <input id="ps-model" className="term-input mt-1 w-full" value={model} onChange={(e) => setModel(e.target.value)} placeholder="gemini-3.7-flash" spellCheck={false} />
+            <label className="mt-2 block text-xs text-term-muted" htmlFor="ps-key">API key</label>
+            <input id="ps-key" className="term-input mt-1 w-full" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="paste key — sent once, stored encrypted" autoComplete="off" />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="term-btn text-xs" type="button" disabled={!apiKey || save.isPending} onClick={() => save.mutate()}>
+                {save.isPending ? "SAVING…" : "SAVE KEY"}
+              </button>
+              <button className="term-btn-ghost text-xs" type="button" disabled={test.isPending} onClick={() => test.mutate()}>
+                {test.isPending ? "TESTING…" : "⟳ HEALTH TEST"}
+              </button>
+            </div>
+            {save.isSuccess && <p className="mt-2 text-xs text-term-green">Key stored (server confirms receipt only).</p>}
+            {save.isError && <p className="mt-2 text-xs text-term-red" role="alert">Save failed — backend unreachable or rejected.</p>}
+            {keyStatus.isLoading && <p className="mt-2 text-xs text-term-muted" role="status">loading key status…</p>}
+            {keyStatus.isError && <p className="mt-2 text-xs text-term-amber" role="status">⚠ key status unavailable ({keyStatus.error instanceof Error ? keyStatus.error.message : "backend unreachable"}) — keys can still be saved.</p>}
+            {!keyStatus.isLoading && !keyStatus.isError && (!keyStatus.data || keyStatus.data.length === 0) && (
+              <p className="mt-2 text-xs text-term-muted" role="status">No provider keys configured yet.</p>
+            )}
+            {keyStatus.data && keyStatus.data.length > 0 && (
+              <ul className="mt-2 space-y-1 text-xs" aria-label="Configured providers">
+                {keyStatus.data.map((k) => (
+                  <li key={k.provider} className="flex justify-between gap-2 border-b border-term-border pb-1">
+                    <span className="text-term-muted">{k.provider}</span>
+                    <span className={k.configured ? "text-term-green" : "text-term-muted"}>
+                      {k.configured ? `✓ configured${k.model ? ` · ${k.model}` : ""}` : "○ no key"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {test.data && (
+              <p className={`mt-2 text-xs ${test.data.ok ? "text-term-green" : "text-term-red"}`}>
+                Test: {test.data.ok ? "✓ OK" : "✕ FAIL"} {test.data.latency_ms !== undefined ? `· ${test.data.latency_ms}ms` : ""} {test.data.message ?? ""}
+              </p>
+            )}
+            {test.isError && <p className="mt-2 text-xs text-term-red">Health test failed to run ({test.error instanceof Error ? test.error.message : "backend unreachable"}).</p>}
+          </section>
 
-        <section className="term-panel min-w-0 p-4" aria-labelledby="ps-profiles">
-          <h2 id="ps-profiles" className="term-label">Task profiles (AI weight capped, fixed for v1)</h2>
-          <div className="mt-2 space-y-1" role="radiogroup" aria-label="AI task profile">
-            {AI_PROFILES.map((p) => (
-              <label key={p} className="flex cursor-pointer items-center gap-2 text-sm">
-                <input type="radio" name="profile" checked={profile === p} onChange={() => pickProfile(p)} />
-                <span>{p}</span>
-                <span className="text-[10px] text-term-muted">· {PROFILE_HINTS[p]}</span>
-              </label>
-            ))}
-          </div>
-          <label className="mt-4 block text-xs text-term-muted" htmlFor="ps-budget">Monthly budget cap (USD) · {provider}</label>
-          <div className="mt-1 flex gap-2">
-            <input id="ps-budget" className="term-input w-32" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="25" />
-            <button className="term-btn-ghost text-xs" type="button" disabled={saveBudget.isPending} onClick={() => saveBudget.mutate()}>
-              {saveBudget.isPending ? "SAVING…" : "SAVE BUDGET"}
-            </button>
-          </div>
-          {savedBudgets.isLoading && <p className="mt-1 text-xs text-term-muted" role="status">loading saved budgets…</p>}
-          {savedBudgets.isError && <p className="mt-1 text-xs text-term-amber" role="status">⚠ saved budgets unavailable ({savedBudgets.error instanceof Error ? savedBudgets.error.message : "backend unreachable"}).</p>}
-          {saveBudget.isSuccess && <p className="mt-1 text-xs text-term-green">Budget saved.</p>}
-          {savedBudgets.data && savedBudgets.data[provider] !== undefined && (
-            <p className="term-num mt-1 text-xs text-term-muted">Saved cap for {provider}: ${savedBudgets.data[provider]} USD/mo.</p>
-          )}
-          {saveBudget.isError && (
-            String(saveBudget.error?.message ?? "") === "invalid budget"
-              ? <p className="mt-1 text-xs text-term-amber">Enter a non-negative number.</p>
-              : <p className="mt-1 text-xs text-term-amber">Budget endpoint not confirmed by backend — not saved; value retained in this field only ({budget} USD).</p>
-          )}
-        </section>
-      </div>
+          <section className="term-panel min-w-0 p-4" aria-labelledby="ps-profiles">
+            <h2 id="ps-profiles" className="term-label">Task profiles (AI weight capped, fixed for v1)</h2>
+            <div className="mt-2 space-y-1" role="radiogroup" aria-label="AI task profile">
+              {AI_PROFILES.map((p) => (
+                <label key={p} className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input type="radio" name="profile" checked={profile === p} onChange={() => pickProfile(p)} />
+                  <span>{p}</span>
+                  <span className="text-[10px] text-term-muted">· {PROFILE_HINTS[p]}</span>
+                </label>
+              ))}
+            </div>
+            <label className="mt-4 block text-xs text-term-muted" htmlFor="ps-budget">Monthly budget cap (USD) · {provider}</label>
+            <div className="mt-1 flex gap-2">
+              <input id="ps-budget" className="term-input w-32" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="25" />
+              <button className="term-btn-ghost text-xs" type="button" disabled={saveBudget.isPending} onClick={() => saveBudget.mutate()}>
+                {saveBudget.isPending ? "SAVING…" : "SAVE BUDGET"}
+              </button>
+            </div>
+            {savedBudgets.isLoading && <p className="mt-1 text-xs text-term-muted" role="status">loading saved budgets…</p>}
+            {savedBudgets.isError && <p className="mt-1 text-xs text-term-amber" role="status">⚠ saved budgets unavailable ({savedBudgets.error instanceof Error ? savedBudgets.error.message : "backend unreachable"}).</p>}
+            {saveBudget.isSuccess && <p className="mt-1 text-xs text-term-green">Budget saved.</p>}
+            {savedBudgets.data && savedBudgets.data[provider] !== undefined && (
+              <p className="term-num mt-1 text-xs text-term-muted">Saved cap for {provider}: ${savedBudgets.data[provider]} USD/mo.</p>
+            )}
+            {saveBudget.isError && (
+              String(saveBudget.error?.message ?? "") === "invalid budget"
+                ? <p className="mt-1 text-xs text-term-amber">Enter a non-negative number.</p>
+                : <p className="mt-1 text-xs text-term-amber">Budget endpoint not confirmed by backend — not saved; value retained in this field only ({budget} USD).</p>
+            )}
+          </section>
+        </div>
+      ) : (
+        <p className="term-panel p-4 text-xs text-term-muted">
+          Provider keys, AI profiles and budgets are managed by the server administrator.
+        </p>
+      )}
 
       <section className="term-panel min-w-0 p-4" aria-labelledby="ps-perf">
         <div className="flex flex-wrap items-center justify-between gap-2">

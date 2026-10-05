@@ -6,7 +6,9 @@ const ProvenanceSchema = z.object({
   delay_minutes: z.number(),
   quality_grade: z.string(),
   fallback_used: z.boolean(),
-  missing_fields: z.array(z.string())
+  missing_fields: z.array(z.string()),
+  // "1d": built from daily bars; current when it covers the last session.
+  granularity: z.string().nullable().optional()
 });
 const InstrumentSchema = z.object({
   instrument_id: z.string().optional(),
@@ -37,6 +39,7 @@ function deriveMarketState(p, explicit) {
   const f = freshnessOf(p);
   if (f === "live") return "open";
   if (f === "stale") return "stale";
+  if (f === "daily") return "daily";
   return "delayed";
 }
 function displaySymbol(r) {
@@ -52,6 +55,8 @@ const QuoteSchema = z.object({
   change: z.number().optional(),
   change_pct: z.number().optional(),
   currency: z.string().optional(),
+  // When the price was set upstream; provenance.as_of is when it was fetched.
+  price_time: z.string().nullable().optional(),
   market_state: z.enum(["open", "closed", "lunch", "delayed", "stale"]),
   instrument: InstrumentSchema.passthrough().nullable().optional(),
   ambiguous: z.boolean().optional().default(false),
@@ -65,105 +70,58 @@ const HealthSchema = z.object({
     z.object({
       name: z.string(),
       status: z.string(),
-      latency_ms: z.number().optional(),
-      last_check: z.string().optional()
+      // Providers that have not been called yet report null for both.
+      latency_ms: z.number().nullable().optional(),
+      last_check: z.string().nullable().optional()
     })
   ).optional(),
   provenance: ProvenanceSchema.optional()
 });
-import { resolveApiBaseUrl } from "./baseUrl";
-export { API_BASE_OVERRIDE_KEY, clearApiBaseUrlOverride, resolveApiBaseUrl, resolveApiBaseUrlWithSource, setApiBaseUrlOverride } from "./baseUrl";
-function resolveBaseUrl() {
-  // Thin wrapper kept for backwards compatibility — the real priority chain
-  // (?api= > localStorage > public/config.js > VITE_API_BASE_URL > default)
-  // lives in ./baseUrl so every api module resolves identically.
-  return resolveApiBaseUrl();
-}
-const BASE_URL = resolveBaseUrl();
+import { API_BASE_URL } from "./baseUrl";
 const api = axios.create({
-  baseURL: BASE_URL,
+  baseURL: API_BASE_URL,
   timeout: 6e4,
-  headers: { "Content-Type": "application/json" }
+  headers: { "Content-Type": "application/json" },
+  // Sends the httpOnly refresh cookie on split-origin setups too.
+  withCredentials: true
 });
-// V2 auth wiring (additive only — no existing call path changes).
-// ./auth.js registers the live Bearer source via setAuthTokenProvider (kept
-// behind a setter to avoid a client<->auth import cycle). 401 -> /login,
-// 402 -> `onemarket:upgrade-required` upsell event (UpgradeModal listens).
-// All branches are window-guarded so node/vitest imports never throw.
-let authTokenProvider = null;
-let authErrorHandlers = {};
-function setAuthTokenProvider(fn) {
-  authTokenProvider = typeof fn === "function" ? fn : null;
+// Auth wiring. ./auth.js owns the access token (memory only) and registers
+// these hooks; keeping them behind a setter avoids a client<->auth import
+// cycle. A 401 triggers one silent refresh + retry; if that fails the
+// session is over and the app routes to /login.
+let authHooks = { getToken: () => null, refresh: null, onSessionExpired: null };
+function configureAuth(hooks) {
+  authHooks = { ...authHooks, ...(hooks ?? {}) };
 }
-function setAuthErrorHandlers(h) {
-  authErrorHandlers = h && typeof h === "object" ? h : {};
-}
-function readAuthToken() {
-  try {
-    return authTokenProvider ? authTokenProvider() : null;
-  } catch {
-    return null;
-  }
-}
-function defaultUnauthorized() {
-  try {
-    if (typeof window !== "undefined" && window.location) {
-      const path = window.location.pathname || "";
-      if (path.startsWith("/login")) return;
-      // Same guest guard as auth.js: no token -> no force redirect.
-      if (!readAuthToken()) return;
-      window.location.assign("/login");
-    }
-  } catch {
-    // never throw out of an interceptor
-  }
-}
-function defaultUpgradeRequired(err) {
-  try {
-    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-      let detail = null;
-      try {
-        detail = err?.response?.data ?? null;
-      } catch {
-        detail = null;
-      }
-      window.dispatchEvent(
-        new CustomEvent("onemarket:upgrade-required", { detail })
-      );
-    }
-  } catch {
-    // never throw out of an interceptor
-  }
-}
+const AUTH_ENDPOINT = /\/api\/auth\/(login|register|refresh|logout|config)$/;
 api.interceptors.request.use((config) => {
-  try {
-    const token = readAuthToken();
-    if (typeof token === "string" && token !== "") {
-      config.headers = config.headers ?? {};
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-  } catch {
-    // auth must never break a request
+  const token = authHooks.getToken?.();
+  if (typeof token === "string" && token !== "") {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
 api.interceptors.response.use(
   (response) => response,
-  (err) => {
-    try {
-      const status = err?.response?.status;
-      if (status === 401) {
-        const fn = authErrorHandlers.onUnauthorized;
-        if (typeof fn === "function") fn(err);
-        else defaultUnauthorized();
-      } else if (status === 402) {
-        const fn = authErrorHandlers.onUpgradeRequired;
-        if (typeof fn === "function") fn(err);
-        else defaultUpgradeRequired(err);
-      }
-    } catch {
-      // error routing must never mask the original failure
+  async (err) => {
+    const cfg = err?.config;
+    if (err?.response?.status !== 401 || !cfg || cfg.__authRetried || AUTH_ENDPOINT.test(cfg.url ?? "")) {
+      return Promise.reject(err);
     }
+    let token = null;
+    try {
+      token = typeof authHooks.refresh === "function" ? await authHooks.refresh() : null;
+    } catch {
+      token = null;
+    }
+    if (token) {
+      cfg.__authRetried = true;
+      cfg.headers = cfg.headers ?? {};
+      cfg.headers.Authorization = `Bearer ${token}`;
+      return api.request(cfg);
+    }
+    authHooks.onSessionExpired?.();
     return Promise.reject(err);
   }
 );
@@ -179,41 +137,10 @@ function isEndpointMissingError(err) {
   const s = httpStatus(err);
   return s === 404 || s === 501;
 }
-// PHASE 3: persistent tier-locked UI. 402 = backend require_tier denial.
-// Must stay a pure httpStatus check so callers can branch BEFORE generic
-// ErrorState without affecting 423/502/404 handling. Never throws.
-function isUpgradeRequiredError(err) {
-  try {
-    return httpStatus(err) === 402;
-  } catch {
-    return false;
-  }
-}
-// Normalize a 402 payload into panel copy. Backend sends
-// { upgrade_required, min_tier, tier, message/detail/feature }.
-// Returns { minTier, feature, tier } — tier is the caller's current tier
-// when the backend echoes it, else null (caller falls back to useAuth).
-// Never throws; always returns display-safe strings.
-function upgradeInfoFromError(err, fallbackFeature = "This feature") {
-  const fallback = String(fallbackFeature ?? "This feature") || "This feature";
-  try {
-    const data = err?.response?.data;
-    const obj = data && typeof data === "object" ? data : {};
-    const minTierRaw = obj.min_tier ?? obj.minTier ?? "silver";
-    const featureRaw = obj.feature ?? obj.message ?? obj.detail ?? fallback;
-    const tierRaw = obj.tier ?? obj.current_tier ?? obj.currentTier ?? null;
-    const minTier = String(minTierRaw ?? "silver").trim() || "silver";
-    const featureStr = String(featureRaw ?? fallback).trim() || fallback;
-    const tier = tierRaw === null || tierRaw === undefined || tierRaw === "" ? null : String(tierRaw).trim() || null;
-    return { minTier, feature: featureStr, tier };
-  } catch {
-    return { minTier: "silver", feature: fallback, tier: null };
-  }
-}
 // Shared backend-detail extractor: prefers the FastAPI {detail} payload over
-// the generic axios message, so 502s render the throttle/warmup hint instead
-// of "Request failed with status code 502". Gateway HTML (Vercel cold
-// start/timeout, no JSON) and timeouts get friendly text. Never throws.
+// the generic axios message, so 502s render the backend's reason instead of
+// "Request failed with status code 502". Proxy HTML error pages and timeouts
+// get friendly text. Never throws.
 function extractBackendDetail(err, fallback = "request failed") {
   const e = err;
   const status = httpStatus(e);
@@ -222,7 +149,7 @@ function extractBackendDetail(err, fallback = "request failed") {
     if (typeof data === "string" && data.trim() !== "") {
       const t = data.trim();
       if (t.startsWith("<") || t.length > 2000) {
-        return `Gateway ${status ?? "error"} (cold start/timeout) — retry; warm cache makes repeats fast`;
+        return `Gateway ${status ?? "error"} — the backend did not answer; retry shortly`;
       }
       return t.slice(0, 300);
     }
@@ -240,13 +167,16 @@ function extractBackendDetail(err, fallback = "request failed") {
     // fall through to message below
   }
   if (e?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(String(e?.message ?? ""))) {
-    return "Request timed out (cold start) — retry; warm cache makes repeats fast";
+    return "Request timed out — retry; repeated requests are served from cache";
   }
   if (e instanceof Error && e.message) return e.message;
   if (typeof e?.message === "string" && e.message) return e.message;
   return fallback;
 }
 const inflight = /* @__PURE__ */ new Map();
+function isCancellation(err) {
+  return err?.name === "CanceledError" || err?.name === "AbortError" || err?.code === "ERR_CANCELED";
+}
 function coalesceInflight(key, fn, signal) {
   // Abort-safe: callers with different AbortSignals must never share one
   // caller's signal (aborting one component would abort the other, and the
@@ -284,7 +214,10 @@ function coalesceInflight(key, fn, signal) {
     // fall through to coalesced path
   }
   const hit = inflight.get(key);
-  if (hit) return hit;
+  // Most fetch fns close over their caller's AbortSignal. If the first caller
+  // unmounts (React StrictMode does this on every dev mount) its abort must
+  // not fail everyone who joined: a joiner re-runs its own request instead.
+  if (hit) return hit.catch((err) => (isCancellation(err) ? fn() : Promise.reject(err)));
   const p = fn().finally(() => {
     if (inflight.get(key) === p) inflight.delete(key);
   });
@@ -324,6 +257,7 @@ function normalizeQuote(raw) {
     change: (() => { const v = r?.change !== void 0 && r?.change !== null ? Number(r.change) : void 0; return Number.isFinite(v) ? v : void 0; })(),
     change_pct: (() => { const v = r?.change_pct !== void 0 && r?.change_pct !== null ? Number(r.change_pct) : void 0; return Number.isFinite(v) ? v : void 0; })(),
     currency: r?.currency ?? instrument?.currency ?? void 0,
+    price_time: typeof r?.price_time === "string" ? r.price_time : null,
     market_state,
     instrument,
     ambiguous: Boolean(r?.ambiguous ?? false),
@@ -440,6 +374,9 @@ async function getQuote(symbol, market, opts) {
 }
 function freshnessOf(p) {
   if (p.fallback_used) return "cached";
+  // Daily-bar data is served only when it covers the last completed session
+  // (backend freshness gate), so minutes since ingest are not staleness.
+  if (p.granularity === "1d") return "daily";
   if (p.delay_minutes < 0) return "stale";
   let effective = p.delay_minutes;
   const asOfMs = Date.parse(p.as_of);
@@ -454,39 +391,11 @@ function freshnessOf(p) {
 const AI_WEIGHT_CAP = 0.2;
 const DISAGREE_TOL = 0.15;
 const AI_DISABLED_LABEL = "AI DISABLED (ai_weight=0)";
-function sourceLabelForForecast(f) {
-  return "SOURCE: DETERMINISTIC";
-}
 function sourceLabelForAIOpinion(opinion, aiWeight) {
   const w = Number(aiWeight);
   if (!(w > 0)) return AI_DISABLED_LABEL;
   const provider = String(opinion?.provider ?? "").trim() || "unknown-provider";
   return `SOURCE: AI ${provider}`;
-}
-function clampAIWeight(w) {
-  const n = Number(w);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(AI_WEIGHT_CAP, n);
-}
-function blendProbs(quantProb, aiProb, aiWeight) {
-  // Explicit null/undefined/"" guards: Number(null) === 0 would silently
-  // drag the blend toward zero on malformed AI. Missing AI -> quant alone.
-  const q = quantProb === null || quantProb === void 0 || quantProb === "" ? Number.NaN : Number(quantProb);
-  const a = aiProb === null || aiProb === void 0 || aiProb === "" ? Number.NaN : Number(aiProb);
-  const w = clampAIWeight(aiWeight);
-  if (!Number.isFinite(q)) return null;
-  // Never override quant with AI: AI can at most nudge the blend w (<=20%)
-  // of the way from quant toward the AI figure. Malformed AI -> quant alone.
-  if (!Number.isFinite(a) || !(w > 0)) return q;
-  return (1 - w) * q + w * a;
-}
-function isAIDisabled(aiWeight) {
-  return !(Number(aiWeight) > 0);
-}
-function auditForecastsUrl(symbol, limit = 20) {
-  const sym = normalizeSymbolParam(symbol);
-  const n = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 20;
-  return `/api/audit/forecasts?symbol=${encodeURIComponent(sym)}&limit=${n}`;
 }
 const AI_PROFILES = [
   "Quick Insight",
@@ -494,17 +403,6 @@ const AI_PROFILES = [
   "Forecast Assist",
   "Report"
 ];
-// Tier-gated UI mapping (future-proof stub — NOT enforced).
-// Free -> Deep Research locked; Silver -> Deep Research unlocked, Report locked;
-// Gold -> all unlocked, higher limits; Platinum -> all unlocked + priority.
-// UI must always render with `locked=false` for now (no gating).
-const PLAN_TIERS = ["Free", "Silver", "Gold", "Platinum"];
-const TIER_FEATURES = {
-  "Deep Research": { minTier: "Silver", lockedIcon: "🔒" },
-  Report: { minTier: "Silver", lockedIcon: "🔒" },
-  "Quick Insight": { minTier: "Free", lockedIcon: "🔒" },
-  "Forecast Assist": { minTier: "Free", lockedIcon: "🔒" }
-};
 const FORECAST_HORIZONS = [1, 7, 14, 21];
 function normalizeProvenance(raw, sourceFallback) {
   const r = raw ?? {};
@@ -532,69 +430,6 @@ function num(v, fallback = Number.NaN) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
-const ReliabilityRowSchema = z.object({
-  bin_low: z.number(),
-  bin_high: z.number(),
-  count: z.number(),
-  mean_predicted: z.number().nullable().optional(),
-  fraction_positive: z.number().nullable().optional()
-}).passthrough();
-function normalizeReliability(v) {
-  if (!Array.isArray(v)) return [];
-  const out = [];
-  for (const row of v) {
-    const parsed = ReliabilityRowSchema.safeParse(row);
-    if (parsed.success) out.push(parsed.data);
-  }
-  return out;
-}
-const ForecastSchema = z.object({
-  symbol: z.string(),
-  horizon_days: z.number().optional().default(21),
-  label: z.string().optional().default(""),
-  probability: z.number().min(0).max(1),
-  confidence: z.string().optional().default("Unknown"),
-  quality_grade: z.string().optional().default("U"),
-  provider: z.string().optional().default("deterministic-engine"),
-  why: z.array(z.string()).optional().default([]),
-  risks: z.array(z.string()).optional().default([]),
-  evidence_ids: z.array(z.string()).optional().default([]),
-  // Explicit research split: deterministic quant core vs bounded AI opinion.
-  // probability is ALWAYS the deterministic quant figure (never overridden).
-  quant_probability: z.number().min(0).max(1).nullable().optional().default(null),
-  ai_probability: z.number().min(0).max(1).nullable().optional().default(null),
-  blended_probability: z.number().min(0).max(1).nullable().optional().default(null),
-  ai_weight: z.number().min(0).max(1).optional().default(0),
-  direction: z.string().optional().default(""),
-  regime: z.string().nullable().optional().default(null),
-  drawdown: z.number().nullable().optional().default(null),
-  // ensemble-v3 additions (all optional for backward compat with v1/v2 payloads)
-  direction_probability_raw: z.number().min(0).max(1).nullable().optional().default(null),
-  calibration_method: z.string().nullable().optional().default(null),
-  adaptive_weights: z.boolean().nullable().optional().default(null),
-  skill_brier: z.number().nullable().optional().default(null),
-  skill_ece: z.number().nullable().optional().default(null),
-  ensemble_weights: z.record(z.number()).optional(),
-  ensemble_spread: z.number().nullable().optional().default(null),
-  ensemble_std: z.number().nullable().optional().default(null),
-  n_members: z.number().nullable().optional().default(null),
-  confidence_score: z.number().nullable().optional().default(null),
-  confidence_reasons: z.array(z.string()).optional().default([]),
-  target_price: z.object({
-    last_close: z.number(), low: z.number().nullable(), mid: z.number().nullable(), high: z.number().nullable(),
-  }).passthrough().nullable().optional().default(null),
-  volatility_detail: z.record(z.unknown()).optional(),
-  drawdown_detail: z.record(z.unknown()).optional(),
-  components: z.record(z.number().nullable()).optional(),
-  formulas: z.record(z.string()).optional(),
-  inputs: z.record(z.unknown()).optional(),
-  versions: z.record(z.unknown()).optional(),
-  calibration: z.array(ReliabilityRowSchema).optional().default([]),
-  intervals: z.object({ low: z.number(), mid: z.number(), high: z.number() }).passthrough().nullable().optional(),
-  limitations: z.array(z.string()).optional().default([]),
-  disclosure: z.string().optional(),
-  provenance: ProvenanceSchema
-}).passthrough();
 function numOrNullStrict(v) {
   if (v === null || v === void 0 || v === "") return null;
   const n = Number(v);
@@ -604,109 +439,6 @@ function clamp01OrNull(v) {
   const n = numOrNullStrict(v);
   if (n === null || n < 0 || n > 1) return null;
   return n;
-}
-function normalizeForecast(raw, symbol, horizon) {
-  const r = raw ?? {};
-  const versions = r.versions ?? {
-    ...typeof r.model_name === "string" ? { model_name: r.model_name } : {},
-    ...typeof r.model_version === "string" ? { model_version: r.model_version } : {},
-    ...typeof r.feature_version === "string" ? { feature_version: r.feature_version } : {},
-    ...typeof r.data_version === "string" ? { data_version: r.data_version } : {},
-    ...typeof r.as_of === "string" ? { as_of: r.as_of } : {}
-  };
-  const direction = typeof r.direction === "string" ? r.direction : "";
-  const label = r.label ?? r.outlook ?? (direction ? `${direction}, ${num(r.horizon_days ?? r.horizon ?? horizon, horizon)}d` : "");
-  const intervalsRaw = r.intervals ?? r.expected_return_range ?? r.return_range ?? null;
-  // Deterministic core first: quant probability is authoritative.
-  const quantRaw = r.probability ?? r.quant_probability ?? r.direction_probability ?? r.direction_prob ?? r.proba ?? r.value;
-  const quant = num(quantRaw, Number.NaN);
-  // AI side is bounded: weight clamped to [0, AI_WEIGHT_CAP]; malformed AI
-  // probability degrades to null (quant alone survives).
-  const aiWeight = clampAIWeight(r.ai_weight ?? r.aiWeight ?? 0);
-  const aiProb = clamp01OrNull(r.ai_probability ?? r.aiProbability ?? r.ai_opinion?.probability ?? null);
-  const blendedRaw = clamp01OrNull(r.blended_probability ?? r.blendedProbability ?? null);
-  const blended = blendedRaw ?? blendProbs(quant, aiProb, aiWeight);
-  const regimeRaw = r.regime ?? r.vol_regime ?? r.volatility_regime ?? null;
-  const drawdownRaw = r.drawdown ?? r.drawdown_probability ?? r.max_drawdown ?? r.expected_drawdown ?? null;
-  const candidate = {
-    symbol: r.symbol ?? r.ticker ?? symbol,
-    horizon_days: num(r.horizon_days ?? r.horizon ?? horizon, horizon),
-    label,
-    probability: quant,
-    quant_probability: Number.isFinite(quant) ? quant : null,
-    ai_probability: aiProb,
-    blended_probability: blended,
-    ai_weight: aiWeight,
-    direction,
-    regime: typeof regimeRaw === "string" && regimeRaw ? regimeRaw : null,
-    drawdown: numOrNullStrict(drawdownRaw),
-    confidence: r.confidence ?? r.confidence_level ?? "Unknown",
-    quality_grade: r.quality_grade ?? r.data_quality ?? r.grade ?? "U",
-    provider: r.provider ?? r.model_name ?? "deterministic-engine",
-    why: strArray(r.why ?? r.bull ?? r.bullish_signals ?? r.top_bullish ?? r.catalysts).slice(0, 4),
-    risks: strArray(r.risks ?? r.bear ?? r.bearish_risks ?? r.top_risks).slice(0, 4),
-    evidence_ids: strArray(r.evidence_ids ?? r.evidence ?? r.model_members ?? []),
-    inputs: r.inputs ?? r.features,
-    versions: Object.keys(versions).length > 0 ? versions : void 0,
-    calibration: normalizeReliability(
-      r.calibration ?? r.calibration_history ?? r.reliability ?? r.reliability_table ?? []
-    ),
-    intervals: intervalsRaw && Number.isFinite(Number(intervalsRaw.low)) && Number.isFinite(Number(intervalsRaw.mid)) && Number.isFinite(Number(intervalsRaw.high)) ? {
-      low: Number(intervalsRaw.low),
-      mid: Number(intervalsRaw.mid),
-      high: Number(intervalsRaw.high)
-    } : null,
-    limitations: strArray(r.limitations),
-    // ensemble-v3 diagnostics (passthrough; null when backend is v1/v2)
-    direction_probability_raw: clamp01OrNull(r.direction_probability_raw ?? r.direction_raw ?? null),
-    calibration_method: typeof r.calibration_method === "string" ? r.calibration_method : null,
-    adaptive_weights: typeof r.adaptive_weights === "boolean" ? r.adaptive_weights : null,
-    skill_brier: numOrNullStrict(r.skill_brier ?? null),
-    skill_ece: numOrNullStrict(r.skill_ece ?? null),
-    ensemble_weights: r.ensemble_weights && typeof r.ensemble_weights === "object" ? r.ensemble_weights : void 0,
-    ensemble_spread: numOrNullStrict(r.ensemble_spread ?? r.spread ?? null),
-    ensemble_std: numOrNullStrict(r.ensemble_std ?? null),
-    n_members: r.n_members ?? r.n_models ?? null,
-    confidence_score: numOrNullStrict(r.confidence_score ?? null),
-    confidence_reasons: strArray(r.confidence_reasons ?? r.confidenceReasons ?? []),
-    target_price: r.target_price ?? r.targetPrice ?? null,
-    volatility_detail: r.volatility_detail ?? r.volatilityDetail ?? void 0,
-    drawdown_detail: r.drawdown_detail ?? r.drawdownDetail ?? void 0,
-    components: r.components ?? void 0,
-    formulas: r.formulas ?? void 0,
-    // Disclosure rendered verbatim by the UI — never rewritten client-side.
-    disclosure: r.disclosure,
-    provenance: normalizeProvenance(r, "forecast-api")
-  };
-  return ForecastSchema.parse(candidate);
-}
-const FORECAST_TIMEOUT_MS = 6e4;
-async function getForecast(symbol, horizon = 21, opts) {
-  const sym = normalizeSymbolParam(symbol);
-  const h = horizon;
-  const signal = opts?.signal;
-  return coalesceInflight(`forecast:${sym}:${h}`, async () => {
-    try {
-      const { data } = await api.get(`/api/forecast/${encodeURIComponent(sym)}`, {
-        params: { horizon: h },
-        timeout: FORECAST_TIMEOUT_MS,
-        ...signal ? { signal } : {}
-      });
-      return normalizeForecast(data, sym, h);
-    } catch (pathErr) {
-      if (!isEndpointMissingError(pathErr)) throw pathErr;
-      try {
-        const { data } = await api.get("/api/forecast", {
-          params: { symbol: sym, horizon: h },
-          timeout: FORECAST_TIMEOUT_MS,
-          ...signal ? { signal } : {}
-        });
-        return normalizeForecast(data, sym, h);
-      } catch {
-        throw pathErr;
-      }
-    }
-  });
 }
 const AnalyticsSchema = z.object({
   symbol: z.string(),
@@ -775,101 +507,7 @@ async function getAnalytics(symbol, opts) {
     }
   });
 }
-const BacktestSchema = z.object({
-  symbol: z.string(),
-  horizons: z.array(z.number()).optional().default([]),
-  brier: z.number().nullable().optional(),
-  ece: z.number().nullable().optional(),
-  // ensemble-v3 additions (null on old payloads; backward compatible)
-  calibrated_brier: z.number().nullable().optional().default(null),
-  calibrated_ece: z.number().nullable().optional().default(null),
-  calibration_method: z.string().nullable().optional().default(null),
-  reliability: z.array(ReliabilityRowSchema).optional().default([]),
-  n_windows: z.number().nullable().optional(),
-  failures: z.array(z.string()).optional().default([]),
-  notes: z.string().optional(),
-  provenance: ProvenanceSchema
-}).passthrough();
-function normalizeBacktest(raw, symbol, horizons) {
-  const r = raw ?? {};
-  const brierRaw = r.brier ?? r.brier_score;
-  const eceRaw = r.ece ?? r.calibration_error ?? r.ece_score;
-  const candidate = {
-    symbol: r.symbol ?? symbol,
-    horizons: (Array.isArray(r.horizons) ? r.horizons : horizons).map((h) => Number(h)) ?? horizons,
-    brier: brierRaw === void 0 || brierRaw === null ? null : num(brierRaw, Number.NaN),
-    ece: eceRaw === void 0 || eceRaw === null ? null : num(eceRaw, Number.NaN),
-    calibrated_brier: numOrNullStrict(r.calibrated_brier ?? r.calibratedBrier ?? null),
-    calibrated_ece: numOrNullStrict(r.calibrated_ece ?? r.calibratedEce ?? null),
-    calibration_method: typeof r.calibration_method === "string" ? r.calibration_method : (typeof r.calibrationMethod === "string" ? r.calibrationMethod : null),
-    reliability: normalizeReliability(r.reliability ?? r.reliability_table ?? r.table ?? []),
-    n_windows: r.n_windows === void 0 || r.n_windows === null ? r.n === void 0 || r.n === null ? null : num(r.n, Number.NaN) : num(r.n_windows, Number.NaN),
-    failures: strArray(r.failures ?? r.errors ?? []),
-    notes: r.notes,
-    provenance: normalizeProvenance(r, "backtest-api")
-  };
-  const parsed = BacktestSchema.parse(candidate);
-  return {
-    ...parsed,
-    brier: parsed.brier !== void 0 && Number.isNaN(parsed.brier) ? null : parsed.brier,
-    ece: parsed.ece !== void 0 && Number.isNaN(parsed.ece) ? null : parsed.ece
-  };
-}
-const BACKTEST_TIMEOUT_MS = 6e4;
 const RANK_TIMEOUT_MS = 6e4;
-async function runBacktest(symbol, horizons, opts) {
-  const sym = normalizeSymbolParam(symbol);
-  const h = Array.isArray(horizons) ? [...horizons] : horizons;
-  const signal = opts?.signal;
-  return coalesceInflight(`backtest:${sym}:${JSON.stringify(h)}`, async () => {
-    try {
-      const { data } = await api.post(
-        "/api/backtest/run",
-        { symbol: sym, horizons: h },
-        { timeout: BACKTEST_TIMEOUT_MS, ...(signal ? { signal } : {}) }
-      );
-      return normalizeBacktest(flattenBacktestRun(data, sym, h), sym, h);
-    } catch (runErr) {
-      if (!isEndpointMissingError(runErr)) throw runErr;
-      try {
-        const { data } = await api.post(
-          "/api/backtest",
-          { symbol: sym, horizons: h },
-          { timeout: BACKTEST_TIMEOUT_MS, ...(signal ? { signal } : {}) }
-        );
-        return normalizeBacktest(flattenBacktestRun(data, sym, h), sym, h);
-      } catch {
-        throw runErr;
-      }
-    }
-  });
-}
-function flattenBacktestRun(raw, symbol, horizons) {
-  const r = raw ?? {};
-  const results = r.results;
-  if (results && typeof results === "object" && !Array.isArray(results)) {
-    const first = String(horizons[0] ?? Object.keys(results)[0] ?? "");
-    const h = results[first] ?? results[String(Number(first))] ?? {};
-    const nWindows = h.n_points ?? h.n_folds ?? r.n_windows ?? r.n ?? null;
-    return {
-      ...r,
-      symbol: r.symbol ?? symbol,
-      horizons,
-      brier: h.brier ?? r.brier ?? r.brier_score ?? null,
-      ece: h.ece ?? r.ece ?? r.calibration_error ?? null,
-      // ensemble-v3 per-horizon calibration (null on old runs)
-      calibrated_brier: h.calibrated_brier ?? r.calibrated_brier ?? null,
-      calibrated_ece: h.calibrated_ece ?? r.calibrated_ece ?? null,
-      calibration_method: h.calibration_method ?? r.calibration_method ?? null,
-      reliability: h.reliability ?? r.reliability ?? r.reliability_table ?? r.table ?? [],
-      n_windows: nWindows,
-      failures: r.failures ?? r.errors ?? [],
-      notes: r.notes,
-      provenance: r.provenance ?? normalizeProvenance(r, "backtest-api")
-    };
-  }
-  return raw;
-}
 const AIOpinionSchema = z.object({
   direction: z.string(),
   probability: z.number().min(0).max(1),
@@ -1341,205 +979,6 @@ async function getProvidersHealth(opts) {
     });
   });
 }
-async function getAuditForecasts(symbolOrLimit = 5, maybeLimit = 5, opts) {
-  // Supports both legacy (limit) and new (symbol, limit) call shapes:
-  // getAuditForecasts(5) | getAuditForecasts("AAPL") | getAuditForecasts("AAPL", 20)
-  let symbol = "";
-  let limit = 5;
-  if (typeof symbolOrLimit === "string") {
-    symbol = normalizeSymbolParam(symbolOrLimit);
-    limit = maybeLimit;
-  } else {
-    limit = symbolOrLimit;
-  }
-  // Third-arg opts form: getAuditForecasts("AAPL", 20, { signal }).
-  const signal = opts?.signal ?? maybeLimit?.signal;
-  const n = Number.isFinite(Number(limit)) ? Math.min(200, Math.max(1, Number(limit))) : 5;
-  const symKey = symbol || "ALL";
-  return coalesceInflight(`audit-forecasts:${symKey}:${n}`, async () => {
-    const params = symbol ? { symbol, limit: n } : { limit: n };
-    const { data } = await api.get("/api/audit/forecasts", { params, timeout: 15000, ...(signal ? { signal } : {}) });
-    const raw = data ?? {};
-    const listRaw = Array.isArray(data) ? data : Array.isArray(raw.forecasts) ? raw.forecasts : Array.isArray(raw.results) ? raw.results : [];
-    const forecasts = listRaw.map((f) => ({
-      ...f,
-      forecast_id: typeof f.forecast_id === "string" ? f.forecast_id : void 0,
-      symbol: typeof f.symbol === "string" ? f.symbol : void 0,
-      horizon_days: f.horizon_days === void 0 || f.horizon_days === null ? void 0 : Number(f.horizon_days),
-      direction_probability: f.direction_probability === void 0 || f.direction_probability === null ? null : numOrUndef(f.direction_probability) ?? null,
-      confidence: typeof f.confidence === "string" ? f.confidence : void 0,
-      model_version: typeof f.model_version === "string" ? f.model_version : void 0,
-      feature_version: typeof f.feature_version === "string" ? f.feature_version : void 0,
-      data_version: typeof f.data_version === "string" ? f.data_version : void 0,
-      target_date: typeof f.target_date === "string" ? f.target_date : void 0,
-      created_at: typeof f.created_at === "string" ? f.created_at : void 0
-    }));
-    return {
-      forecasts,
-      count: typeof raw.count === "number" ? raw.count : forecasts.length,
-      disclosure: typeof raw.disclosure === "string" ? raw.disclosure : "Not investment advice. For informational purposes only."
-    };
-  });
-}
-// Client-side backtest history reader (GET /api/backtest/:symbol).
-// Kept in client.js (no import from backtestHistory.js to avoid a cycle:
-// that module imports api/coalesceInflight/normalizeSymbolParam from here).
-// BacktestLabPage should prefer this when it only needs history via client.
-function normalizeBacktestHistoryRun(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  const r = raw;
-  const runId = typeof (r.run_id ?? r.runId ?? r.id) === "string" ? (r.run_id ?? r.runId ?? r.id) : void 0;
-  if (!runId) return null;
-  const horizonsRaw = Array.isArray(r.horizons) ? r.horizons : [];
-  const numOrNullLocal = (v) => {
-    if (v === null || v === void 0 || v === "") return null;
-    const nn = Number(v);
-    return Number.isFinite(nn) ? nn : null;
-  };
-  return {
-    run_id: runId,
-    as_of: typeof r.as_of === "string" ? r.as_of : null,
-    horizons: horizonsRaw.map((h) => Number(h)).filter((hh) => Number.isFinite(hh)),
-    metrics: r.metrics ?? r.results ?? {},
-    brier: numOrNullLocal(r.brier ?? r.brier_score),
-    ece: numOrNullLocal(r.ece ?? r.calibration_error ?? r.ece_score),
-    model_version: typeof r.model_version === "string" ? r.model_version : null,
-    feature_version: typeof r.feature_version === "string" ? r.feature_version : null,
-    data_version: typeof r.data_version === "string" ? r.data_version : null
-  };
-}
-async function getBacktestHistory(symbol, includeReliability = true, opts) {
-  const sym = normalizeSymbolParam(symbol);
-  if (!sym) return [];
-  const signal = opts?.signal;
-  return coalesceInflight(`backtest-history:${sym}:${includeReliability}`, async () => {
-    try {
-      const { data } = await api.get(`/api/backtest/${encodeURIComponent(sym)}`, {
-        params: { include_reliability: includeReliability },
-        timeout: 15000,
-        ...(signal ? { signal } : {})
-      });
-      const raw = data ?? {};
-      const listRaw = Array.isArray(data) ? data : Array.isArray(raw.runs) ? raw.runs : Array.isArray(raw.results) ? raw.results : Array.isArray(raw.history) ? raw.history : [];
-      const out = [];
-      for (const row of listRaw) {
-        const parsed = normalizeBacktestHistoryRun(row);
-        if (parsed) out.push(parsed);
-      }
-      return out;
-    } catch (err) {
-      const status = err?.response?.status;
-      if (status === 404 || status === 501) return [];
-      throw err;
-    }
-  });
-}
-const ScreenerRowSchema = z.object({
-  symbol: z.string(),
-  company_name: z.string().optional().default(""),
-  exchange_mic: z.string().optional().default(""),
-  currency: z.string().optional().default("USD"),
-  price: z.number().nullable().optional(),
-  change_pct: z.number().nullable().optional(),
-  market_state: z.string().nullable().optional(),
-  direction_probability: z.number().min(0).max(1),
-  confidence: z.string().optional().default("Unknown"),
-  model_version: z.string().optional().default(""),
-  quality: z.record(z.unknown()).optional(),
-  horizon: z.number().optional(),
-  horizons: z.array(z.number()).optional().default([]),
-  provenance: ProvenanceSchema
-}).passthrough();
-const ScreenerSkippedSchema = z.object({
-  symbol: z.string(),
-  reason: z.string().optional().default("")
-}).passthrough();
-const ScreenerResponseSchema = z.object({
-  results: z.array(ScreenerRowSchema).optional().default([]),
-  count: z.number().optional().default(0),
-  universe_size: z.number().optional().default(0),
-  filtered_total: z.number().optional().default(0),
-  offset: z.number().optional().default(0),
-  skipped: z.array(ScreenerSkippedSchema).optional().default([]),
-  horizon: z.number().optional(),
-  disclosure: z.string().optional().default("")
-}).passthrough();
-function normalizeScreenerRow(raw, horizon) {
-  const r = raw ?? {};
-  const prob = num(
-    r.direction_probability ?? r.probability ?? r.direction_prob ?? r.proba,
-    Number.NaN
-  );
-  const candidate = {
-    ...r,
-    symbol: r.symbol ?? r.ticker ?? "UNKNOWN",
-    company_name: r.company_name ?? r.companyName ?? r.name ?? "",
-    exchange_mic: r.exchange_mic ?? r.exchangeMic ?? r.mic ?? "",
-    currency: r.currency ?? "USD",
-    price: rateNumber(r.price ?? r.last),
-    change_pct: rateNumber(r.change_pct ?? r.changePct),
-    market_state: r.market_state ?? r.marketState ?? null,
-    direction_probability: prob,
-    confidence: r.confidence ?? "Unknown",
-    model_version: r.model_version ?? "",
-    horizon: num(r.horizon ?? horizon, horizon),
-    horizons: Array.isArray(r.horizons) ? r.horizons.map((h) => Number(h)).filter((h) => Number.isFinite(h)) : [horizon],
-    provenance: normalizeProvenance(r, "screener-api")
-  };
-  return ScreenerRowSchema.parse(candidate);
-}
-function normalizeScreener(raw, horizon) {
-  const r = raw ?? {};
-  const listRaw = Array.isArray(r.results) ? r.results : Array.isArray(r.rows) ? r.rows : Array.isArray(r.items) ? r.items : [];
-  const results = [];
-  for (const row of listRaw) {
-    try {
-      results.push(normalizeScreenerRow(row, horizon));
-    } catch {
-      continue;
-    }
-  }
-  const skippedRaw = Array.isArray(r.skipped) ? r.skipped : [];
-  const skipped = skippedRaw.flatMap((s) => {
-    const parsed = ScreenerSkippedSchema.safeParse(s);
-    return parsed.success ? [parsed.data] : [];
-  });
-  return ScreenerResponseSchema.parse({
-    ...r,
-    results,
-    count: typeof r.count === "number" ? r.count : results.length,
-    universe_size: typeof r.universe_size === "number" ? r.universe_size : typeof r.universeSize === "number" ? r.universeSize : results.length,
-    filtered_total: typeof r.filtered_total === "number" ? r.filtered_total : typeof r.filteredTotal === "number" ? r.filteredTotal : results.length,
-    offset: typeof r.offset === "number" ? r.offset : 0,
-    skipped,
-    horizon: num(r.horizon ?? horizon, horizon),
-    disclosure: r.disclosure ?? ""
-  });
-}
-const SCREENER_TIMEOUT_MS = 6e4;
-async function getScreener(params = {}, opts = {}) {
-  const horizon = params.horizon ?? 21;
-  const mic = String(params.market ?? "").trim().toUpperCase();
-  const minDir = params.minDirection ?? 0.5;
-  const lim = Math.min(50, Math.max(1, Number(params.limit ?? 20) || 20));
-  const off = Math.min(200, Math.max(0, Number(params.offset ?? 0) || 0));
-  const signal = opts?.signal ?? params.signal;
-  const query = {
-    horizon,
-    min_direction: minDir,
-    limit: lim,
-    offset: off
-  };
-  if (mic && mic !== "ALL") query.market = mic;
-  return coalesceInflight(`screener:${mic || "ALL"}:${horizon}:${minDir}:${lim}:${off}`, async () => {
-    const { data } = await api.get("/api/screener", {
-      params: query,
-      timeout: SCREENER_TIMEOUT_MS,
-      ...signal ? { signal } : {}
-    });
-    return normalizeScreener(data, horizon);
-  });
-}
 const BARS_MAX_LIMIT = 1000;
 const BARS_BACKEND_CAP = 1000;
 const TIMEFRAME_PRESETS = [
@@ -1635,7 +1074,9 @@ function normalizeBarsToCandles(raw, symbol, timeframe = "1d") {
   for (const row of listRaw) {
     if (!row || typeof row !== "object") continue;
     const rec = row;
-    const time = normalizeBarTime(rec.ts ?? rec.time ?? rec.date);
+    // `date` is the exchange-local session day; `ts` is a UTC instant whose
+    // date is a day early for venues east of UTC.
+    const time = normalizeBarTime(rec.date ?? rec.ts ?? rec.time);
     if (!time) continue;
     const open = numFinite(rec.open);
     const high = numFinite(rec.high);
@@ -1896,6 +1337,6 @@ async function getBars(symbol, timeframe = "1d", limit = 90, opts) {
     }
   });
 }
-export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BACKTEST_TIMEOUT_MS, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BacktestSchema, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FORECAST_TIMEOUT_MS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, ForecastSchema, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, ReliabilityRowSchema, SCREENER_TIMEOUT_MS, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, ScreenerResponseSchema, ScreenerRowSchema, ScreenerSkippedSchema, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getAuditForecasts, getBars, getChart, getFXRate, getForecast, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, getScreener, httpStatus, isEndpointMissingError, isFreshFxProvenance, isFxProvenanceMissingError, isUpgradeRequiredError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, runBacktest, saveFavoriteIndicators, searchInstruments, setAuthErrorHandlers, setAuthTokenProvider, testProviderHealth, upgradeInfoFromError };
+export { AIOpinionSchema, AIPerformanceRowSchema, AI_PROFILES, AI_TIMEOUT_MS, ANALYTICS_TIMEOUT_MS, AnalyticsSchema, BARS_BACKEND_CAP, BARS_MAX_LIMIT, BarSchema, BarsResponseSchema, EURONEXT_MICS, FORECAST_HORIZONS, FXConvertResultSchema, FXRateSchema, FX_PROVENANCE_MISSING, HealthSchema, IndicatorPointSchema, InstrumentSchema, MARKET_STATES, OSCILLATOR_INDICATORS, PRICE_PANE_INDICATORS, ProvenanceSchema, QuoteSchema, RANK_TIMEOUT_MS, RankResponseSchema, RankedRowSchema, SUPPORTED_INDICATORS, SUPPORTED_MARKET_MICS, TARGET_CURRENCIES, TIMEFRAME_PRESETS, api, buildIndicatorsParam, coalesceInflight, convertFX, deriveMarketState, displaySymbol, extractBackendDetail, extractFxGateProvenance, favoriteIndicatorsKey, freshnessOf, friendlyAIError, getAIPerformance, getAnalytics, getBars, getChart, getFXRate, getHealth, getProviderBudgets, getProviderKeysStatus, getProvidersHealth, getQuote, httpStatus, isEndpointMissingError, isFreshFxProvenance, isFxProvenanceMissingError, loadFavoriteIndicators, normalizeAIHealthTest, normalizeAnalytics, normalizeBarTime, normalizeBarsToCandles, normalizeChart, normalizeHealthProviders, normalizeIndicatorList, normalizeIndicatorName, normalizeIndicatorPoints, normalizeIndicators, normalizeMarketState, normalizeRank, normalizeSymbolParam, normalizeTargetCcy, postAIInsight, rankCrossMarket, resolveTimeframePreset, saveFavoriteIndicators, searchInstruments, configureAuth, testProviderHealth };
 
-export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, PLAN_TIERS, TIER_FEATURES, auditForecastsUrl, blendProbs, clampAIWeight, isAIDisabled, getBacktestHistory, normalizeAIOpinion, normalizeBacktestHistoryRun, normalizeForecast, sourceLabelForAIOpinion, sourceLabelForForecast, tryNormalizeAIOpinion };
+export { AI_DISABLED_LABEL, AI_WEIGHT_CAP, DISAGREE_TOL, normalizeAIOpinion, sourceLabelForAIOpinion, tryNormalizeAIOpinion };

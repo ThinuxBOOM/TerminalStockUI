@@ -17,175 +17,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend.ai.blend import blend_forecast, resolve_ai_weight
 from backend.ai.evidence import build_evidence_packet
 from backend.ai.prompts import PROFILES
+from backend.ai.quota import enforce_ai_quota
 from backend.ai.router import AIRouter
 from backend.ai.schemas import DISCLAIMER, EvidencePacket
 from backend.security.secrets import redact_mapping
 
-try:  # V2 Phase 2 canonical guards
-    from backend.auth.guards import get_current_user, require_tier_optional  # type: ignore
-except ImportError:  # pragma: no cover - fallback until Phase 2 lands
-    from fastapi import Request as _Request
-
-    from backend.auth.tiers import _TIER_RANK as _RANK
-    from backend.auth.tiers import normalize_tier as _norm
-
-    _TEST_TOKENS: dict[str, dict[str, Any]] = {
-        "test-free": {"user_id": "user-free", "tier": "free", "is_admin": False},
-        "test-silver": {"user_id": "user-silver", "tier": "silver", "is_admin": False},
-        "test-gold": {"user_id": "user-gold", "tier": "gold", "is_admin": False},
-        "test-platinum": {"user_id": "user-platinum", "tier": "platinum", "is_admin": False},
-        "test-admin": {"user_id": "admin-1", "tier": "platinum", "is_admin": True},
-    }
-
-    async def get_current_user(request: _Request) -> dict[str, Any]:  # type: ignore[no-redef]
-        """Fallback auth: Bearer test tokens only. X-Tier is NEVER trusted."""
-        try:
-            auth = (request.headers.get("authorization") or "").strip()
-        except Exception:
-            auth = ""
-        token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-        user = _TEST_TOKENS.get(token)
-        if user is not None:
-            return dict(user)
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-    def require_tier(min_tier: str):  # type: ignore[no-redef]
-        need = _norm(min_tier)
-
-        async def _dep(request: _Request) -> dict[str, Any]:
-            user = await get_current_user(request)
-            try:
-                if bool(user.get("is_admin")):
-                    return user
-            except Exception:
-                pass
-            have = _norm(user.get("tier"))
-            if _RANK[have] >= _RANK[need]:
-                return user
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep
-
-    def require_tier_optional(min_tier: str):  # type: ignore[no-redef]
-        import os as _os
-
-        need = _norm(min_tier)
-
-        async def _dep_opt(request: _Request) -> dict[str, Any]:
-            enforced = str(_os.getenv("BILLING_ENFORCED", "false") or "").strip().lower() in ("1", "true", "yes", "on")
-            try:
-                user = await get_current_user(request)
-            except HTTPException as exc:
-                if getattr(exc, "status_code", 500) == 401 and not enforced:
-                    if need == "free":
-                        return {"user_id": None, "tier": "free", "is_guest": True, "is_admin": False}
-                    raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-                raise
-            try:
-                if bool(user.get("is_admin")):
-                    return user
-            except Exception:
-                pass
-            if not enforced:
-                return user
-            have = _norm(user.get("tier"))
-            if _RANK[have] >= _RANK[need]:
-                return user
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-        return _dep_opt
-
-
-def _user_field(user: Any, name: str, default: Any = None) -> Any:
-    """Read a user field from dict-style or ORM-style (guards) users."""
-    try:
-        if isinstance(user, dict):
-            return user.get(name, default)
-    except Exception:
-        pass
-    try:
-        val = getattr(user, name, default)
-        return default if val is None and default is not None else val
-    except Exception:
-        return default
-
-
-def _require_profile_tier(user: Any, profile: str) -> None:
-    """Profile-aware gate for /insight + /forecast_opinion.
-
-    quick_insight/forecast_assist are free; report/deep_research need silver.
-    Admin bypasses. Client-supplied body.user_tier is NEVER trusted.
-    Works with dict (fallback/guest) and ORM (guards) users.
-
-    Soft-launch (BILLING_ENFORCED=false): any authenticated (non-guest)
-    user may use report/deep_research; guests stay free-only (402).
-    Strict (BILLING_ENFORCED=true): live tier rank checked (402 when low).
-    """
-    try:
-        if bool(_user_field(user, "is_admin", False)):
-            return
-    except Exception:
-        pass
-    key = (profile or "").strip().lower().replace(" ", "_").replace("-", "_")
-    need = "silver" if key in ("report", "deep_research") else "free"
-    if need == "free":
-        return
-    try:
-        from backend.auth.tiers import is_billing_enforced as _enforced
-    except Exception:
-        _enforced = lambda: True  # fail-closed when flag unreadable
-    try:
-        enforced = bool(_enforced())
-    except Exception:
-        enforced = True
-    if not enforced:
-        # Soft-launch: authed (non-guest) passes; guests free-only.
-        try:
-            if isinstance(user, dict):
-                is_guest = bool(user.get("is_guest", False))
-            else:
-                is_guest = bool(getattr(user, "is_guest", False))
-        except Exception:
-            is_guest = False
-        if is_guest:
-            raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-        return
-    try:
-        from backend.auth.tiers import _TIER_RANK as _R2
-        from backend.auth.tiers import normalize_tier as _n2
-
-        have = _n2(_user_field(user, "tier", "free"))
-        if _R2[have] >= _R2[_n2(need)]:
-            return
-    except Exception:
-        return
-    raise HTTPException(status_code=402, detail={"message": f"upgrade required: {need} or higher", "upgrade_required": True, "min_tier": need})
-
-
-def _auth_identity(user: Any) -> tuple[Any, str]:
-    """Real (user_id, tier) from the verified JWT user. Never body fields."""
-    try:
-        uid = _user_field(user, "user_id", None) or _user_field(user, "id", None)
-    except Exception:
-        uid = None
-    try:
-        tier = str(_user_field(user, "tier", "free") or "free").strip().lower() or "free"
-    except Exception:
-        tier = "free"
-    return uid, tier
+from backend.auth.guards import get_current_user, require_admin, user_id_of
+from backend.db.models import User
 
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/ai", tags=["ai"])
+router = APIRouter(prefix="/api/ai", tags=["ai"], dependencies=[Depends(get_current_user)])
 
 _ai_router: AIRouter | None = None
 
@@ -216,7 +69,8 @@ def _job_get(job_id: str) -> dict[str, Any] | None:
     return _jobs_memory.get(job_id)
 
 
-def _job_put(job_id: str, doc: dict[str, Any], ttl_s: int = 3600) -> None:
+def _job_put(job_id: str, doc: dict[str, Any], *, owner: str, ttl_s: int = 3600) -> None:
+    doc = {**doc, "owner": owner}
     key = f"ai:job:{job_id}"
     try:
         store = _jobs_store()
@@ -241,8 +95,6 @@ def _persist_ledger(
     call_type: str,
     packet: EvidencePacket,
     cached: bool,
-    user_tier: str | None,
-    token_credits: int | None,
     user_id: Any = None,
 ) -> None:
     """Best-effort ai_token_ledger persist from the router's last entry."""
@@ -261,13 +113,12 @@ def _persist_ledger(
         Session = get_session_factory()
         db = Session()
         try:
-            # V2: pass the REAL verified user_id/tier (never body fields).
             log_ai_tokens(
                 db, provider=provider, model=model, profile=profile,
                 call_type=call_type, input_tokens=0 if cached else prompt_tok,
                 output_tokens=0 if cached else comp_tok, latency_ms=lat_ms,
                 evidence_hash=getattr(packet, "evidence_hash", None),
-                user_id=user_id, tier=user_tier,
+                user_id=user_id,
             )
         finally:
             try:
@@ -303,11 +154,6 @@ def reset_ai_router() -> None:  # test hook
 class InsightBody(BaseModel):
     symbol: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
     profile: str = Field(default="quick_insight", max_length=64)
-    # Future tier-routing stubs: accepted + logged, NEVER enforced today.
-    # Free 20/day Quick-only / Silver 1000+400+100 / Gold +Grok / Platinum unlimited+Deep.
-    user_tier: str | None = Field(default=None, max_length=32)
-    call_type: str | None = Field(default=None, max_length=64)
-    token_credits: int | None = Field(default=None)
 
 
 class ForecastOpinionBody(BaseModel):
@@ -318,10 +164,6 @@ class ForecastOpinionBody(BaseModel):
     ai_weight: float | None = Field(default=None)
     ai_enabled: bool = True
     quant_confidence_label: str | None = Field(default=None, max_length=16)
-    # Future tier-routing stubs: accepted + logged, NEVER enforced today.
-    user_tier: str | None = Field(default=None, max_length=32)
-    call_type: str | None = Field(default=None, max_length=64)
-    token_credits: int | None = Field(default=None)
 
 
 class ProviderHealthTestBody(BaseModel):
@@ -693,12 +535,11 @@ def _build_packet_from_quote(
 async def post_insight(
     body: InsightBody,
     ai: AIRouter = Depends(get_ai_router),
-    user: dict = Depends(require_tier_optional("free")),
+    user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     profile = _check_profile(body.profile)
-    # V2 HARD gate: profile-aware (report needs silver). Body tier ignored.
-    _require_profile_tier(user, profile)
-    _uid, _utier = _auth_identity(user)
+    _uid = user_id_of(user)
+    enforce_ai_quota(_uid)
     # Fail-closed gate first: no key -> 423 before any evidence work.
     _require_live_provider(ai, profile)
     # get_quote/yfinance are blocking sync I/O — keep the event loop free.
@@ -707,9 +548,7 @@ async def post_insight(
     try:
         opinion, cached = await ai.get_insight(
             packet, profile=profile,
-            user_tier=_utier, call_type=body.call_type or "insight",
-            token_credits=body.token_credits,
-            user_id=_uid,
+            call_type="insight", user_id=_uid,
         )
     except HTTPException:
         raise
@@ -722,7 +561,7 @@ async def post_insight(
     _persist_ledger(
         ai, provider=opinion.provider, model=opinion.model, profile=profile,
         call_type="opinion", packet=packet, cached=cached,
-        user_tier=_utier, token_credits=body.token_credits, user_id=_uid,
+        user_id=_uid,
     )
     return {
         "symbol": packet.symbol,
@@ -742,11 +581,10 @@ async def post_insight(
 async def post_forecast_opinion(
     body: ForecastOpinionBody,
     ai: AIRouter = Depends(get_ai_router),
-    user: dict = Depends(require_tier_optional("free")),
+    user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     profile = _check_profile(body.profile)
-    _require_profile_tier(user, profile)
-    _uid, _utier = _auth_identity(user)
+    _uid = user_id_of(user)
     horizon = _check_horizon(body.horizon)
     try:
         quant_check = float(body.quant_prob) if body.quant_prob is not None else None
@@ -809,8 +647,7 @@ async def post_forecast_opinion(
     try:
         opinion, cached = await ai.get_insight(
             packet, profile=profile, horizon=horizon,
-            user_tier=_utier, call_type=body.call_type or "forecast_opinion",
-            token_credits=body.token_credits, user_id=_uid,
+            call_type="forecast_opinion", user_id=_uid,
         )
     except HTTPException:
         raise
@@ -836,7 +673,7 @@ async def post_forecast_opinion(
     _persist_ledger(
         ai, provider=opinion.provider, model=opinion.model, profile=profile,
         call_type="forecast", packet=packet, cached=cached,
-        user_tier=_utier, token_credits=body.token_credits, user_id=_uid,
+        user_id=_uid,
     )
     try:
         provenance = packet.freshness.model_dump(mode="json")
@@ -901,14 +738,14 @@ def providers_health_test(
 class DeepResearchJobBody(BaseModel):
     symbol: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-:]{0,31}$")
     horizon: int = Field(default=21)
-    user_tier: str | None = Field(default=None, max_length=32)
-    call_type: str | None = Field(default=None, max_length=64)
-    token_credits: int | None = Field(default=None)
 
 
-async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str | None,
-                        call_type: str | None, token_credits: int | None,
-                        user_id: Any = None) -> None:
+#: Strong references to in-flight deep-research tasks (asyncio keeps only weak
+#: ones, so an unreferenced task can be garbage-collected mid-run).
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_id: str) -> None:
     """Background deep_research worker (never raises; writes job doc).
 
     Fail-closed throughout: no key -> error doc (never a stub opinion);
@@ -920,78 +757,74 @@ async def _run_deep_job(job_id: str, symbol: str, horizon: int, user_tier: str |
     except HTTPException as exc:
         _job_put(job_id, {"job_id": job_id, "status": "error",
                           "error": str(exc.detail)[:280],
-                          "symbol": symbol, "horizon": horizon})
+                          "symbol": symbol, "horizon": horizon}, owner=user_id)
         return
     try:
         packet = await _packet_for(symbol, "deep_research")
     except Exception as exc:
         _job_put(job_id, {"job_id": job_id, "status": "error",
                           "error": f"packet failed: {type(exc).__name__}",
-                          "symbol": symbol, "horizon": horizon})
+                          "symbol": symbol, "horizon": horizon}, owner=user_id)
         return
     try:
         opinion, cached = await ai.get_insight(
             packet, profile="deep_research", horizon=horizon,
-            user_tier=user_tier, call_type=call_type or "deep_research",
-            token_credits=token_credits, user_id=user_id,
+            call_type="deep_research", user_id=user_id,
         )
         try:
             _refuse_stub_opinion(opinion, context="deep research")
         except HTTPException as exc:
             _job_put(job_id, {"job_id": job_id, "status": "error",
                               "error": str(exc.detail)[:280],
-                              "symbol": symbol, "horizon": horizon})
+                              "symbol": symbol, "horizon": horizon}, owner=user_id)
             return
         _persist_ledger(ai, provider=opinion.provider, model=opinion.model,
                         profile="deep_research", call_type="evidence",
-                        packet=packet, cached=cached,
-                        user_tier=user_tier, token_credits=token_credits,
-                        user_id=user_id)
+                        packet=packet, cached=cached, user_id=user_id)
         _job_put(job_id, {"job_id": job_id, "status": "done",
                           "symbol": packet.symbol, "horizon": horizon,
                           "provider": opinion.provider, "model": opinion.model,
                           "opinion": opinion.model_dump(mode="json"),
                           "packet_id": packet.packet_id,
                           "evidence_hash": packet.evidence_hash,
-                          "cached": cached, "disclaimer": DISCLAIMER})
+                          "cached": cached, "disclaimer": DISCLAIMER}, owner=user_id)
     except Exception as exc:
         _job_put(job_id, {"job_id": job_id, "status": "error",
                           "error": f"{type(exc).__name__}: {exc}"[:280],
-                          "symbol": symbol, "horizon": horizon})
+                          "symbol": symbol, "horizon": horizon}, owner=user_id)
 
 
 @router.post("/deep_research_job", status_code=202)
 async def post_deep_research_job(
     body: DeepResearchJobBody,
-    user: dict = Depends(require_tier_optional("silver")),
-) -> dict[str, Any]:
-    """Enqueue a deep_research call; poll GET /api/ai/jobs/{id}.
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Enqueue a deep_research call; poll ``GET /api/ai/jobs/{id}``.
 
-    Long-response path: deep_research allows 25s per attempt + retries, which
-    risks gateway timeouts on serverless. This 202+poll path returns instantly
-    while the worker fills the job doc. The sync /insight+profile=deep_research
-    path is unchanged. V2 HARD gate: silver+ (body tier ignored).
+    Returns immediately with a job id while a background task fills the job
+    document. Jobs are visible only to the user who created them.
     """
-    from fastapi.responses import JSONResponse as _JR  # local import, no dep change
-    import uuid as _uuid
-
     horizon = _check_horizon(body.horizon)
     clean = (body.symbol or "").strip().upper()
-    _uid, _utier = _auth_identity(user)
-    job_id = _uuid.uuid4().hex[:16]
+    owner = user_id_of(user)
+    enforce_ai_quota(owner)
+    job_id = uuid.uuid4().hex
     _job_put(job_id, {"job_id": job_id, "status": "pending",
-                      "symbol": clean, "horizon": horizon})
-    asyncio.create_task(_run_deep_job(job_id, clean, horizon, _utier,
-                                      body.call_type, body.token_credits,
-                                      user_id=_uid))
-    return _JR(status_code=202, content={"job_id": job_id, "status": "pending",
-              "status_url": f"/api/ai/jobs/{job_id}",
-              "symbol": clean, "horizon": horizon})
+                      "symbol": clean, "horizon": horizon}, owner=owner)
+    task = asyncio.create_task(_run_deep_job(job_id, clean, horizon, owner))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return JSONResponse(status_code=202, content={
+        "job_id": job_id, "status": "pending",
+        "status_url": f"/api/ai/jobs/{job_id}",
+        "symbol": clean, "horizon": horizon,
+    })
 
 
 @router.get("/jobs/{job_id}")
-def get_ai_job(job_id: str, user: dict = Depends(require_tier_optional("silver"))) -> dict[str, Any]:
+def get_ai_job(job_id: str, user: User = Depends(get_current_user)) -> dict[str, Any]:
     doc = _job_get((job_id or "").strip())
-    if not doc:
+    # Someone else's job is indistinguishable from a missing one.
+    if not doc or doc.get("owner") != user_id_of(user):
         raise HTTPException(status_code=404, detail="unknown job_id")
-    return doc
+    return {k: v for k, v in doc.items() if k != "owner"}

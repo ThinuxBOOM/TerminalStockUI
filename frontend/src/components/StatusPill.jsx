@@ -4,7 +4,7 @@ import { Info } from "lucide-react";
 import { deriveMarketState, freshnessOf } from "../api/client";
 import { formatDateTime } from "../utils/format";
 
-const FRESHNESS_STATES = ["live", "delayed", "stale", "cached"];
+const FRESHNESS_STATES = ["live", "delayed", "stale", "cached", "daily"];
 
 // Accept both canonical provenance keys (delay_minutes / quality_grade /
 // fallback_used / missing_fields) and the shorthand aliases described in the
@@ -30,6 +30,7 @@ function normalizeProvenance(input) {
     fallback_used:
       typeof input.fallback_used === "boolean" ? input.fallback_used : Boolean(input.fallback),
     missing_fields: missing.map((m) => String(m)),
+    granularity: typeof input.granularity === "string" ? input.granularity : null,
   };
 }
 
@@ -83,6 +84,9 @@ function applyXshgLunch(resolved, mic, now) {
 function statusFor(fresh, market) {
   if (fresh === "stale" || market === "stale") {
     return { label: "STALE", dotColor: "bg-term-red" };
+  }
+  if (fresh === "daily" || market === "daily") {
+    return { label: "DAILY", dotColor: "bg-term-green" };
   }
   if (market === "closed") {
     return { label: "CLOSED", dotColor: "bg-term-muted" };

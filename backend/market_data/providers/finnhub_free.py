@@ -44,9 +44,9 @@ import os
 import time
 from datetime import datetime, timezone
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed
 
-from .base import CircuitBreaker, ProviderError, RateLimiter
+from .base import RETRY_TRANSIENT, CircuitBreaker, ProviderError, RateLimiter
 
 NAME = "finnhub"
 DEFAULT_DELAY_MINUTES = 0  # free tier is real-time for US (this provider is US-only)
@@ -223,17 +223,17 @@ class FinnhubProvider:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_fixed(1),
-        retry=retry_if_exception_type(ProviderError),
+        retry=RETRY_TRANSIENT,
         reraise=True,
     )
     def _fetch_raw(self, symbol: str, market: str | None = None) -> dict:
         _ = market  # accepted for call-site parity; US-only feed
         if not self.configured:
-            raise ProviderError(NAME, "finnhub API key missing")
+            raise ProviderError(NAME, "finnhub API key missing", retryable=False)
         try:
             import httpx  # lazy: offline/test envs fall back to stub
         except Exception as exc:
-            raise ProviderError(NAME, "httpx package unavailable") from exc
+            raise ProviderError(NAME, "httpx package unavailable", retryable=False) from exc
         upper = (symbol or "").strip().upper()
         if not upper:
             raise ProviderError(NAME, "empty symbol", retryable=False)

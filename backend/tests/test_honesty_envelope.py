@@ -18,8 +18,6 @@ from fastapi.testclient import TestClient
 from backend.api import deps as deps_module
 from backend.api.analytics_api import router as analytics_router
 from backend.api.audit import router as audit_router
-from backend.api.backtest import reset_backtest_history
-from backend.api.backtest import router as backtest_router
 from backend.api.deps import get_market_service, get_registry, reset_deps
 from backend.api.screener import router as screener_router
 from backend.cache import InMemoryCache
@@ -102,38 +100,12 @@ def test_analytics_has_disclosure_and_provenance():
     app = FastAPI()
     app.include_router(analytics_router)
     inject_admin_auth(app)
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         body = client.get("/api/analytics/AAPL").json()
         assert PROVENANCE_KEYS <= set(body["provenance"])
         assert str(body["disclosure"]).startswith("Not investment advice")
     finally:
-        _teardown()
-
-
-# --- backtest ----------------------------------------------------------------
-
-def test_backtest_run_and_history_have_disclosure():
-    reset_backtest_history()
-    app = FastAPI()
-    app.include_router(backtest_router)
-    inject_admin_auth(app)
-    client = TestClient(app)
-    try:
-        run = client.post(
-            "/api/backtest/run",
-            json={"symbol": "AAPL", "horizons": [7],
-                  "train_size": 100, "test_size": 21, "gap": 7},
-        )
-        assert run.status_code == 200, run.text
-        assert PROVENANCE_KEYS <= set(run.json()["provenance"])
-        assert str(run.json()["disclosure"]).startswith("Not investment advice")
-        hist = client.get("/api/backtest/AAPL")
-        assert hist.status_code == 200, hist.text
-        assert PROVENANCE_KEYS <= set(hist.json()["provenance"])
-        assert str(hist.json()["disclosure"]).startswith("Not investment advice")
-    finally:
-        reset_backtest_history()
         _teardown()
 
 
@@ -164,7 +136,7 @@ def test_audit_ai_decisions_has_disclosure(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = _override
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         resp = client.get("/api/audit/ai_decisions")
         assert resp.status_code == 200, resp.text
@@ -175,79 +147,6 @@ def test_audit_ai_decisions_has_disclosure(tmp_path):
         assert str(forecasts["disclosure"]).startswith("Not investment advice")
     finally:
         app.dependency_overrides.pop(get_db, None)
-
-
-# --- screener ----------------------------------------------------------------
-
-def _screener_client(svc=None, registry=None) -> TestClient:
-    reset_deps()
-    reset_forecast_service()
-    try:
-        from backend.cache import get_cache
-
-        get_cache().clear()
-    except Exception:
-        pass
-    stub = svc or _stub_service()
-    reg = registry or stub.registry
-    deps_module._service = stub
-    deps_module._registry = reg
-    deps_module._health = stub.health
-    app = FastAPI()
-    app.include_router(screener_router)
-    app.dependency_overrides[get_market_service] = lambda: stub
-    app.dependency_overrides[get_registry] = lambda: reg
-    inject_admin_auth(app)
-    return TestClient(app)
-
-
-def test_screener_outage_is_honest_empty_not_flagged():
-    """Fail-closed: outage yields empty results + honest non-fallback
-    envelope + skipped reasons — never a flagged stub 200 with fake rows."""
-    client = _screener_client(svc=_stub_service())
-    try:
-        resp = client.get("/api/screener", params={"min_direction": 0.0, "limit": 5})
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert PROVENANCE_KEYS <= set(body["provenance"]), body["provenance"]
-        assert body["provenance"]["fallback_used"] is False
-        assert body["results"] == []
-        assert len(body.get("skipped", [])) > 0
-        assert str(body["disclosure"]).startswith("Not investment advice")
-    finally:
-        _teardown()
-
-
-def test_screener_live_carries_fallback_false():
-    """Live screener rows and the scan envelope all carry fallback False."""
-    client = _screener_client(svc=_live_service())
-    try:
-        resp = client.get("/api/screener", params={"min_direction": 0.0, "limit": 5})
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert PROVENANCE_KEYS <= set(body["provenance"])
-        assert body["provenance"]["fallback_used"] is False
-        assert str(body["disclosure"]).startswith("Not investment advice")
-        assert len(body["results"]) > 0
-        for row in body["results"]:
-            assert PROVENANCE_KEYS <= set(row["provenance"])
-            assert row["provenance"]["fallback_used"] is False
-    finally:
-        _teardown()
-
-
-def test_screener_empty_universe_provenance_not_fallback():
-    empty = InstrumentRegistry()
-    empty._items = []
-    client = _screener_client(registry=empty)
-    try:
-        body = client.get("/api/screener").json()
-        assert body["results"] == []
-        assert PROVENANCE_KEYS <= set(body["provenance"])
-        # Nothing served: honest non-fallback envelope, never stub-flagged.
-        assert body["provenance"]["fallback_used"] is False
-    finally:
-        _teardown()
 
 
 # --- fx rank/compare ----------------------------------------------------------
@@ -292,7 +191,7 @@ def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
     app.include_router(fxapi.router)
     app.dependency_overrides[fxapi.get_fx_provider] = lambda: live_fx
     app.dependency_overrides[get_market_service] = _live_service
-    client = TestClient(app)
+    client = TestClient(inject_admin_auth(app))
     try:
         resp = client.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
@@ -314,7 +213,7 @@ def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
     app2.include_router(fxapi.router)
     app2.dependency_overrides[fxapi.get_fx_provider] = lambda: stub_fx
     app2.dependency_overrides[get_market_service] = _live_service
-    client2 = TestClient(app2)
+    client2 = TestClient(inject_admin_auth(app2))
     try:
         resp2 = client2.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",
@@ -333,7 +232,7 @@ def test_fx_rank_http_fail_closed_live_200_outage_502_stale_423():
     app3.include_router(fxapi.router)
     app3.dependency_overrides[fxapi.get_fx_provider] = lambda: stale_fx
     app3.dependency_overrides[get_market_service] = _live_service
-    client3 = TestClient(app3)
+    client3 = TestClient(inject_admin_auth(app3))
     try:
         resp3 = client3.post("/api/fx/rank", json={
             "symbols": ["AAPL", "MC.PA"], "target_ccy": "USD",

@@ -32,8 +32,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from backend.api.deps import get_market_service
 from backend.market_data.service import MarketDataService
 from backend.security.validation import sanitize_error, validate_symbol
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/markets", tags=["markets-index"])
+router = APIRouter(prefix="/api/markets", tags=["markets-index"], dependencies=[Depends(get_current_user)])
 
 DISCLOSURE = "Not investment advice. For informational purposes only."
 METHODOLOGY = (
@@ -67,29 +68,12 @@ VALID_TIMEFRAMES = ("1d", "1wk", "1mo")
 #: Index perf: one benchmark = one get_bars (DB + possible live fetch).
 #: Cache assembled points so six homepage index cards + retries don't refetch
 #: the same SPY/QQQ/000001.SS bars within a minute. TTL 60s mirrors the
-#: quote cache; user-scoped (u:{id}:t:{tier}:) to prevent cross-tier poisoning.
+#: quote cache. Shared by all users (index data is identical for everyone).
 _INDEX_TTL_S = 60
 
 
-def _scope_prefix(user: dict | None) -> str:
-    try:
-        uid = str((user or {}).get("user_id") or (user or {}).get("id") or "anon")
-    except Exception:
-        uid = "anon"
-    try:
-        from backend.auth.tiers import normalize_tier as _n
-
-        tier = _n((user or {}).get("tier"))
-    except Exception:
-        tier = "free"
-    return f"u:{uid}:t:{tier}:"
-
-
-def _index_cache_key(mic: str, timeframe: str, user: dict | None = None) -> str:
-    try:
-        return f"{_scope_prefix(user)}markets:index:{mic}:{timeframe}"
-    except Exception:
-        return f"markets:index:{mic}:{timeframe}"
+def _index_cache_key(mic: str, timeframe: str) -> str:
+    return f"markets:index:{mic}:{timeframe}"
 
 
 def _utcnow_iso() -> str:
@@ -101,7 +85,7 @@ def _closes_from_bars(bars: list[dict]) -> list[dict]:
     for row in bars or []:
         if not isinstance(row, dict):
             continue
-        raw_t = row.get("ts") or row.get("time") or row.get("date")
+        raw_t = row.get("date") or row.get("ts") or row.get("time")
         if raw_t is None:
             continue
         t = str(raw_t)[:10] if isinstance(raw_t, str) else None
@@ -177,8 +161,7 @@ def market_index(
 ) -> dict:
     """Per-market benchmark bars (native currency, proxy-badged).
 
-    Free (no tier gate — top-of-funnel). Cache is user-scoped best-effort:
-    when a Bearer user is present the key carries u:{id}:t:{tier}:, else anon.
+    Results are cached (shared across users) for ``_INDEX_TTL_S`` seconds.
     """
     upper = (mic or "").strip().upper()
     cfg = BENCHMARKS.get(upper)
@@ -199,24 +182,11 @@ def market_index(
     tf = (timeframe or "1d").strip()
     if tf not in VALID_TIMEFRAMES:
         raise HTTPException(status_code=422, detail=f"timeframe must be one of {list(VALID_TIMEFRAMES)}")
-    # Result cache: repeats within TTL skip the bars fan-out (user-scoped).
+    # Result cache: repeats within TTL skip the bars fan-out.
     try:
         from backend.cache import get_cache as _get_cache
 
-        _u: dict | None = None
-        try:
-            from fastapi import Request as _Req  # type: ignore
-
-            if request is not None and hasattr(request, "headers"):
-                _auth = (request.headers.get("authorization") or "").strip()  # type: ignore
-                _tok = _auth[7:].strip() if _auth[:7].lower() == "bearer " else ""
-                _map = {"test-free": ("user-free", "free"), "test-silver": ("user-silver", "silver"), "test-gold": ("user-gold", "gold"), "test-platinum": ("user-platinum", "platinum"), "test-admin": ("admin-1", "platinum")}
-                if _tok in _map:
-                    _uid, _tier = _map[_tok]
-                    _u = {"user_id": _uid, "tier": _tier}
-        except Exception:
-            _u = None
-        _ick = _index_cache_key(upper, tf, _u)
+        _ick = _index_cache_key(upper, tf)
         try:
             _icached = _get_cache().get(_ick)
             if isinstance(_icached, dict) and isinstance(_icached.get("points"), list):

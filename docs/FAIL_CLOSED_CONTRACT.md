@@ -40,7 +40,7 @@
 - **AI** (`/api/ai`): no key → `423` before any evidence work. Live-call failure /
   stub → `502` via the wire guard (`_refuse_stub_opinion`). `ai_enabled:false`
   skips the model and returns the deterministic blend (no fake opinion).
-- **Forecast/backtest/market-index/liquidation/screener/markets**: no bars →
+- **Forecast/backtest/market-index/screener/markets**: no bars →
   `502` (never fabricated envelopes). Per-symbol failures degrade to `skipped`
   (honest omission, never fallback rows). Empty scans return honest non-fallback
   envelopes.
@@ -63,14 +63,12 @@
   as provider calls; unknown/no-work probes report `latency_ms: null`.
 - State is `up|degraded|down|unknown|unconfigured` — the dashboard maps it
   verbatim and never invents `"ok"` for providers with no samples.
-- `GET /api/providers/health` pings sample-less providers on demand
-  (parallel lightweight quote / FX pair / AI model-list; skipped under
-  pytest) because passive per-process stats are always empty on serverless.
-  AI without a key short-circuits to `unconfigured` with no network and no
-  latency sample.
+- `GET /api/providers/health` is read-only: it reports real traffic plus the
+  scheduler's daily `health` probe and never calls upstream itself. Providers
+  that need a key are not wired into the quote chain until the key is set.
 - Keys: yfinance / akshare / stooq / FX need none. Alpaca / Finnhub /
-  TwelveData need free-tier keys for redundancy (skipped without them; US
-  coverage falls back to yfinance). AI keys (Gemini/OpenAI/Anthropic/xAI)
+  TwelveData need free-tier keys for redundancy (not called at all without
+  them; US coverage falls back to yfinance). AI keys (Gemini/OpenAI/Anthropic/xAI)
   enable opinions only — the deterministic forecast never needs them.
 
 ## Provider quotas (client-side, fail-fast)
@@ -85,14 +83,14 @@
   (usually yfinance, delayed-15). No stub served, no health sample faked —
   throttling is flow-control, not provider illness, so it is debug-logged
   and counted (`QuotaLimiter.status`) rather than marked degraded.
-- Scope: per-process (thread-safe sliding minute + UTC-day buckets). One
-  warm instance can never blow the budget; N warm instances on serverless
-  can sum past it — exact global enforcement needs atomic Redis counters
-  (future work).
+- Scope: per-process (thread-safe sliding minute + UTC-day buckets). The
+  backend runs a single worker, so these are the global limits.
 
 ## Provenance
 
 Every success carries `{source, as_of, delay_minutes, quality_grade,
 fallback_used:false, missing_fields}`. `missing_fields` lists honestly absent
-fields (e.g. `liquidation-feed` on the PROXY). Grade comes from `grade_quality`
-on live data only.
+fields. Grade comes from `grade_quality` on live data only. Data built from
+daily bars also carries `granularity: "1d"`: it is current when it covers the
+last completed session, so minute-level age does not lower its grade or mark
+it stale.

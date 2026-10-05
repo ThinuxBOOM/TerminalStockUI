@@ -13,6 +13,7 @@ from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.health import ProviderHealthTracker
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
+from backend.tests.auth_helpers import inject_admin_auth
 
 REQUIRED_PROVENANCE = {
     "source", "as_of", "delay_minutes",
@@ -41,7 +42,7 @@ def _client() -> TestClient:
     app.dependency_overrides[get_registry] = lambda: reg
     deps_module._MARKET_SERVICE = svc  # type: ignore[attr-defined]
     deps_module._REGISTRY = reg  # type: ignore[attr-defined]
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def test_index_registry_covers_six_live_plus_disabled_xcol():

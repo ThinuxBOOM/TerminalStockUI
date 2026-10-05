@@ -13,6 +13,7 @@ from backend.api import deps as deps_module
 from backend.api.deps import get_registry, reset_deps
 from backend.api.markets import router
 from backend.instruments.registry import InstrumentRegistry
+from backend.tests.auth_helpers import inject_admin_auth
 
 REQUIRED_PROVENANCE = {
     "source", "as_of", "delay_minutes",
@@ -40,7 +41,7 @@ def _client() -> TestClient:
     reg = InstrumentRegistry()
     app.dependency_overrides[get_registry] = lambda: reg
     deps_module._REGISTRY = reg  # type: ignore[attr-defined]
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def _seed_two_symbols(url: str, days: int = 10):

@@ -1,21 +1,19 @@
-"""Best-effort DB writers for revamp tables (Agent 7 completion).
+"""Best-effort DB writers for telemetry tables.
 
 All helpers are total: missing tables, closed DBs, CHECK violations, or a
 None session degrade to a logged no-op instead of raising, so hot paths
 (quotes, AI insight, health probes) never 500 on a pre-0006 database.
 
-Tables (mirrors infra/migrations/0006_revamp.sql):
-- ai_token_ledger (Agent 4 token accounting)
-- provider_health_history (Agent 6 durable probe history)
-- indicator_cache (Agent 5 deterministic overlay cache)
-
-Future auth hooks (user_id/tier) are accepted and stored but NEVER enforced
-here — enforcement lands with the users DB + subscription router.
+Tables:
+- ai_token_ledger (AI token accounting; also the source for per-user AI quotas)
+- provider_health_history (durable probe history)
+- indicator_cache (deterministic overlay cache)
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,6 +45,15 @@ def _call_type_for(profile: str | None, call_type: str | None) -> str:
     return "other"
 
 
+def _as_uuid(value: Any) -> uuid.UUID | None:
+    if value is None or isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None
+
+
 def log_ai_tokens(
     db: Any,
     *,
@@ -59,7 +66,6 @@ def log_ai_tokens(
     latency_ms: int | None = None,
     evidence_hash: str | None = None,
     user_id: Any = None,
-    tier: str | None = None,
 ) -> bool:
     """Append one ai_token_ledger row. Returns True on persist, False on skip."""
     if db is None:
@@ -89,8 +95,7 @@ def log_ai_tokens(
             output_tokens=out_tok,
             latency_ms=lat,
             evidence_hash=(str(evidence_hash)[:128] if evidence_hash else None),
-            user_id=user_id,
-            tier=(str(tier).strip().lower()[:16] if tier else None),
+            user_id=_as_uuid(user_id),
         )
         db.add(row)
         db.commit()

@@ -3,55 +3,52 @@ import { Link, useLocation } from "react-router-dom";
 import {
   Activity,
   ArrowLeft,
-  Crown,
-  FileText,
+  BriefcaseBusiness,
   FlaskConical,
-  Globe,
   LayoutDashboard,
-  Newspaper,
+  LineChart,
   ScanSearch,
   SlidersHorizontal,
   Star,
-  TrendingUp,
   User,
 } from "lucide-react";
 import Tooltip from "../ui/Tooltip";
 
+function lastSecurity() {
+  try {
+    const sym = String(localStorage.getItem("onemarket.lastSecurity.v1") ?? "");
+    return /^[\w.^-]{1,20}$/.test(sym) ? sym : "AAPL";
+  } catch {
+    return "AAPL";
+  }
+}
+
 const GROUPS = [
   {
     id: "workspace",
-    title: "WORKSPACE",
+    title: "Workspace",
     items: [
-      { to: "/app", end: true, label: "Overview", Icon: LayoutDashboard, hint: "Terminal home" },
-      { to: "/screener", label: "Markets", Icon: Globe, hint: "Markets overview — top picks" },
+      { to: "/app", end: true, label: "Overview", Icon: LayoutDashboard, hint: "Markets, signals and your watchlist" },
       { to: "/watchlist", label: "Watchlist", Icon: Star, hint: "Stocks you follow" },
-    ],
-  },
-  {
-    id: "discovery",
-    title: "DISCOVERY",
-    items: [
-      { to: "/search", label: "Discover", Icon: ScanSearch, hint: "Search any company" },
-      { to: "/screener", label: "Screener", Icon: SlidersHorizontal, hint: "Best odds right now" },
+      { to: "/portfolio", label: "Portfolio risk", Icon: BriefcaseBusiness, hint: "Volatility, VaR and correlations of your holdings" },
     ],
   },
   {
     id: "research",
-    title: "RESEARCH",
+    title: "Research",
     items: [
-      { to: "/security/AAPL", matchPrefix: "/security/", label: "Security Brief", Icon: FileText, hint: "Deep dive on a security" },
-      { to: "/forecast/AAPL", matchPrefix: "/forecast/", label: "Forecast", Icon: TrendingUp, hint: "Deterministic outlook" },
-      { to: "/backtest", label: "Backtest", Icon: FlaskConical, hint: "How good were past calls?" },
+      { to: "/screener", label: "Screener", Icon: SlidersHorizontal, hint: "Rank every stock by the model" },
+      { to: "/search", label: "Search", Icon: ScanSearch, hint: "Find any stock" },
+      { to: "/security/", dynamic: lastSecurity, matchPrefix: "/security/", label: "Security", Icon: LineChart, hint: "Chart, forecast, risk and fundamentals" },
+      { to: "/model", label: "Model Lab", Icon: FlaskConical, hint: "How accurate the forecasts are" },
     ],
   },
   {
-    id: "data",
-    title: "DATA",
+    id: "system",
+    title: "System",
     items: [
-      { to: "/providers", label: "Data Health", Icon: Activity, hint: "Is the data fresh?" },
-      { to: "/app#news", matchHash: "#news", label: "News", Icon: Newspaper, hint: "Latest headlines on home" },
+      { to: "/providers", label: "Data health", Icon: Activity, hint: "Is the data fresh?" },
       { to: "/account", label: "Account", Icon: User, hint: "Account and session" },
-      { to: "/pricing", label: "Pricing", Icon: Crown, hint: "Plans and upgrades" },
     ],
   },
 ];
@@ -66,29 +63,30 @@ function isItemActive(item, pathname, hash) {
 function SidebarItem({ item, collapsed, pathname, hash, onNavigate }) {
   const active = isItemActive(item, pathname, hash);
   const Icon = item.Icon;
+  const to = item.dynamic ? `${item.to}${encodeURIComponent(item.dynamic())}` : item.to;
   const link = (
     <Link
-      to={item.to}
+      to={to}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
       title={collapsed ? undefined : (item.hint ?? item.label)}
-      className={`relative flex items-center gap-2.5 rounded px-3 py-1.5 font-sans text-xs tracking-wide transition-colors duration-150 ${
+      className={`relative flex items-center gap-2.5 rounded-md px-3 py-1.5 font-sans text-[13px] transition-colors duration-150 ${
         active
-          ? "bg-term-greenDim font-semibold text-term-green"
+          ? "bg-term-accentDim font-medium text-term-text"
           : "text-term-muted hover:bg-term-panel2 hover:text-term-text"
       } ${collapsed ? "justify-center px-2" : ""}`.trim()}
     >
       {/* Active accent bar (not color alone) + icon state. */}
       <span
         aria-hidden="true"
-        className={`absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-term-green transition-opacity duration-150 ${
+        className={`absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-term-accent transition-opacity duration-150 ${
           active ? "opacity-100" : "opacity-0"
         }`.trim()}
       />
       <Icon
-        className={`h-4 w-4 shrink-0 ${active ? "text-term-green" : ""}`.trim()}
+        className={`h-4 w-4 shrink-0 ${active ? "text-term-accent" : ""}`.trim()}
         aria-hidden="true"
-        strokeWidth={active ? 2.5 : 2}
+        strokeWidth={active ? 2.25 : 1.75}
       />
       {collapsed ? <span className="sr-only">{item.label}</span> : <span className="truncate">{item.label}</span>}
     </Link>
@@ -128,7 +126,7 @@ function Sidebar({ collapsed = false, mobileOpen = false, onCloseMobile, onToggl
           {collapsed ? (
             <div aria-hidden="true" className="mx-2 mb-1 border-t border-term-border" title={g.title} />
           ) : (
-            <h2 className="term-label px-2 pb-1">{g.title}</h2>
+            <h2 className="px-3 pb-1 text-2xs font-medium uppercase tracking-[0.08em] text-term-faint">{g.title}</h2>
           )}
           <nav aria-label={g.title} className="space-y-0.5">
             {g.items.map((item) => (
@@ -156,7 +154,7 @@ function Sidebar({ collapsed = false, mobileOpen = false, onCloseMobile, onToggl
           {collapsed ? (
             <span className="sr-only">Back to landing page</span>
           ) : (
-            <span>LANDING</span>
+            <span>Home page</span>
           )}
         </Link>
         <button
@@ -168,7 +166,7 @@ function Sidebar({ collapsed = false, mobileOpen = false, onCloseMobile, onToggl
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           className="term-btn-sm mt-2 hidden w-full whitespace-nowrap lg:block"
         >
-          {collapsed ? "»" : "« COLLAPSE"}
+          {collapsed ? "»" : "« Collapse"}
         </button>
       </div>
     </div>

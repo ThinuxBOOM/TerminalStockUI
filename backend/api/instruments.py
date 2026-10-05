@@ -13,8 +13,9 @@ from backend.instruments.search import search_instruments
 from backend.market_data.provenance import build_provenance
 from backend.api.deps import get_registry
 from backend.api.schemas import InstrumentOut, SearchResponse
+from backend.auth.guards import get_current_user
 
-router = APIRouter(prefix="/api/instruments", tags=["instruments"])
+router = APIRouter(prefix="/api/instruments", tags=["instruments"], dependencies=[Depends(get_current_user)])
 
 log = logging.getLogger(__name__)
 

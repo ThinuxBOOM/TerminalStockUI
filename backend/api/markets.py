@@ -28,38 +28,11 @@ from backend.instruments.registry import InstrumentRegistry
 from backend.market_data.provenance import build_provenance
 from backend.market_data.quality import grade_quality
 from backend.market_data.service import MarketDataService
+from backend.auth.guards import get_current_user
+from backend.instruments.calendars import session_date
 
-router = APIRouter(prefix="/api/markets", tags=["markets"])
+router = APIRouter(prefix="/api/markets", tags=["markets"], dependencies=[Depends(get_current_user)])
 
-
-def _scope_prefix(user: dict | None) -> str:
-    try:
-        uid = str((user or {}).get("user_id") or (user or {}).get("id") or "anon")
-    except Exception:
-        uid = "anon"
-    try:
-        from backend.auth.tiers import normalize_tier as _n
-
-        tier = _n((user or {}).get("tier"))
-    except Exception:
-        tier = "free"
-    return f"u:{uid}:t:{tier}:"
-
-
-def _user_from_request_best_effort(request: Request | None) -> dict | None:
-    """Best-effort user for cache scoping only (no gating — markets stay free)."""
-    try:
-        if request is None or not hasattr(request, "headers"):
-            return None
-        auth = (request.headers.get("authorization") or "").strip()
-        tok = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-        mapping = {"test-free": ("user-free", "free"), "test-silver": ("user-silver", "silver"), "test-gold": ("user-gold", "gold"), "test-platinum": ("user-platinum", "platinum"), "test-admin": ("admin-1", "platinum")}
-        if tok in mapping:
-            uid, tier = mapping[tok]
-            return {"user_id": uid, "tier": tier}
-    except Exception:
-        pass
-    return None
 
 _BUILTIN_MARKETS = frozenset({"XNYS", "XNAS", "XSHG", "XPAR", "XAMS", "XBRU"})
 
@@ -90,22 +63,14 @@ _MARKETS_OVERVIEW_TTL_S = 45
 _MARKETS_LIQUIDITY_TTL_S = 45
 
 
-def _overview_cache_key(target_ccy: str | None, user: dict | None = None) -> str:
-    """User-scoped: u:{id}:t:{tier}: prefix prevents cross-tier poisoning."""
+def _overview_cache_key(target_ccy: str | None) -> str:
     base = f"markets:overview:{(target_ccy or 'ALL').upper()}"
-    try:
-        return f"{_scope_prefix(user)}{base}"
-    except Exception:
-        return base
+    return base
 
 
-def _liquidity_cache_key(mic: str, target_ccy: str | None, limit: int, sort: str, user: dict | None = None) -> str:
-    """User-scoped: u:{id}:t:{tier}: prefix prevents cross-tier poisoning."""
+def _liquidity_cache_key(mic: str, target_ccy: str | None, limit: int, sort: str) -> str:
     base = f"markets:liquidity:{mic}:{(target_ccy or 'ALL').upper()}:{int(limit)}:{(sort or 'turnover').lower()}"
-    try:
-        return f"{_scope_prefix(user)}{base}"
-    except Exception:
-        return base
+    return base
 
 
 #: Liquidity history: daily aggregates straight from stored 1d price_bars
@@ -129,13 +94,9 @@ def _normalize_history_window(window: str | None) -> str:
     return w if w in _HISTORY_WINDOW_DAYS else "1D"
 
 
-def _history_cache_key(mic: str, window: str, user: dict | None = None) -> str:
-    """User-scoped: u:{id}:t:{tier}: prefix prevents cross-tier poisoning."""
+def _history_cache_key(mic: str, window: str) -> str:
     base = f"markets:liquidity-history:{mic}:{window}"
-    try:
-        return f"{_scope_prefix(user)}{base}"
-    except Exception:
-        return base
+    return base
 
 
 def _empty_history(mic: str, window: str, currency: str, missing: list[str]) -> dict:
@@ -608,16 +569,15 @@ def markets_overview(
 ) -> dict:
     """Per-MIC liquidity + breadth aggregates across all known markets.
 
-    Free (no tier gate). Cache is user-scoped best-effort.
+    Results are cached briefly and shared across users.
     """
     ccy = _normalize_target_ccy(target_ccy)
     # Result cache: identical overviews within TTL skip the quote fan-out
     # (cold scans exceed the 60s frontend timeout; cached repeats are fast).
-    # User-scoped so tier-specific views never poison each other.
     try:
         from backend.cache import get_cache as _get_cache
 
-        _ck = _overview_cache_key(ccy, _user_from_request_best_effort(request))
+        _ck = _overview_cache_key(ccy)
         try:
             _cached = _get_cache().get(_ck)
             if isinstance(_cached, dict) and isinstance(_cached.get("markets"), list):
@@ -694,14 +654,14 @@ def market_liquidity(
 ) -> dict:
     """Single-market liquidity + breadth + per-symbol rows.
 
-    Free (no tier gate). Cache is user-scoped best-effort.
+    Results are cached briefly and shared across users.
     """
     norm = _validate_mic(mic)
     ccy = _normalize_target_ccy(target_ccy)
     try:
         from backend.cache import get_cache as _get_cache3
 
-        _lck = _liquidity_cache_key(norm, ccy, int(limit), str(sort), _user_from_request_best_effort(request))
+        _lck = _liquidity_cache_key(norm, ccy, int(limit), str(sort))
         try:
             _lcached = _get_cache3().get(_lck)
             if isinstance(_lcached, dict) and isinstance(_lcached.get("rows"), list):
@@ -769,7 +729,7 @@ def market_liquidity_history(
     try:
         from backend.cache import get_cache as _get_cache_h
 
-        _hck = _history_cache_key(norm, w, _user_from_request_best_effort(request))
+        _hck = _history_cache_key(norm, w)
         try:
             _hcached = _get_cache_h().get(_hck)
             if isinstance(_hcached, dict) and isinstance(_hcached.get("points"), list):
@@ -828,9 +788,12 @@ def market_liquidity_history(
                 raw_ts = getattr(bar, "ts", None)
                 if raw_ts is None:
                     continue
-                day = str(raw_ts)[:10]
-                if len(day) != 10:
+                # Exchange-local session day (the UTC date is a day early
+                # for Shanghai and Euronext bars).
+                session = session_date(raw_ts, getattr(_inst, "exchange_mic", None) or norm)
+                if session is None:
                     continue
+                day = session.isoformat()
                 try:
                     close = float(getattr(bar, "close", None))  # type: ignore[arg-type]
                     if not _math.isfinite(close):

@@ -5,8 +5,6 @@ import FreshnessBadge from "../../components/FreshnessBadge";
 import CurrencyValue from "../../components/CurrencyValue";
 import Skeleton from "../../components/Skeleton";
 import ErrorState from "../../components/ErrorState";
-import TierLockedPanel from "../../components/TierLockedPanel";
-import { isUpgradeRequiredError } from "../../api/client";
 
 const h = React.createElement;
 
@@ -53,31 +51,31 @@ const MAX_DISPLAY_CANDLES = 500;
 const DASHED = LineStyle && LineStyle.Dashed ? LineStyle.Dashed : 2;
 const SOLID = LineStyle && LineStyle.Solid ? LineStyle.Solid : 0;
 
-// Overlay line colors (term palette: grid #1c2433, text #8b94a7,
-// up #3ddc84, down #ff5c5c, cyan #56c8ff for composite/analogue lines).
+// Overlay colors: dark steps of the CVD-validated categorical palette, kept
+// apart from the green/red candles (up #34d399, down #f87171).
 // Keys match normalizeIndicators.
 const INDICATOR_COLORS = {
-  SMA20: "#f5c542",
-  SMA50: "#56c8ff",
-  SMA200: "#b388ff",
-  EMA12: "#ff9f43",
-  EMA26: "#00d1b2",
-  BB_UPPER: "#8b94a7",
-  BB_MIDDLE: "#c3cad6",
-  BB_LOWER: "#8b94a7",
-  VWAP: "#56c8ff",
-  RSI14: "#b388ff",
-  ATR14: "#56c8ff",
-  MACD_LINE: "#56c8ff",
-  MACD_SIGNAL: "#ff9f43"
+  SMA20: "#9085e9",
+  SMA50: "#3987e5",
+  SMA200: "#d95926",
+  EMA12: "#c98500",
+  EMA26: "#d55181",
+  BB_UPPER: "#5d6778",
+  BB_MIDDLE: "#8a94a6",
+  BB_LOWER: "#5d6778",
+  VWAP: "#199e70",
+  RSI14: "#9085e9",
+  ATR14: "#3987e5",
+  MACD_LINE: "#3987e5",
+  MACD_SIGNAL: "#d95926"
 };
 
 // Overlays drawn on the price pane vs the separate oscillator pane.
 const PRICE_OVERLAY_KEYS = ["SMA20", "SMA50", "SMA200", "EMA12", "EMA26", "BB_UPPER", "BB_MIDDLE", "BB_LOWER", "VWAP"];
 const OSC_LINE_KEYS = ["RSI14", "ATR14", "MACD_LINE", "MACD_SIGNAL"];
 const HIST_KEY = "MACD_HIST";
-const HIST_UP = "#3ddc84";
-const HIST_DOWN = "#ff5c5c";
+const HIST_UP = "#34d399";
+const HIST_DOWN = "#f87171";
 
 // Canonical request name -> legend/series expansion.
 function expandRequested(requested) {
@@ -187,26 +185,15 @@ function PriceChart({
   data,
   loading = false,
   error = null,
-  rawError = null,
-  errorObj = null,
   provenance = null,
   indicators = null,
   requestedIndicators = [],
   indicatorsLoading = false,
   indicatorsError = null,
-  rawIndicatorsError = null,
-  indicatorsErrorObj = null,
   indicatorsProvenance = null,
   currency = "USD",
   onRetryIndicators = null
 }) {
-  // PHASE 3: 402 branches BEFORE generic ErrorState. `error` /
-  // `indicatorsError` are pre-formatted strings from the parent; the raw
-  // axios errors arrive via rawError/rawIndicatorsError (or errorObj).
-  // isUpgradeRequiredError(string) is false, so non-402 string paths
-  // (502/423/404) are untouched.
-  const barsUpgradeError = isUpgradeRequiredError(rawError) || isUpgradeRequiredError(errorObj) || isUpgradeRequiredError(error) ? (rawError ?? errorObj ?? error) : null;
-  const indicatorsUpgradeError = isUpgradeRequiredError(rawIndicatorsError) || isUpgradeRequiredError(indicatorsErrorObj) || isUpgradeRequiredError(indicatorsError) ? (rawIndicatorsError ?? indicatorsErrorObj ?? indicatorsError) : null;
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const overlayRef = useRef(new Map());
@@ -268,20 +255,20 @@ function PriceChart({
   const setContainerRef = useCallback((node) => {
     if (!node || chartRef.current) return;
     const chart = createChart(node, {
-      layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
-      grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      layout: { background: { type: "solid", color: "#10151e" }, textColor: "#8a94a6", fontFamily: "Inter Variable, Inter, system-ui, sans-serif" },
+      grid: { vertLines: { color: "#161d29" }, horzLines: { color: "#1c2431" } },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
-        horzLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+        vertLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
+        horzLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
       },
       height: 300
     });
     const series = chart.addCandlestickSeries({
-      upColor: "#3ddc84",
-      downColor: "#ff5c5c",
-      wickUpColor: "#3ddc84",
-      wickDownColor: "#ff5c5c",
+      upColor: "#34d399",
+      downColor: "#f87171",
+      wickUpColor: "#34d399",
+      wickDownColor: "#f87171",
       borderVisible: false
     });
     chartRef.current = chart;
@@ -299,12 +286,12 @@ function PriceChart({
   const setOscContainerRef = useCallback((node) => {
     if (!node || oscChartRef.current) return;
     const chart = createChart(node, {
-      layout: { background: { type: "solid", color: "#0f141d" }, textColor: "#8b94a7" },
-      grid: { vertLines: { color: "#1c2433" }, horzLines: { color: "#1c2433" } },
+      layout: { background: { type: "solid", color: "#10151e" }, textColor: "#8a94a6", fontFamily: "Inter Variable, Inter, system-ui, sans-serif" },
+      grid: { vertLines: { color: "#161d29" }, horzLines: { color: "#1c2431" } },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
-        horzLine: { visible: true, labelVisible: true, color: "#8b94a7", style: 2 },
+        vertLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
+        horzLine: { visible: true, labelVisible: true, color: "#5d6778", style: 2 },
       },
       height: 140
     });
@@ -422,8 +409,8 @@ function PriceChart({
         if (key === "RSI14" && !rsiGuidesRef.current) {
           // Scale guides (constants, not market data): overbought/oversold.
           try {
-            s.createPriceLine({ price: 70, color: "#ff5c5c", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "70" });
-            s.createPriceLine({ price: 30, color: "#3ddc84", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "30" });
+            s.createPriceLine({ price: 70, color: "#f87171", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "70" });
+            s.createPriceLine({ price: 30, color: "#34d399", lineWidth: 1, lineStyle: DASHED, axisLabelVisible: true, title: "30" });
             rsiGuidesRef.current = true;
           } catch {
             // older builds without createPriceLine - guides skipped, lines intact
@@ -455,13 +442,8 @@ function PriceChart({
   // that could be mistaken for market data. Separate empty (no error) from
   // error so a null-error empty never renders the word "unavailable" as if
   // it were a failure, and vice versa.
-  if (!live && loading && !error && !barsUpgradeError) {
+  if (!live && loading && !error) {
     return /* @__PURE__ */ h(Skeleton, { label: `loading live bars for ${symbol}…`, lines: 8, className: "min-h-[300px]" });
-  }
-  // PHASE 3: 402 branches BEFORE generic ErrorState. 502/423/404 keep the
-  // existing "Price history unavailable" copy below untouched.
-  if (barsUpgradeError && !live) {
-    return /* @__PURE__ */ h(TierLockedPanel, { error: barsUpgradeError, feature: "Price chart" });
   }
   if (!live && !loading && error) {
     return /* @__PURE__ */ h("div", { role: "alert" }, /* @__PURE__ */ h("p", { className: "py-8 text-center text-xs text-term-muted" }, "Price history unavailable —", " ", error, " No placeholder is shown in place of market data."), /* @__PURE__ */ h("p", { className: "mt-1 text-[10px] text-term-muted" }, "source: GET /api/market_data/bars · symbol ", symbol), provenance && /* @__PURE__ */ h("div", { className: "mt-2 flex flex-wrap gap-2" }, /* @__PURE__ */ h(ProvenanceBadge, { p: provenance }), /* @__PURE__ */ h(FreshnessBadge, { p: provenance })));
@@ -494,21 +476,20 @@ function PriceChart({
     })
   ) : null;
 
-  const indicatorStatus = indicatorsUpgradeError && !hasPriceOverlayData && !hasOscData && priceOverlaysRequested ? /* @__PURE__ */ h(TierLockedPanel, { error: indicatorsUpgradeError, feature: "Analytics" }) : /* @__PURE__ */ h(
+  const indicatorStatus = /* @__PURE__ */ h(
     React.Fragment,
     null,
     indicatorsError && !hasPriceOverlayData && !hasOscData && priceOverlaysRequested ? /* @__PURE__ */ h("div", { className: "mb-2" }, /* @__PURE__ */ h(ErrorState, { title: "Indicators unavailable", detail: `${indicatorsError} - price candles unaffected, no lines fabricated.`, onRetry: onRetryIndicators || void 0 })) : null,
-    !indicatorsLoading && !indicatorsError && !indicatorsUpgradeError && priceOverlaysRequested && !hasPriceOverlayData && legendEntries.some((e) => e.pane === "price") ? /* @__PURE__ */ h("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "Indicator series unavailable - the analytics endpoint returned snapshot values only (no plottable points). No lines fabricated.") : null
+    !indicatorsLoading && !indicatorsError && priceOverlaysRequested && !hasPriceOverlayData && legendEntries.some((e) => e.pane === "price") ? /* @__PURE__ */ h("p", { className: "mb-2 text-[11px] text-term-muted", role: "status" }, "Indicator series unavailable - the analytics endpoint returned snapshot values only (no plottable points). No lines fabricated.") : null
   );
 
   const oscPane = showOscPane ? /* @__PURE__ */ h(
     "div",
     { className: "mt-3" },
     /* @__PURE__ */ h("p", { className: "term-label" }, "Momentum · RSI / MACD / ATR"),
-    indicatorsUpgradeError && !hasOscData ? /* @__PURE__ */ h(TierLockedPanel, { error: indicatorsUpgradeError, feature: "Analytics" }) : null,
-    indicatorsLoading && !hasOscData && !indicatorsError && !indicatorsUpgradeError ? /* @__PURE__ */ h(Skeleton, { label: `loading oscillators for ${symbol}…`, lines: 2, className: "min-h-[140px]" }) : null,
-    indicatorsError && !indicatorsUpgradeError && !hasOscData ? /* @__PURE__ */ h(ErrorState, { title: "Oscillators unavailable", detail: `${indicatorsError} - price pane unaffected.`, onRetry: onRetryIndicators || void 0 }) : null,
-    !indicatorsLoading && !indicatorsError && !indicatorsUpgradeError && oscRequested && !hasOscData ? /* @__PURE__ */ h("p", { className: "py-4 text-center text-[11px] text-term-muted", role: "status" }, "Oscillator series unavailable - snapshot only, no lines fabricated.") : null,
+    indicatorsLoading && !hasOscData && !indicatorsError ? /* @__PURE__ */ h(Skeleton, { label: `loading oscillators for ${symbol}…`, lines: 2, className: "min-h-[140px]" }) : null,
+    indicatorsError && !hasOscData ? /* @__PURE__ */ h(ErrorState, { title: "Oscillators unavailable", detail: `${indicatorsError} - price pane unaffected.`, onRetry: onRetryIndicators || void 0 }) : null,
+    !indicatorsLoading && !indicatorsError && oscRequested && !hasOscData ? /* @__PURE__ */ h("p", { className: "py-4 text-center text-[11px] text-term-muted", role: "status" }, "Oscillator series unavailable - snapshot only, no lines fabricated.") : null,
     !indicatorsError && hasOscData ? /* @__PURE__ */ h("div", { ref: setOscContainerRef, className: "w-full min-h-[140px]", role: "img", "aria-label": `oscillators for ${symbol}` }) : null,
     indicatorsProvenance && hasOscData ? /* @__PURE__ */ h("div", { className: "mt-1" }, /* @__PURE__ */ h(ProvenanceBadge, { p: indicatorsProvenance })) : null
   ) : null;

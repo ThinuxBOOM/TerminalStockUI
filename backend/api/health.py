@@ -144,7 +144,8 @@ def _deep_redis() -> str:
             pass
         if _t.monotonic() - t0 > 5:
             return "degraded"
-        return "up" if isinstance(hit, dict) else "up"
+        # A write that cannot be read back means the cache is not working.
+        return "up" if isinstance(hit, dict) and hit.get("ping") == 1 else "degraded"
     except Exception:
         if not (os.getenv("REDIS_URL", "") or os.getenv("UPSTASH_REDIS_URL", "")):
             return "not-configured"

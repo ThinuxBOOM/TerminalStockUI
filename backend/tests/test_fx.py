@@ -43,6 +43,7 @@ from backend.market_data.health import ProviderHealthTracker
 from backend.market_data.providers.base import CircuitBreaker, ProviderError
 from backend.market_data.providers.yfinance import YFinanceProvider
 from backend.market_data.service import MarketDataService
+from backend.tests.auth_helpers import inject_admin_auth
 
 REQUIRED_KEYS = {"source", "as_of", "delay_minutes", "quality_grade", "fallback_used", "missing_fields"}
 
@@ -115,7 +116,7 @@ def _live_client(fx_provider: FXProvider, market=None) -> TestClient:
     app.dependency_overrides[fxapi.get_fx_provider] = lambda: fx_provider
     svc = market if isinstance(market, MarketDataService) else _live_market_service()
     app.dependency_overrides[get_market_service] = lambda: svc
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 # -- fail-closed provider ------------------------------------------------------
@@ -550,7 +551,7 @@ def _client(fx_provider: FXProvider) -> TestClient:
     app.include_router(fxapi.router)
     app.dependency_overrides[fxapi.get_fx_provider] = lambda: fx_provider
     app.dependency_overrides[get_market_service] = _stub_market_service
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 def test_pairs_supported_currencies():

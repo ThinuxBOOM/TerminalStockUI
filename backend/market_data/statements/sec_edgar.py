@@ -26,9 +26,9 @@ import os
 import time
 from datetime import datetime, timezone
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed
 
-from backend.market_data.providers.base import CircuitBreaker, ProviderError, RateLimiter
+from backend.market_data.providers.base import RETRY_TRANSIENT, CircuitBreaker, ProviderError, RateLimiter
 from backend.market_data.statements import concepts
 
 NAME = "sec-edgar"
@@ -138,14 +138,14 @@ class SecEdgarProvider:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_fixed(1),
-        retry=retry_if_exception_type(ProviderError),
+        retry=RETRY_TRANSIENT,
         reraise=True,
     )
     def _http_get_json(self, url: str) -> dict:
         try:  # lazy: offline/test envs stay import-safe
             import httpx  # type: ignore[import-not-found]
         except Exception as exc:
-            raise ProviderError(NAME, "httpx package unavailable") from exc
+            raise ProviderError(NAME, "httpx package unavailable", retryable=False) from exc
         try:
             resp = httpx.get(
                 url,

@@ -90,17 +90,12 @@ describe("benchmarkForMic", () => {
   });
 });
 
-describe("cache keys (future user_id/tier namespaced, guest/free today)", () => {
-  it("defaults to guest/free with no auth", () => {
-    expect(aspiCacheKey("XNAS", "1d")).toEqual(["aspi", "XNAS", "1d", "u:guest", "t:free"]);
-    expect(aspiInflightKey("XNAS", "1d")).toBe("aspi:XNAS:1d:guest:free");
-    expect(top20CacheKey("XPAR")).toEqual(["aspi-top20", "XPAR", "u:guest", "t:free"]);
-    expect(top20InflightKey("XPAR")).toBe("aspi-top20:XPAR:guest:free");
-  });
-  it("namespaces future user/tier without changing shape", () => {
-    expect(aspiCacheKey("XNAS", "1wk", "u123", "pro")).toEqual(["aspi", "XNAS", "1wk", "u:u123", "t:pro"]);
-    expect(aspiInflightKey("XNAS", "1wk", "u123", "pro")).toBe("aspi:XNAS:1wk:u123:pro");
-    expect(top20CacheKey("XPAR", "u123", "pro")[2]).toBe("u:u123");
+describe("cache keys (shared by every user)", () => {
+  it("are keyed by market and timeframe only", () => {
+    expect(aspiCacheKey("xnas", "1d")).toEqual(["aspi", "XNAS", "1d"]);
+    expect(aspiInflightKey("XNAS", "1d")).toBe("aspi:XNAS:1d");
+    expect(top20CacheKey("XPAR")).toEqual(["aspi-top20", "XPAR"]);
+    expect(top20InflightKey("XPAR")).toBe("aspi-top20:XPAR");
   });
   it("falls back to 1d on unknown timeframes", () => {
     expect(aspiCacheKey("XNAS", "5m")[2]).toBe("1d");

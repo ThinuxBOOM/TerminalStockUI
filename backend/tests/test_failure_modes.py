@@ -14,7 +14,6 @@ from backend.ai.providers import base as base_module
 from backend.ai.schemas import AIOpinion, parse_opinion_strict
 from backend.api import ai as ai_api
 from backend.api import fx as fxapi
-from backend.api.backtest import reset_backtest_history
 from backend.api.deps import get_market_service, reset_deps
 from backend.api.main import create_app
 from backend.cache import InMemoryCache
@@ -93,7 +92,6 @@ def _client(market=None, fx_provider=None) -> TestClient:
 
     reset_deps()
     reset_forecast_service()
-    reset_backtest_history()
     ai_api.reset_ai_router()
     fxapi.reset_fx_provider()
     secrets_module.reset_fernet()
@@ -119,7 +117,6 @@ def _teardown() -> None:
     fxapi.reset_fx_provider()
     reset_deps()
     reset_forecast_service()
-    reset_backtest_history()
 
 
 # --- provider outage -> raise + HTTP 502 (fail-closed) ------------------------
@@ -236,8 +233,6 @@ def test_invalid_horizon_rejected_with_422():
             resp = client.get("/api/forecast/AAPL", params={"horizon": bad})
             assert resp.status_code == 422, (bad, resp.text)
         assert client.get("/api/forecast/AAPL", params={"horizon": 5}).status_code == 422
-        resp = client.post("/api/backtest/run", json={"symbol": "AAPL", "horizons": [5]})
-        assert resp.status_code == 422, resp.text
         resp = client.post(
             "/api/ai/forecast_opinion", json={"symbol": "AAPL", "horizon": 5}
         )
@@ -371,11 +366,6 @@ def test_missing_symbol_404_or_empty_not_500():
         resp = client.get("/api/audit/forecasts", params={"symbol": "ZZZNOPE123"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["count"] == 0
-
-        # Fail-closed: unknown-symbol history/bars have no live data -> 502.
-        resp = client.get("/api/backtest/ZZZNOPE123")
-        assert resp.status_code == 502, resp.text
-        assert resp.status_code != 500
 
         resp = client.get("/api/market_data/quote", params={"symbol": "ZZZNOPE123"})
         assert resp.status_code == 502, resp.text

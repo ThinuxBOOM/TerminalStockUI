@@ -1,57 +1,50 @@
-// V2 real login/register page (replaces the /login stub route).
-// JWT via POST /api/auth/register + /api/auth/login; refresh cookie handled
-// server-side. Guest browsing still works everywhere — login only unlocks
-// tiered features + billing.
-
-import React, { useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import "../features/landing/landing.css";
+import React, { useEffect, useState } from "react";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { fetchAuthConfig } from "../api/auth";
 import { useAuth } from "../hooks/useAuth";
 
 function friendlyAuthError(err) {
   const status = err?.response?.status;
+  const detail = err?.response?.data?.detail;
+  if (status === 401) return "Wrong email or password.";
+  if (status === 403) return "Sign-up is closed on this server. Ask the administrator for an account.";
+  if (status === 409) return "That email already has an account. Sign in instead.";
+  if (status === 429) return "Too many attempts. Wait a minute and try again.";
+  if (typeof detail === "string" && detail) return detail.slice(0, 300);
+  if (!err?.response) return "Could not reach the server. Check your connection and retry.";
+  return "Sign-in failed. Please retry.";
+}
+
+// Only same-app paths are allowed as a post-login destination (no open redirect).
+function safeNext(search) {
   try {
-    const data = err?.response?.data;
-    const detail =
-      (typeof data?.detail === "string" && data.detail) ||
-      (typeof data?.message === "string" && data.message) ||
-      null;
-    if (detail) return detail.slice(0, 300);
+    const next = new URLSearchParams(search || "").get("next") || "";
+    return next.startsWith("/") && !next.startsWith("//") ? next : "/app";
   } catch {
-    // fall through
+    return "/app";
   }
-  if (status === 401) return "Wrong email or password. Try again.";
-  if (status === 409) return "That email already has an account — sign in instead.";
-  if (status === 422) return "Check the form: valid email + password of at least 10 characters.";
-  if (err instanceof Error && err.message) return err.message;
-  return "Sign-in failed. Retry — the terminal works fine as guest meanwhile.";
 }
 
 function LoginPage() {
-  const { login, register } = useAuth();
+  const { status, login, register } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [mode, setMode] = useState(() => {
-    try {
-      const params = new URLSearchParams(location.search || "");
-      return params.get("mode") === "register" ? "register" : "login";
-    } catch {
-      return "login";
-    }
-  });
+  const next = safeNext(location.search);
+  const config = useQuery({ queryKey: ["auth-config"], queryFn: fetchAuthConfig, staleTime: 300_000 });
+  const registrationOpen = config.data?.registrationOpen === true;
+  const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
-  const next = (() => {
-    try {
-      const params = new URLSearchParams(location.search || "");
-      const n = params.get("next");
-      return n && n.startsWith("/") ? n : "/account";
-    } catch {
-      return "/account";
-    }
-  })();
+  useEffect(() => {
+    if (!registrationOpen && mode === "register") setMode("login");
+  }, [registrationOpen, mode]);
+
+  if (status === "authenticated") return <Navigate to={next} replace />;
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -69,86 +62,72 @@ function LoginPage() {
     }
   }
 
+  const registering = mode === "register";
   return (
-    <div className="mx-auto max-w-md">
-      <p className="text-[11px] tracking-widest text-term-muted">
-        {mode === "register" ? "CREATE ACCOUNT" : "SIGN IN"}
-      </p>
-      <h1 className="mt-1 text-xl font-bold text-term-text">
-        {mode === "register" ? "Join OneMarket" : "Welcome back"}
-      </h1>
-      <p className="mt-1 text-sm text-term-muted">
-        Free to start. Paid plans unlock deeper research — see{" "}
-        <Link to="/pricing" className="text-term-green hover:underline">
-          pricing
+    <div className="lp relative flex min-h-screen items-center justify-center px-4">
+      <div className="lp-grid" />
+      <div className="relative w-full max-w-sm">
+        <Link to="/" className="flex items-center justify-center gap-2.5" aria-label="OneMarket home">
+          <img src="/logo.svg" alt="" className="h-9 w-9" width="36" height="36" />
+          <span className="text-lg font-semibold tracking-tight text-white">OneMarket</span>
         </Link>
-        .
-      </p>
-
-      <form onSubmit={onSubmit} className="term-panel mt-4 space-y-3 p-4">
-        <div>
-          <label className="term-label" htmlFor="login-email">
-            Email
-          </label>
-          <input
-            id="login-email"
-            className="term-input mt-1 w-full"
-            type="email"
-            required
-            autoComplete="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            spellCheck={false}
-          />
-        </div>
-        <div>
-          <label className="term-label" htmlFor="login-password">
-            Password
-            {mode === "register" ? " (min 10 characters)" : ""}
-          </label>
-          <input
-            id="login-password"
-            className="term-input mt-1 w-full"
-            type="password"
-            required
-            minLength={mode === "register" ? 10 : 1}
-            autoComplete={mode === "register" ? "new-password" : "current-password"}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••••"
-          />
-        </div>
-        {error ? (
-          <p className="text-xs text-term-red" role="alert">
-            {error}
-          </p>
-        ) : null}
-        <button className="term-btn w-full text-sm" type="submit" disabled={busy}>
-          {busy ? "PLEASE WAIT…" : mode === "register" ? "CREATE FREE ACCOUNT →" : "SIGN IN →"}
-        </button>
-        <button
-          type="button"
-          className="term-btn-ghost w-full text-xs"
-          onClick={() => {
-            setMode(mode === "register" ? "login" : "register");
-            setError(null);
-          }}
-        >
-          {mode === "register" ? "Have an account? Sign in" : "New here? Create a free account"}
-        </button>
-      </form>
-
-      <div className="mt-4 flex flex-wrap gap-2 text-xs">
-        <Link to="/pricing" className="term-btn-ghost text-xs">
-          PRICING →
-        </Link>
-        <Link to="/app" className="term-btn-ghost text-xs">
-          CONTINUE AS GUEST →
-        </Link>
+        <form onSubmit={onSubmit} className="lp-glass mt-8 space-y-4 rounded-2xl p-6">
+          <div>
+            <h1 className="text-lg font-semibold text-white">{registering ? "Create your account" : "Welcome back"}</h1>
+            <p className="mt-1 text-sm text-term-muted">{registering ? "Use at least 10 characters for your password." : "Sign in to the terminal."}</p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-term-muted" htmlFor="login-email">Email</label>
+            <input
+              id="login-email"
+              className="term-input mt-1.5 w-full"
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              spellCheck={false}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-term-muted" htmlFor="login-password">Password</label>
+            <input
+              id="login-password"
+              className="term-input mt-1.5 w-full"
+              type="password"
+              required
+              minLength={registering ? 10 : 1}
+              maxLength={72}
+              autoComplete={registering ? "new-password" : "current-password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          {error ? (
+            <p className="rounded-md border border-term-red/30 bg-term-redDim px-3 py-2 text-xs text-term-red" role="alert">{error}</p>
+          ) : null}
+          <button className="term-btn w-full py-2.5" type="submit" disabled={busy || status === "loading"}>
+            {busy ? "Please wait…" : registering ? "Create account" : "Sign in"}
+          </button>
+          {registrationOpen ? (
+            <button
+              type="button"
+              className="w-full text-center text-xs text-term-muted hover:text-term-text"
+              onClick={() => {
+                setMode(registering ? "login" : "register");
+                setError(null);
+              }}
+            >
+              {registering ? "Have an account? Sign in" : "New here? Create an account"}
+            </button>
+          ) : (
+            <p className="text-center text-xs text-term-faint">Accounts are created by your administrator.</p>
+          )}
+        </form>
+        <p className="mt-6 text-center text-2xs text-term-faint">Statistical estimates, not investment advice.</p>
       </div>
     </div>
   );
 }
 
-export { LoginPage as default };
+export { LoginPage as default, safeNext };

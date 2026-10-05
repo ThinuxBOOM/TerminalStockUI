@@ -17,6 +17,7 @@ from backend.api.main import create_app
 from backend.db.models import AuditLog, Base, Forecast, Instrument
 from backend.db.session import get_db, init_db
 from backend.observability.audit_verify import verify_chain, verify_rows
+from backend.tests.auth_helpers import inject_admin_auth
 
 
 def _fresh_db(tmp_path, name="audit.db"):
@@ -49,7 +50,7 @@ def _client_with_db(Session):
             db.close()
 
     app.dependency_overrides[get_db] = _override
-    return TestClient(app)
+    return TestClient(inject_admin_auth(app))
 
 
 # --- append + hash chain --------------------------------------------------------
